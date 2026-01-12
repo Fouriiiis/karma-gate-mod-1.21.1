@@ -28,8 +28,8 @@ public class NeuronSwarmerManager {
     private final Map<String, List<NeuronSwarmer>> swarmersByZone = new HashMap<>();
     
     // Configuration
-    private static final int SWARMERS_PER_ZONE = 1500;
-    private static final int SPAWN_BATCH_SIZE = 50;
+    private static final int SWARMERS_PER_ZONE = 600;
+    private static final int SPAWN_BATCH_SIZE = 90;
     private static final double PLAYER_CHECK_RANGE = 200.0; // Player must be within this range for swarmers to be active
     
     private final Random random = Random.create();
