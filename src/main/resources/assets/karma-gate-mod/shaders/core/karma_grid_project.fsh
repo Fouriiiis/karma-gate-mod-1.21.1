@@ -47,6 +47,18 @@ float hash11(float p) {
 }
 float saturate(float x) { return clamp(x, 0.0, 1.0); }
 
+// Deterministic unit random vector like Custom.RNV()
+vec2 rnv(float s) {
+    float a = hash11(s) * 6.28318530718;
+    return vec2(cos(a), sin(a));
+}
+
+// Clamp magnitude like Vector2.ClampMagnitude
+vec2 clampMag(vec2 v, float m) {
+    float l = length(v);
+    return (l > m) ? v * (m / max(l, 1e-6)) : v;
+}
+
 // Positive modulo for floats
 float pmod(float x, float m) { return mod(mod(x, m) + m, m); }
 
@@ -111,12 +123,17 @@ void main() {
     float zoneFade = 1.0 - smoothstep(borderBlocks, borderBlocks + fadeBlocks, inward);
     if (zoneFade <= 0.001) discard;
 
+    // Extra gradient fade toward the OUTER edge:
+    // keep the existing inward fade, but clamp the very edge to ~75% opacity.
+    const float edgeMin = 0.5;
+    float edgeFade = mix(edgeMin, 1.0, smoothstep(0.0, borderBlocks, inward));
+
     // ---- power flicker ----
     float power = saturate(uElectricPower);
     float flickerStep = floor(tTick * 0.10);
     float gate = step(hash11(flickerStep + 91.7), power);
     float flickerA = mix(0.18, 1.00, gate) * mix(0.85, 1.15, hash11(flickerStep + 169.7));
-    float baseOpacity = uOpacity * vColor.a * flickerA * zoneFade;
+    float baseOpacity = uOpacity * vColor.a * flickerA * zoneFade * edgeFade;
     if (baseOpacity < 0.01) discard;
 
     // ============================================================
@@ -201,7 +218,8 @@ void main() {
 
         if (alive > 0.5) {
             float shimmer = 0.55 + 0.45 * sin(tTick * (0.18 + 0.12 * baseHash2) + baseHash * 6.283185);
-            glyphCoreVisible = sampleGlyph(cellUV, glyphIndexCell, 0.10, 0.65, 0.92);
+            // Thinner glyphs: more padding + tighter threshold
+            glyphCoreVisible = sampleGlyph(cellUV, glyphIndexCell, 0.13, 0.78, 0.97);
             glyphA = glyphCoreVisible * baseOpacity * (0.55 + 0.75 * shimmer);
         }
     }
@@ -219,7 +237,8 @@ void main() {
 
     vec2 gScan = vec2(gxLoop, gRender.y);
 
-    float lineHalfW = 0.045;
+    // Thinner scan lines
+    float lineHalfW = 0.028;
     float driftBoost = mix(0.6, 1.0, effect);
 
     for (int i = 0; i < MAX_SCAN; i++) {
@@ -265,7 +284,8 @@ void main() {
     float scanSpeed = 0.05;
     float scanPos = pmod(tScan * scanSpeed, heightPx);
     float scanDist = ringDist(y, scanPos, heightPx);
-    float scanBandsA = (1.0 - smoothstep(0.1, 0.25, scanDist)) * 0.70;
+    // Thinner sweep band
+    float scanBandsA = (1.0 - smoothstep(0.06, 0.16, scanDist)) * 0.70;
 
     // ============================================================
     // Multiple cursors
@@ -317,7 +337,8 @@ void main() {
 
         vec2 lp = gCursor - curCell;
         float dEdge = min(min(lp.x, selSize - lp.x), min(lp.y, selSize - lp.y));
-        float th = 0.12;
+        // Thinner cursor outline
+        float th = 0.08;
         float outline = (1.0 - smoothstep(th, th + aa, dEdge)) * inRect;
 
         float vx0 = curCell.x;
@@ -330,7 +351,8 @@ void main() {
         float dy0 = abs(gCursor.y - hy0);
         float dy1 = abs(gCursor.y - hy1);
 
-        float crossW = 0.085;
+        // Thinner cursor cross lines
+        float crossW = 0.055;
         float vA = max(lineA(dx0, crossW, aa), lineA(dx1, crossW, aa));
         float hA = max(lineA(dy0, crossW, aa), lineA(dy1, crossW, aa));
         float crossA = max(vA, hA);
@@ -351,7 +373,7 @@ void main() {
     // ============================================================
     float cursorGlyphCore = 0.0;
     if (holeMaskMax > 0.0) {
-        cursorGlyphCore = sampleGlyph(cellUV, glyphIndexCell, 0.10, 0.65, 0.92);
+        cursorGlyphCore = sampleGlyph(cellUV, glyphIndexCell, 0.13, 0.78, 0.97);
     }
 
     // Visible glyphs outside cursor
@@ -411,7 +433,8 @@ void main() {
         float ringRad = max(0.0, spokeLen - ringInset);
 
         // Thickness grows on blink (helps the gear feel when filled)
-        float ringThickness = mix(0.22, 0.55, smoothstep(0.15, 1.0, circleBlink));
+        // Thinner ring
+        float ringThickness = mix(0.14, 0.38, smoothstep(0.15, 1.0, circleBlink));
 
         // Fill factor: when blinking, the circle becomes completely filled
         float fillFactor = smoothstep(0.28, 0.70, circleBlink);
@@ -432,7 +455,8 @@ void main() {
             float spokeDistLinear = spokeDistAngle * distToCenter * 3.14159265 / 180.0;
 
             // Spokes thicken on blink to create gear appearance
-            float spokeWidth = mix(0.06, 0.22, fillFactor);
+            // Thinner spokes
+            float spokeWidth = mix(0.04, 0.14, fillFactor);
             spokesA = 1.0 - smoothstep(spokeWidth, spokeWidth + fw, spokeDistLinear);
 
             // Mask spokes so the ring "draws on top" and blocks them (only tips outside ring remain)
@@ -519,7 +543,8 @@ void main() {
                 float fwL = max(fwidth(d), 0.02);
 
                 float blinkLine = max(uCircles[i].w, uCircles[j].w);
-                float w = mix(0.06, 0.14, pow(blinkLine, 1.5));
+                // Thinner connection lines
+                float w = mix(0.035, 0.085, pow(blinkLine, 1.5));
 
                 float lineCore = 1.0 - smoothstep(w, w + fwL, d);
                 float endFade = smoothstep(0.03, 0.14, h) * smoothstep(0.03, 0.14, 1.0 - h);
