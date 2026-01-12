@@ -6,8 +6,11 @@ import dev.fouriis.karmagate.client.gridproject.ProjectionZone;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.random.Random;
+import net.minecraft.world.World;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -80,7 +83,7 @@ public class NeuronSwarmerManager {
                 if (swarmers.size() < SWARMERS_PER_ZONE) {
                     int toSpawn = Math.min(SPAWN_BATCH_SIZE, SWARMERS_PER_ZONE - swarmers.size());
                     for (int i = 0; i < toSpawn; i++) {
-                        Vec3d spawnPos = getRandomPositionInZone(zone);
+                        Vec3d spawnPos = getRandomPositionInZone(zone, client.world);
                         swarmers.add(new NeuronSwarmer(zone.getName(), spawnPos));
                     }
                 }
@@ -167,12 +170,33 @@ public class NeuronSwarmerManager {
     /**
      * Gets a random position within a zone for spawning.
      */
-    private Vec3d getRandomPositionInZone(ProjectionZone zone) {
+    private Vec3d getRandomPositionInZone(ProjectionZone zone, World world) {
+    final int MAX_TRIES = 32;
+
+    for (int i = 0; i < MAX_TRIES; i++) {
         double x = zone.getMinX() + random.nextDouble() * (zone.getMaxX() - zone.getMinX());
         double y = zone.getMinY() + random.nextDouble() * (zone.getMaxY() - zone.getMinY());
         double z = zone.getMinZ() + random.nextDouble() * (zone.getMaxZ() - zone.getMinZ());
+
+        BlockPos bp = BlockPos.ofFloored(x, y, z);
+
+        // Require the sampled point to be in "air-ish" space and not inside any solid collision.
+        if (!world.getBlockState(bp).isAir()) continue;
+
+        // Also ensure the point isn't inside a collision shape (covers some non-air cases / shapes)
+        if (!world.isSpaceEmpty(null, new Box(x, y, z, x, y, z).expand(0.1))) continue;
+
         return new Vec3d(x, y, z);
     }
+
+    // Fallback: pick something guaranteed non-solid-ish near the top of the zone
+    double x = zone.getMinX() + random.nextDouble() * (zone.getMaxX() - zone.getMinX());
+    double z = zone.getMinZ() + random.nextDouble() * (zone.getMaxZ() - zone.getMinZ());
+    double y = zone.getMaxY() - 0.5;
+
+    return new Vec3d(x, y, z);
+}
+
     
     /**
      * Gets the count of swarmers in a zone.

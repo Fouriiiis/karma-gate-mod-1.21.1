@@ -47,6 +47,9 @@ float hash11(float p) {
 }
 float saturate(float x) { return clamp(x, 0.0, 1.0); }
 
+// Math constants
+const float PI = 3.14159265359;
+
 // Deterministic unit random vector like Custom.RNV()
 vec2 rnv(float s) {
     float a = hash11(s) * 6.28318530718;
@@ -102,6 +105,71 @@ float lineA(float dist, float halfW, float aa) {
     return 1.0 - smoothstep(halfW, halfW + aa, dist);
 }
 
+// ------------------------------------------------------------
+// Unbiased “wandering” grid offset (shader-safe, no state)
+//
+// The old drift used a fixed positive baseVel, which creates a
+// consistent diagonal bias depending on your UV orientation.
+// This replaces it with a symmetric, direction-changing random
+// walk approximation (bounded memory) + tiny zero-mean wobble.
+// ------------------------------------------------------------
+vec2 gridWanderOffset(float tTick, float anim, float effect) {
+    // Work in a slower time domain so it feels like RW’s projector
+    float t = tTick * (0.020 + 0.010 * saturate(anim - 1.0)); // ~ seconds-ish
+
+    // Segment duration: how often direction changes
+    float segDur = mix(0.85, 0.45, saturate(effect)); // higher effect -> more “busy”
+    float s = floor(t / segDur);
+    float f = fract(t / segDur);
+    // smoothstep-like easing
+    float u = f * f * (3.0 - 2.0 * f);
+
+    // Bounded-memory random walk: sum last N steps + partial current step
+    // (keeps it wandering without accumulating a long-term bias).
+    const int N = 14;
+
+    // Step sizing in "pixels" (later treated as px for snapping)
+    float baseStep = mix(0.55, 1.35, saturate(0.35 + 0.65 * effect));
+    float maxStep  = mix(1.35, 2.10, saturate(effect));
+
+    // Seed so two projectors don't perfectly sync if you reuse shader:
+    // uses zone center + radius (stable per-instance) to decorrelate.
+    float seed = uZoneCenterX * 0.17 + uZoneCenterZ * 0.23 + uZoneRadius * 0.31;
+
+    vec2 pos = vec2(0.0);
+
+    // Sum middle segments (stable history)
+    // We sum 1..N-1 here. The Nth step (oldest) is faded out, 
+    // and the 0th step (current) is faded in.
+    for (int i = 1; i < N; i++) {
+        float si = s - float(i);
+        float mag = mix(baseStep, maxStep, hash11(si * 1.7 + seed + 11.3));
+        vec2  dir = rnv(si * 3.1 + seed + 29.7);
+        pos += dir * mag;
+    }
+
+    // Current segment (fading in)
+    float mag0 = mix(baseStep, maxStep, hash11(s * 1.7 + seed + 11.3));
+    vec2  dir0 = rnv(s * 3.1 + seed + 29.7);
+    pos += dir0 * mag0 * u;
+
+    // Oldest segment (fading out) ensuring continuity
+    float sOld   = s - float(N);
+    float magOld = mix(baseStep, maxStep, hash11(sOld * 1.7 + seed + 11.3));
+    vec2  dirOld = rnv(sOld * 3.1 + seed + 29.7);
+    pos += dirOld * magOld * (1.0 - u);
+
+    // Add a very small, zero-mean wobble so it never feels “grid-perfect”
+    vec2 wobble =
+        vec2(0.45 * sin(tTick * 0.090 + seed) + 0.25 * sin(tTick * 0.173 + 1.7 + seed),
+             0.38 * cos(tTick * 0.081 + 0.6 * seed) + 0.20 * sin(tTick * 0.161 + 3.2 + seed));
+
+    // Scale wobble down; step motion is the primary driver
+    pos += wobble * 0.25;
+
+    return pos;
+}
+
 void main() {
     float tTick = (GameTime != 0.0) ? (GameTime * 24000.0) : uTime;
 
@@ -141,29 +209,38 @@ void main() {
     // ============================================================
     const float glyphScale = 1.0;
 
-    float uCont = vWorldUV.x;
-    vec2 gBase = vec2(uCont, vWorldPos.y);
+    // ---- compute perimeter length first ----
+    float perim = 8.0 * max(uZoneRadius, 1e-6);
+
+    // World-true perimeter coordinate (for grid)
+    vec2 relXZ = vec2(vWorldPos.x - uZoneCenterX, vWorldPos.z - uZoneCenterZ);
+    float ang = atan(relXZ.y, relXZ.x);          // [-PI, PI]
+    float u01_world = (ang + PI) / (2.0 * PI);   // [0,1)
+    float uContWorld = u01_world * perim;        // [0, perim)
+
+    // Mesh-authored perimeter coordinate (for circles)
+    // (heuristic: if it's normalized 0..1, scale by perim)
+    float uMesh = vWorldUV.x;
+    float uContMesh = (uMesh <= 1.01) ? (uMesh * perim) : uMesh;
+
+    vec2 gBase = vec2(uContWorld, vWorldPos.y);
     vec2 gScaled = gBase / glyphScale;
 
     const float cellPx = 1.0;
     const float snapPx = 2.0;
 
-    float perim = 8.0 * max(uZoneRadius, 1e-6);
     float perimScaled = perim / glyphScale;
     float perimCells = max(floor(perimScaled / cellPx + 0.5), 1.0);
 
-    vec2 baseVel = vec2(0.029, 0.021) * (0.85 + 0.15 * anim) * anim;
-
-    vec2 wobble =
-        vec2(0.1 * sin(tTick * 0.090) + 0.05 * sin(tTick * 0.173 + 1.7),
-             0.08 * cos(tTick * 0.081) + 0.04 * sin(tTick * 0.161 + 3.2));
-
     // ============================================================
-    // Requested: glyph grid drift should be MORE aggressive
-    // Previously: 3.0, now 6.0 (2× faster than before, 6× original)
+    // AUTHENTIC wandering drift (unbiased)
+    // - No constant diagonal base velocity.
+    // - Symmetric random-walk-like motion + snap/wrap behavior preserved.
     // ============================================================
+    // Previously: const float DRIFT_MULT = 6.0; vec2 scrollOffset = DRIFT_MULT * (tTick * baseVel + wobble);
+    // Now: unbiased wander offset in "px space" and then scaled to taste.
     const float DRIFT_MULT = 6.0;
-    vec2 scrollOffset = DRIFT_MULT * (tTick * baseVel + wobble);
+    vec2 scrollOffset = DRIFT_MULT * gridWanderOffset(tTick, anim, effect);
 
     vec2 k = floor((scrollOffset + vec2(cellPx)) / snapPx);
     vec2 gridPosPx = scrollOffset - k * snapPx;
@@ -393,15 +470,17 @@ void main() {
     float circleLinesA = 0.0;    // connection lines between circles
     
     // Current fragment position in perimeter coordinate space
-    // gBase.x = perimeter U from mesh, gBase.y = world Y
-    vec2 fragPosPerim = gBase; // (uCont, worldY)
+    // use world-true perimeter coordinate for circles (prevents fanning on top/bottom)
+    vec2 fragPosPerim = vec2(uContWorld, vWorldPos.y);
     
     for (int ci = 0; ci < MAX_CIRCLES; ci++) {
         if (ci >= uCircleCount) break;
 
         // Unpack circle data
         vec4 circleData = uCircles[ci];
-        float circleU = circleData.x;      // perimeter U coord
+        // circleU is now directly in perimeter coordinate space [0, 8*radius)
+        // computed in Java using angle-based projection matching shader's atan calculation
+        float circleU = circleData.x;
         float circleY = circleData.y;      // world Y
         float circleRad = circleData.z;    // base radius
         float circleBlink = clamp(circleData.w, 0.0, 1.0);
@@ -411,8 +490,8 @@ void main() {
         float spokesF = max(0.0, extra.y);
         float alphaScale = extra.w;
 
-        // Distance in (perimeterU, worldY) space
-        float du = fragPosPerim.x - circleU;
+        // Distance in (perimeterU, worldY) space (wrap-aware)
+        float du = shortestDelta(circleU, fragPosPerim.x, perim);
         float dy = fragPosPerim.y - circleY;
         float distToCenter = length(vec2(du, dy));
         float fw = fwidth(distToCenter) + 1e-6;
@@ -579,26 +658,38 @@ void main() {
     float outA = 0.0;
     vec3 outRGB = vec3(0.0);
 
+    // ----------------------------
+    // Circles should sit BEHIND the neuron/grid layer
+    // ----------------------------
+
+    // Build a foreground mask from everything that's "neurons/grid" (already in final alpha space)
+    float foreA =
+        scanBandsFinal +
+        scanLinesFinal +
+        crossFinalA +
+        glyphA_outside +
+        boxFillA +
+        boxOutlineA +
+        circleLinesA;
+
+    // Normalize to 0..1-ish so it can be used as an occlusion mask
+    float foreMask = saturate(foreA / max(baseOpacity, 1e-6));
+
+    // Add circles first as a background layer, but dim them where foreground is present
+    float circlesBehindA = circlesA * (1.0 - foreMask);
+
+    outRGB += baseCyan * circlesBehindA;  outA = max(outA, circlesBehindA);
+
+    // Now draw the neuron/grid content on top (same as before)
     outRGB += baseCyan * scanBandsFinal;  outA = max(outA, scanBandsFinal);
     outRGB += baseCyan * scanLinesFinal;  outA = max(outA, scanLinesFinal);
-
     outRGB += baseCyan * crossFinalA;     outA = max(outA, crossFinalA);
-
     outRGB += glyphCol  * glyphA_outside; outA = max(outA, glyphA_outside);
-
     outRGB += baseCyan * boxFillA;        outA = max(outA, boxFillA);
     outRGB += baseCyan * boxOutlineA;     outA = max(outA, boxOutlineA);
 
-    // Connection lines between circles
+    // Connection lines between circles are part of the foreground (keep them above circles)
     outRGB += baseCyan * circleLinesA;    outA = max(outA, circleLinesA);
-
-    // Circles occlude anything drawn underneath (spokes/glyphs/lines) under the ring/fill
-    outRGB *= (1.0 - circlesOccludeMask);
-    outA   *= (1.0 - circlesOccludeMask);
-
-    
-    // Add projected circles (additive blend with cyan color)
-    outRGB += baseCyan * circlesA;        outA = max(outA, circlesA);
 
     if (outA <= 0.001) discard;
 
@@ -618,3 +709,5 @@ void main() {
 
     fragColor = vec4(outRGB * vColor.rgb, outA);
 }
+
+

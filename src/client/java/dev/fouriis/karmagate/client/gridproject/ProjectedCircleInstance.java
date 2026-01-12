@@ -109,46 +109,65 @@ public class ProjectedCircleInstance {
             double neuronY = owner.position.y;
             double neuronZ = owner.position.z;
             
-            // Direction from camera to neuron
+            // Direction from camera to neuron (ray direction)
             double dirX = neuronX - cameraX;
             double dirY = neuronY - cameraY;
             double dirZ = neuronZ - cameraZ;
+            
+            // Distance from camera to neuron
+            double distToNeuron = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
             
             // Normalize XZ direction (we project onto vertical walls)
             double lenXZ = Math.sqrt(dirX * dirX + dirZ * dirZ);
             if (lenXZ < 0.001) {
                 // Camera directly above/below neuron, use neuron position directly
-                centerU = ProjectionMath.computeSquarePerimeterU(
-                    (float) neuronX,
-                    (float) neuronZ,
-                    zone.getCenterXf(),
-                    zone.getCenterZf(),
-                    zone.getRadiusf()
-                );
+                // Use angle-based perimeter U to match shader's atan-based coordinate
+                centerU = computeAnglePerimeterU(neuronX, neuronZ, zone);
                 centerY = (float) neuronY;
             } else {
                 // Find intersection with zone boundary walls
                 // Zone walls are at minX, maxX, minZ, maxZ
-                float minX = zone.getMinX();
-                float maxX = zone.getMaxX() + 1;
-                float minZ = zone.getMinZ();
-                float maxZ = zone.getMaxZ() + 1;
+                double minX = zone.getMinX();
+                double maxX = zone.getMaxX() + 1;
+                double minZ = zone.getMinZ();
+                double maxZ = zone.getMaxZ() + 1;
                 
                 // Compute t for each wall intersection
-                double tMinX = (dirX != 0) ? (minX - cameraX) / dirX : Double.MAX_VALUE;
-                double tMaxX = (dirX != 0) ? (maxX - cameraX) / dirX : Double.MAX_VALUE;
-                double tMinZ = (dirZ != 0) ? (minZ - cameraZ) / dirZ : Double.MAX_VALUE;
-                double tMaxZ = (dirZ != 0) ? (maxZ - cameraZ) / dirZ : Double.MAX_VALUE;
-                
-                // We want intersections beyond the neuron (t > 1 means past the neuron)
-                // Find the closest valid intersection that is beyond the neuron
-                double tNeuron = 1.0; // t=1 is at the neuron position
+                // Only consider walls in the direction the ray is traveling (positive t beyond neuron)
                 double bestT = Double.MAX_VALUE;
                 
-                if (tMinX > tNeuron && tMinX < bestT) bestT = tMinX;
-                if (tMaxX > tNeuron && tMaxX < bestT) bestT = tMaxX;
-                if (tMinZ > tNeuron && tMinZ < bestT) bestT = tMinZ;
-                if (tMaxZ > tNeuron && tMaxZ < bestT) bestT = tMaxZ;
+                // minX wall (left wall, X = minX)
+                if (dirX < -0.001) { // Ray going toward -X
+                    double t = (minX - cameraX) / dirX;
+                    if (t > 1.0 && t < bestT) {
+                        double hitZ = cameraZ + dirZ * t;
+                        if (hitZ >= minZ && hitZ <= maxZ) bestT = t;
+                    }
+                }
+                // maxX wall (right wall, X = maxX)
+                if (dirX > 0.001) { // Ray going toward +X
+                    double t = (maxX - cameraX) / dirX;
+                    if (t > 1.0 && t < bestT) {
+                        double hitZ = cameraZ + dirZ * t;
+                        if (hitZ >= minZ && hitZ <= maxZ) bestT = t;
+                    }
+                }
+                // minZ wall (front wall, Z = minZ)
+                if (dirZ < -0.001) { // Ray going toward -Z
+                    double t = (minZ - cameraZ) / dirZ;
+                    if (t > 1.0 && t < bestT) {
+                        double hitX = cameraX + dirX * t;
+                        if (hitX >= minX && hitX <= maxX) bestT = t;
+                    }
+                }
+                // maxZ wall (back wall, Z = maxZ)
+                if (dirZ > 0.001) { // Ray going toward +Z
+                    double t = (maxZ - cameraZ) / dirZ;
+                    if (t > 1.0 && t < bestT) {
+                        double hitX = cameraX + dirX * t;
+                        if (hitX >= minX && hitX <= maxX) bestT = t;
+                    }
+                }
                 
                 if (bestT < Double.MAX_VALUE - 1) {
                     // Compute wall intersection point
@@ -156,23 +175,17 @@ public class ProjectedCircleInstance {
                     double wallY = cameraY + dirY * bestT;
                     double wallZ = cameraZ + dirZ * bestT;
                     
-                    centerU = ProjectionMath.computeSquarePerimeterU(
-                        (float) wallX,
-                        (float) wallZ,
-                        zone.getCenterXf(),
-                        zone.getCenterZf(),
-                        zone.getRadiusf()
-                    );
+                    // Use angle-based perimeter U to match shader's atan-based coordinate
+                    centerU = computeAnglePerimeterU(wallX, wallZ, zone);
                     centerY = (float) wallY;
                 } else {
-                    // Fallback to neuron position
-                    centerU = ProjectionMath.computeSquarePerimeterU(
-                        (float) neuronX,
-                        (float) neuronZ,
-                        zone.getCenterXf(),
-                        zone.getCenterZf(),
-                        zone.getRadiusf()
-                    );
+                    // Fallback: no wall hit, use neuron position projected radially outward
+                    // Scale the direction to hit the zone boundary
+                    double scale = zone.getRadius() / lenXZ;
+                    double projX = zone.getCenterX() + (dirX / lenXZ) * zone.getRadius();
+                    double projZ = zone.getCenterZ() + (dirZ / lenXZ) * zone.getRadius();
+                    
+                    centerU = computeAnglePerimeterU(projX, projZ, zone);
                     centerY = (float) neuronY;
                 }
             }
@@ -285,5 +298,34 @@ public class ProjectedCircleInstance {
     
     private static float lerp(float a, float b, float t) {
         return a + (b - a) * t;
+    }
+    
+    /**
+     * Computes perimeter U coordinate using angle-based projection.
+     * This matches the shader's atan(relXZ.y, relXZ.x) calculation.
+     * 
+     * @param worldX World X coordinate
+     * @param worldZ World Z coordinate
+     * @param zone The projection zone
+     * @return Perimeter U in range [0, 8*radius)
+     */
+    private static float computeAnglePerimeterU(double worldX, double worldZ, ProjectionZone zone) {
+        double centerX = zone.getCenterX();
+        double centerZ = zone.getCenterZ();
+        double radius = zone.getRadius();
+        float perim = (float) (8.0 * radius);
+        
+        // Compute relative position
+        double relX = worldX - centerX;
+        double relZ = worldZ - centerZ;
+        
+        // Use atan2 to get angle, matching shader: atan(relXZ.y, relXZ.x) where y=Z, x=X
+        double ang = Math.atan2(relZ, relX); // Returns [-PI, PI]
+        
+        // Convert to [0, 1) range, matching shader: (ang + PI) / (2.0 * PI)
+        double u01 = (ang + Math.PI) / (2.0 * Math.PI);
+        
+        // Scale to perimeter length
+        return (float) (u01 * perim);
     }
 }
