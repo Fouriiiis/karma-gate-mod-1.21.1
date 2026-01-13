@@ -11,29 +11,46 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Represents a single neuron swarmer entity with flocking behavior.
- * Based on Rain World's SSOracleSwarmer implementation.
+ * Neuron swarmer with Rain World SSOracleSwarmer-style flocking.
+ *
+ * Key correctness points vs RW:
+ *  - Behavior adoption must be REFERENCE-based (shared Behavior object), not field copy.
+ *  - RW units are pixels; MC units are blocks. We map 16px = 1 block by default.
+ *  - Only the Behavior leader decays behavior life each tick (RW behavior.leader).
  */
 public class NeuronSwarmer {
 
-    /**
-     * Movement modes mirroring Rain World's SSOracleSwarmer.
-     */
     public enum MovementMode {
         Swarm,
         SuckleMycelia,
         FollowDijkstra
     }
 
+    // --- RW scale mapping ---
+    private static final double PX_PER_BLOCK = 16.0;
+    private static final double RW = 1.0 / PX_PER_BLOCK; // pixels -> blocks
+
+    // RW constants mapped to blocks
+    private static final double INTERACTION_RANGE = 400.0 * RW; // 400px
+    private static final double INTERACTION_RANGE_SQ = INTERACTION_RANGE * INTERACTION_RANGE;
+
+    // Velocity integration in RW: vel += travelDirection * 0.8 (px/frame)
+    // Convert to blocks/tick: 0.8px -> 0.8/16 blocks
+    private static final double RW_ACCEL = 0.8 * RW;
+
+    // Damping map in RW: LerpMap(|vel|, 0.2, 3.0, 1.0, 0.9) in px
+    private static final double RW_DAMP_IN_MIN = 0.2 * RW;
+    private static final double RW_DAMP_IN_MAX = 3.0 * RW;
+
+    // Work budget like RW (stops at 30 interacting neighbors)
+    private static final int MAX_INTERACTING_NEIGHBORS = 30;
+
     // Position and physics
     public Vec3d position;
     public Vec3d lastPosition;
     public Vec3d velocity;
 
-    /**
-     * The "desired" movement direction for this tick (Rain World uses travelDirection).
-     * This is normalized and then applied to velocity.
-     */
+    // RW: travelDirection
     public Vec3d travelDirection;
 
     public Vec3d direction;
@@ -41,28 +58,20 @@ public class NeuronSwarmer {
     public Vec3d lazyDirection;
     public Vec3d lastLazyDirection;
 
-    // Rotation for visual effect
+    // Rotation
     public float rotation;
     public float lastRotation;
-    public float revolveSpeed;
+    public float revolveSpeed; // RW: swarmer field (lerps toward behavior.revolveSpeed)
 
-    // Behavior parameters (flattened version of SSOracleSwarmer.Behavior)
+    // RW: swarmer torque field (lerps toward behavior.torque neighborhood average)
     private float torque;
-    public float idealDistance;
-    public float aimInFront;
-    public float randomVibrations;
-    public float behaviorLife;
-    public float behaviorDeathSpeed;
-    public boolean suckle;
 
-    // Color (hue and saturation encoded)
+    // Color is per-swarmer and lerped toward behavior color
     public float colorX;
     public float colorY;
-    public float targetColorX;
-    public float targetColorY;
 
-    // Dominance for behavior propagation
-    private float dominance;
+    // Shared behavior object (THIS is critical)
+    public Behavior currentBehavior;
 
     // Zone reference
     private final String zoneName;
@@ -71,123 +80,142 @@ public class NeuronSwarmer {
     public int age = 0;
     public boolean markedForRemoval = false;
 
-    // ---- Mode state (SSOracleSwarmer parity) ----
+    // ---- Mode state ----
     public MovementMode mode = MovementMode.Swarm;
 
-    // “Mycelium” proxy target
     private BlockPos suckleTarget;
     private boolean attachedToSuckle;
     private int onlySwarm = 0;
 
-    // “Exit” target for FollowDijkstra
     private BlockPos dijkstraTarget;
 
-    // “stuck” detection similar to SSOracleSwarmer.stuckList
     private final List<Vec3d> stuckList = new ArrayList<>();
     private int stuckListCounter = 10;
 
-    // Work spreading / throttling like listBreakPoint in the original
     private int listBreakPoint = 0;
 
     private static final Random RANDOM = Random.create();
+
+    /**
+     * RW Behavior struct equivalent.
+     * IMPORTANT: This is meant to be shared by reference among swarmers.
+     */
+    public static final class Behavior {
+        private final float dom;
+
+        public final float idealDistance;     // blocks
+        public final float aimInFront;        // blocks
+        public final float torque;            // [-1..1]
+        public final float randomVibrations;  // 0..1-ish
+        public final float revolveSpeed;      // tendency
+
+        public float life;
+        public final float deathSpeed;
+
+        public final NeuronSwarmer leader;
+
+        public float colorX;
+        public float colorY;
+
+        public final boolean suckle;
+
+        public Behavior(NeuronSwarmer leader) {
+            this.leader = leader;
+
+            dom = RANDOM.nextFloat();
+
+            // RW: idealDistance = Lerp(10,300, r^2) px
+            // Convert to blocks:
+            idealDistance = (float) (lerp(10f, 300f, RANDOM.nextFloat() * RANDOM.nextFloat()) * RW);
+
+            // RW:
+            life = 1f;
+            deathSpeed = 1f / lerp(40f, 220f, RANDOM.nextFloat());
+
+            // RW: color = (rand{0,0.5,1}, sat either 0 or 1 25% of time)
+            colorX = (float) (RANDOM.nextInt(3)) / 2f;
+            colorY = RANDOM.nextFloat() < 0.75f ? 0f : 1f;
+
+            // RW: aimInFront = Lerp(40,300) px -> blocks
+            aimInFront = (float) (lerp(40f, 300f, RANDOM.nextFloat()) * RW);
+
+            // RW: torque = 50% 0 else Lerp(-1,1)
+            torque = (RANDOM.nextFloat() < 0.5f) ? 0f : lerp(-1f, 1f, RANDOM.nextFloat());
+
+            // RW: randomVibrations = r^3
+            float rv = RANDOM.nextFloat();
+            randomVibrations = rv * rv * rv;
+
+            // RW: revolveSpeed = (+/-) / Lerp(15,65)
+            revolveSpeed = (RANDOM.nextFloat() < 0.5f ? -1f : 1f) / lerp(15f, 65f, RANDOM.nextFloat());
+
+            // RW: suckle chance 1/6
+            suckle = RANDOM.nextFloat() < (1f / 6f);
+        }
+
+        public boolean isDead() {
+            return life <= 0f;
+        }
+
+        public float dominance() {
+            if (isDead()) return -1f;
+            return dom * (float) Math.pow(life, 0.25);
+        }
+    }
 
     public NeuronSwarmer(String zoneName, Vec3d spawnPosition) {
         this.zoneName = zoneName;
         this.position = spawnPosition;
         this.lastPosition = spawnPosition;
 
-        // Random initial direction
-        this.direction = randomNormalizedVector();
+        this.travelDirection = randomNormalizedVector();
+        this.direction = travelDirection;
+
         this.lastDirection = direction;
         this.lazyDirection = direction;
         this.lastLazyDirection = direction;
 
-        // Random initial velocity
-        this.velocity = direction.multiply(0.1);
+        this.velocity = direction.multiply(0.0); // RW starts calm
 
-        // Rain World keeps a separate travelDirection and copies it into direction each tick.
-        this.travelDirection = direction;
+        // Shared behavior object owned by this swarmer initially
+        this.currentBehavior = new Behavior(this);
 
-        // Initialize behavior
-        initNewBehavior();
+        // Swarmers start with behavior color
+        this.colorX = currentBehavior.colorX;
+        this.colorY = currentBehavior.colorY;
 
-        // Initial rotation
+        // Start torque/revolve close to behavior tendency
+        this.torque = currentBehavior.torque;
+        this.revolveSpeed = currentBehavior.revolveSpeed;
+
         this.rotation = 0.25f;
         this.lastRotation = rotation;
     }
 
-    /**
-     * Initialize a new random behavior pattern.
-     */
-    public void initNewBehavior() {
-        this.dominance = RANDOM.nextFloat();
-        this.idealDistance = lerp(10f, 300f, RANDOM.nextFloat() * RANDOM.nextFloat());
-        this.behaviorLife = 1f;
-        this.behaviorDeathSpeed = 1f / lerp(40f, 220f, RANDOM.nextFloat());
-
-        // Color: x = hue variant (0, 0.5, 1), y = saturation
-        this.targetColorX = (float) RANDOM.nextInt(3) / 2f;
-        this.targetColorY = RANDOM.nextFloat() < 0.75f ? 0f : 1f;
-        if (colorX == 0 && colorY == 0) {
-            colorX = targetColorX;
-            colorY = targetColorY;
-        }
-
-        this.aimInFront = lerp(40f, 300f, RANDOM.nextFloat());
-        this.torque = RANDOM.nextFloat() < 0.5f ? 0f : lerp(-1f, 1f, RANDOM.nextFloat());
-        this.randomVibrations = RANDOM.nextFloat() * RANDOM.nextFloat() * RANDOM.nextFloat();
-        this.revolveSpeed = (RANDOM.nextFloat() < 0.5f ? -1f : 1f) / lerp(15f, 65f, RANDOM.nextFloat());
-        this.suckle = RANDOM.nextFloat() < 1f / 6f;
-    }
-
-    /**
-     * Returns true if this behavior has expired.
-     */
-    public boolean isBehaviorDead() {
-        return behaviorLife <= 0f;
-    }
-
-    /**
-     * Returns the effective dominance of this swarmer's behavior.
-     */
-    public float getDominance() {
-        if (isBehaviorDead()) return -1f;
-        return dominance * (float) Math.pow(behaviorLife, 0.25);
-    }
-
-    /**
-     * Main update tick for this swarmer.
-     */
     public void tick(List<NeuronSwarmer> otherSwarmers, Vec3d zoneMin, Vec3d zoneMax, ClientWorld world) {
         age++;
 
-        // Store last values
         lastPosition = position;
         lastDirection = direction;
         lastLazyDirection = lazyDirection;
         lastRotation = rotation;
 
-        // Update rotation
         rotation += revolveSpeed;
 
-        // Update lazy direction (smooth interpolation)
+        // RW: lazyDirection is a smoothed direction (visual)
         lazyDirection = slerp(lazyDirection, direction, 0.06);
 
-        // Rain World sets direction = travelDirection before computing movement.
+        // RW: direction = travelDirection at start of behavior
         direction = travelDirection;
 
-        // Per-mode movement logic
         if (mode == MovementMode.Swarm) {
             swarmBehavior(otherSwarmers, world);
 
             if (onlySwarm > 0) {
                 onlySwarm--;
-            } else if (suckle && RANDOM.nextFloat() < 0.10f && world != null) {
-                // Pick a "mycelium" proxy: a random solid block with line-of-sight
-                // (and avoid multiple swarmers targeting the same block, like the original).
+            } else if (currentBehavior.suckle && RANDOM.nextFloat() < 0.10f && world != null) {
                 tryStartSuckle(otherSwarmers, world, zoneMin, zoneMax);
             } else {
-                // Stuck detection (near terrain)
                 if (isNearSolid(world)) {
                     if (stuckListCounter > 0) {
                         stuckListCounter--;
@@ -199,7 +227,6 @@ public class NeuronSwarmer {
                         stuckListCounter = 80;
                     }
 
-                    // If we seem stuck, occasionally enter FollowDijkstra.
                     if (RANDOM.nextFloat() < 0.025f && stuckList.size() > 1) {
                         Vec3d oldest = stuckList.get(stuckList.size() - 1);
                         if (position.squaredDistanceTo(oldest) < (6.0 * 6.0)) {
@@ -214,240 +241,213 @@ public class NeuronSwarmer {
             updateFollowDijkstra(world);
         }
 
-        // Apply travelDirection to velocity (closer to Rain World's integration)
-        // original: vel += travelDirection * 0.8; vel *= LerpMap(|vel|)
-        velocity = velocity.add(travelDirection.multiply(0.08));
+        // RW integration
+        velocity = velocity.add(travelDirection.multiply(RW_ACCEL));
         double spd = velocity.length();
-        double damp = lerpMap(spd, 0.2, 3.0, 1.0, 0.90);
+        double damp = lerpMap(spd, RW_DAMP_IN_MIN, RW_DAMP_IN_MAX, 1.0, 0.90);
         velocity = velocity.multiply(damp);
 
-        // Clamp to avoid runaway (Minecraft scale is large vs RW pixels)
-        double maxSpeed = 0.55;
-        if (spd > maxSpeed) {
-            velocity = velocity.normalize().multiply(maxSpeed);
-        }
-
-        // Check block collisions and adjust velocity before applying
         if (world != null) {
             handleBlockCollisions(world);
         }
 
-        // Integrate position
         position = position.add(velocity);
 
-        // Update direction based on velocity (RW: direction is travelDirection; here we keep both coherent)
-        if (velocity.lengthSquared() > 0.0001) {
+        if (velocity.lengthSquared() > 1e-8) {
             travelDirection = velocity.normalize();
             direction = travelDirection;
         }
 
-        // Boundary avoidance - stay within zone (analogue for RW terrain avoidance / aimap)
+        // Zone bounds clamp (kept from your version)
         double margin = 10.0;
-
-        // Push back from boundaries
         Vec3d boundaryPush = Vec3d.ZERO;
-        if (position.x < zoneMin.x + margin) {
-            boundaryPush = boundaryPush.add(1, 0, 0);
-        } else if (position.x > zoneMax.x - margin) {
-            boundaryPush = boundaryPush.add(-1, 0, 0);
-        }
-        if (position.y < zoneMin.y + margin) {
-            boundaryPush = boundaryPush.add(0, 1, 0);
-        } else if (position.y > zoneMax.y - margin) {
-            boundaryPush = boundaryPush.add(0, -1, 0);
-        }
-        if (position.z < zoneMin.z + margin) {
-            boundaryPush = boundaryPush.add(0, 0, 1);
-        } else if (position.z > zoneMax.z - margin) {
-            boundaryPush = boundaryPush.add(0, 0, -1);
-        }
+        if (position.x < zoneMin.x + margin) boundaryPush = boundaryPush.add(1, 0, 0);
+        else if (position.x > zoneMax.x - margin) boundaryPush = boundaryPush.add(-1, 0, 0);
+
+        if (position.y < zoneMin.y + margin) boundaryPush = boundaryPush.add(0, 1, 0);
+        else if (position.y > zoneMax.y - margin) boundaryPush = boundaryPush.add(0, -1, 0);
+
+        if (position.z < zoneMin.z + margin) boundaryPush = boundaryPush.add(0, 0, 1);
+        else if (position.z > zoneMax.z - margin) boundaryPush = boundaryPush.add(0, 0, -1);
 
         if (boundaryPush.lengthSquared() > 0) {
             velocity = velocity.add(boundaryPush.normalize().multiply(0.15));
         }
 
-        // Clamp to zone bounds
         position = new Vec3d(
                 clamp(position.x, zoneMin.x + 1, zoneMax.x - 1),
                 clamp(position.y, zoneMin.y + 1, zoneMax.y - 1),
                 clamp(position.z, zoneMin.z + 1, zoneMax.z - 1)
         );
 
-        // Final collision check - push out of any solid blocks
         if (world != null) {
             BlockPos currentBlock = BlockPos.ofFloored(position);
             if (isBlockSolid(world, currentBlock)) {
-                // We're inside a solid block, revert to last position
                 position = lastPosition;
-                velocity = velocity.multiply(-0.5); // Bounce back
+                velocity = velocity.multiply(-0.5);
             }
         }
 
-        // Decay behavior life (rough parity with SSOracleSwarmer leader ticking down)
-        if (!isBehaviorDead()) {
-            behaviorLife -= behaviorDeathSpeed;
-        }
+        // RW behavior lifetime logic:
+        // - if dead: create new behavior, 75% chance to keep previous color
+        // - else: only leader decays life
+        if (currentBehavior.isDead()) {
+            float oldCX = currentBehavior.colorX;
+            float oldCY = currentBehavior.colorY;
 
-        // If behavior died, start a new one
-        if (isBehaviorDead()) {
-            float oldColorX = targetColorX;
-            initNewBehavior();
-            // 75% chance to keep previous color
-            if (RANDOM.nextFloat() < 0.75f) {
-                targetColorX = oldColorX;
+            currentBehavior = new Behavior(this);
+            if (RANDOM.nextFloat() > 0.25f) {
+                currentBehavior.colorX = oldCX;
+                currentBehavior.colorY = oldCY;
             }
+        } else if (currentBehavior.leader == this) {
+            currentBehavior.life -= currentBehavior.deathSpeed;
         }
 
-        // Smoothly interpolate color
-        colorX = lerp(colorX, targetColorX, 0.05f);
-        colorY = lerp(colorY, targetColorY, 0.05f);
+        // Drift swarmer color toward behavior color
+        colorX = lerp(colorX, currentBehavior.colorX, 0.05f);
+        colorY = lerp(colorY, currentBehavior.colorY, 0.05f);
     }
 
     /**
-     * Swarm behavior tuned to be closer to Rain World's SSOracleSwarmer.
+     * Near line-for-line port of SSOracleSwarmer.SwarmBehavior (but in 3D).
      */
     private void swarmBehavior(List<NeuronSwarmer> otherSwarmers, ClientWorld world) {
-        // Try to stay close to Rain World's implementation. Differences:
-        // - 3D space instead of 2D
-        // - No aimap / terrain proximity map; we approximate with local solidity sampling.
+        Vec3d centroidAccum = Vec3d.ZERO;
+        float num = 0f;
 
-        final double INTERACTION_RANGE = 16.0; // RW uses 400px; this maps better to Minecraft blocks
+        float torqueSum = currentBehavior.torque;
+        float revolveSum = currentBehavior.revolveSpeed;
 
-        Vec3d weightedNeighborPos = Vec3d.ZERO;
-        float weightSum = 0f;
-        float torqueSum = torque;
-        float revolveSum = revolveSpeed;
+        // Color averaging for close neighbors
+        float colAccumX = 0f;
+        float colAccumY = 0f;
+        float colW = 0f;
 
-        // "close" color blending similar to InverseLerp(0.9,1,num8)
-        Vec3d colorSum = Vec3d.ZERO; // use (x,y,0)
-        float colorW = 0f;
+        // Rotation syncing (optional; kept for parity)
+        float rotAccum = 0f;
 
-        float targetTorque = torque;
-        float targetRevolve = revolveSpeed;
+        int num6 = 0;
+        int breakAt = -1;
 
-        int processed = 0;
-        int breakIndex = -1;
-
-        // Spread work over frames like SSOracleSwarmer.listBreakPoint
         int start = Math.max(0, Math.min(listBreakPoint, otherSwarmers.size()));
-        for (int idx = start; idx < otherSwarmers.size(); idx++) {
-            NeuronSwarmer other = otherSwarmers.get(idx);
+        for (int i = start; i < otherSwarmers.size(); i++) {
+            NeuronSwarmer other = otherSwarmers.get(i);
             if (other == this || other.markedForRemoval) continue;
             if (other.mode == MovementMode.SuckleMycelia) continue;
 
-            double dist = position.distanceTo(other.position);
-            if (dist < INTERACTION_RANGE && dist > 1e-6) {
-                float w = (float) inverseLerp(INTERACTION_RANGE, 0.0, dist);
+            double d2 = position.squaredDistanceTo(other.position);
+            if (d2 < INTERACTION_RANGE_SQ) {
+                double dist = Math.sqrt(Math.max(d2, 1e-12));
 
-                // Weighted centroid / parameters
-                weightedNeighborPos = weightedNeighborPos.add(other.position.multiply(w));
-                torqueSum += other.torque * w;
-                revolveSum += other.revolveSpeed * w;
-                weightSum += w;
+                // RW: num8 = InverseLerp(400,0,dist)
+                float num8 = (float) inverseLerp(INTERACTION_RANGE, 0.0, dist);
 
-                // Close-range color averaging
-                float cw = (float) inverseLerp(0.90, 1.0, w);
-                if (cw > 0f) {
-                    colorSum = colorSum.add(new Vec3d(other.colorX, other.colorY, 0).multiply(cw));
-                    colorW += cw;
+                centroidAccum = centroidAccum.add(other.position.multiply(num8));
+                torqueSum += other.torque * num8;
+                revolveSum += other.revolveSpeed * num8;
+
+                rotAccum += (other.rotation - (float) Math.floor(other.rotation)) * num8;
+
+                num += num8;
+
+                // RW: vector2 += other.color * InverseLerp(0.9,1,num8)
+                float closeW = (float) inverseLerp(0.90, 1.0, num8);
+                if (closeW > 0f) {
+                    colAccumX += other.colorX * closeW;
+                    colAccumY += other.colorY * closeW;
+                    colW += closeW;
                 }
 
-                // Steering toward neighbors + aimInFront prediction
-                Vec3d predicted = other.position.add(other.travelDirection.multiply(aimInFront * w * 0.02));
+                // RW: travelDirection += (otherPos + otherDir*(aimInFront*num8) - pos).normalized*(num8*0.01)
+                Vec3d predicted = other.position.add(other.travelDirection.multiply(currentBehavior.aimInFront * num8));
                 Vec3d toward = predicted.subtract(position);
-                if (toward.lengthSquared() > 1e-6) {
-                    travelDirection = travelDirection.add(toward.normalize().multiply(w * 0.01));
+                if (toward.lengthSquared() > 1e-12) {
+                    travelDirection = travelDirection.add(toward.normalize().multiply(num8 * 0.01));
                 }
 
-                // Separation based on idealDistance (RW: InverseLerp(idealDistance,0,dist)*0.1)
-                float sepW = (float) inverseLerp(idealDistance, 0.0, dist);
+                // RW: travelDirection += (pos - otherPos).normalized*(InverseLerp(idealDistance,0,dist)*0.1)
+                float sepW = (float) inverseLerp(currentBehavior.idealDistance, 0.0, dist);
                 if (sepW > 0f) {
                     Vec3d away = position.subtract(other.position);
-                    if (away.lengthSquared() > 1e-6) {
-                        travelDirection = travelDirection.add(away.normalize().multiply(sepW * 0.10));
+                    if (away.lengthSquared() > 1e-12) {
+                        travelDirection = travelDirection.add(away.normalize().multiply(sepW * 0.1));
                     }
                 }
 
-                // Dominance-based behavior adoption (RW uses pow(w,4))
-                float otherDom = other.getDominance();
-                float myDom = getDominance();
-                if (myDom < otherDom * (float) Math.pow(w, 4.0)) {
-                    adoptBehaviorFrom(other);
+                // RW: if (myDom < otherDom * pow(num8,4)) currentBehavior = other.currentBehavior;
+                float myDom = currentBehavior.dominance();
+                float otherDom = other.currentBehavior.dominance();
+                if (myDom < otherDom * (float) Math.pow(num8, 4.0)) {
+                    currentBehavior = other.currentBehavior; // <-- REFERENCE SHARE (critical)
                 }
 
-                processed++;
-                if (processed > 30) {
-                    breakIndex = idx;
+                num6++;
+                if (num6 > MAX_INTERACTING_NEIGHBORS) {
+                    breakAt = i;
                     break;
                 }
             }
         }
 
-        listBreakPoint = (breakIndex >= 0) ? (breakIndex + 1) : 0;
+        listBreakPoint = breakAt + 1; // RW: num7 + 1 (num7=-1 => 0)
 
-        // Random vibrations
-        travelDirection = travelDirection.add(randomNormalizedVector().multiply(0.5 * randomVibrations));
+        // RW: travelDirection += RNV * (0.5 * randomVibrations)
+        travelDirection = travelDirection.add(randomNormalizedVector().multiply(0.5 * currentBehavior.randomVibrations));
 
-        // Torque/revolve averaging + orbit around centroid
-        if (weightSum > 0f) {
-            targetTorque = torqueSum / (1f + weightSum);
-            targetRevolve = revolveSum / (1f + weightSum);
-
-            Vec3d centroid = weightedNeighborPos.multiply(1.0 / weightSum);
+        if (num > 0f) {
+            // RW: travelDirection += PerpendicularVector(pos, centroid/num) * torque
+            Vec3d centroid = centroidAccum.multiply(1.0 / num);
             Vec3d toCentroid = centroid.subtract(position);
-            if (toCentroid.lengthSquared() > 1e-6) {
+            if (toCentroid.lengthSquared() > 1e-12) {
                 Vec3d perp = perpendicular3D(toCentroid).normalize();
                 travelDirection = travelDirection.add(perp.multiply(torque));
             }
-        }
 
-        torque = lerp(torque, targetTorque, 0.10f);
-        revolveSpeed = lerp(revolveSpeed, targetRevolve, 0.20f);
-
-        // Color mixing
-        if (colorW > 0f) {
-            double cx = colorSum.x / colorW;
-            double cy = colorSum.y / colorW;
-            colorX = lerp(colorX, (float) cx, 0.40f);
-            colorY = lerp(colorY, (float) cy, 0.40f);
-        }
-        colorX = lerp(colorX, targetColorX, 0.05f);
-        colorY = lerp(colorY, targetColorY, 0.05f);
-
-        // Terrain avoidance approximation (RW uses aimap terrain proximity)
-        if (world != null && isNearSolid(world)) {
-            Vec3d avoid = terrainAvoidanceVector(world);
-            if (avoid.lengthSquared() > 1e-6) {
-                travelDirection = lerpVec(travelDirection, avoid.normalize().multiply(2.0), 0.45);
+            // RW rotation smoothing
+            float rot = rotAccum / num;
+            rot += (float) Math.floor(rotation);
+            if (Math.abs(rotation - rot) < 0.4f) {
+                rotation = lerp(rotation, rot, 0.05f);
             }
         }
 
-        // Normalize like RW
-        if (travelDirection.lengthSquared() > 1e-8) {
-            travelDirection = travelDirection.normalize();
-        }
-    }
+        // RW: torque = Lerp(torque, torqueSum/(1+num), 0.1)
+        // RW: revolveSpeed = Lerp(revolveSpeed, revolveSum/(1+num), 0.2)
+        torque = lerp(torque, torqueSum / (1f + num), 0.1f);
+        revolveSpeed = lerp(revolveSpeed, revolveSum / (1f + num), 0.2f);
 
-    private void adoptBehaviorFrom(NeuronSwarmer other) {
-        // In Rain World, this swaps the entire Behavior struct reference.
-        // We approximate by copying the behavior parameters as a bundle.
-        this.dominance = other.dominance;
-        this.idealDistance = other.idealDistance;
-        this.aimInFront = other.aimInFront;
-        this.torque = other.torque;
-        this.randomVibrations = other.randomVibrations;
-        this.revolveSpeed = other.revolveSpeed;
-        this.behaviorLife = other.behaviorLife;
-        this.behaviorDeathSpeed = other.behaviorDeathSpeed;
-        this.suckle = other.suckle;
-        this.targetColorX = other.targetColorX;
-        this.targetColorY = other.targetColorY;
+        // RW: if (num3>0) color = Lerp(color, vector2/num3, 0.4)
+        if (colW > 0f) {
+            float nx = colAccumX / colW;
+            float ny = colAccumY / colW;
+            colorX = lerp(colorX, nx, 0.4f);
+            colorY = lerp(colorY, ny, 0.4f);
+        }
+
+        // RW: color = Lerp(color, currentBehavior.color, 0.05)
+        colorX = lerp(colorX, currentBehavior.colorX, 0.05f);
+        colorY = lerp(colorY, currentBehavior.colorY, 0.05f);
+
+        // Terrain avoidance approximation (RW uses aimap proximity)
+        if (world != null && isNearSolid(world)) {
+            Vec3d avoid = terrainAvoidanceVector(world);
+            if (avoid.lengthSquared() > 1e-12) {
+                // RW lerp factor depends on proximity; we approximate a moderate push.
+                travelDirection = lerpVec(travelDirection, avoid.normalize(), 0.35);
+            }
+        }
+
+        if (travelDirection.lengthSquared() > 1e-12) {
+            travelDirection = travelDirection.normalize();
+        } else {
+            travelDirection = randomNormalizedVector();
+        }
     }
 
     // ---- SuckleMycelia (proxy) ----
 
     private void tryStartSuckle(List<NeuronSwarmer> otherSwarmers, ClientWorld world, Vec3d zoneMin, Vec3d zoneMax) {
-        // Try a handful of random solid blocks near the swarmer; pick the first with LoS.
         final int tries = 12;
         final int radius = 12;
 
@@ -462,7 +462,7 @@ public class NeuronSwarmer {
             if (!isBlockSolid(world, cand)) continue;
 
             Vec3d tip = new Vec3d(cand.getX() + 0.5, cand.getY() + 0.5, cand.getZ() + 0.5);
-            if (position.squaredDistanceTo(tip) > (16.0 * 16.0)) continue;
+            if (position.squaredDistanceTo(tip) > (INTERACTION_RANGE * INTERACTION_RANGE)) continue;
             if (!hasLineOfSight(world, position, tip)) continue;
 
             boolean taken = false;
@@ -490,43 +490,37 @@ public class NeuronSwarmer {
         Vec3d tip = new Vec3d(suckleTarget.getX() + 0.5, suckleTarget.getY() + 0.5, suckleTarget.getZ() + 0.5);
 
         if (attachedToSuckle) {
-            // Lock/spring the swarmer to the target (RW uses a 2px-ish spring).
             Vec3d dirTo = tip.subtract(position);
             double dist = dirTo.length();
-            if (dist > 1e-6) {
+            if (dist > 1e-12) {
                 Vec3d dirN = dirTo.multiply(1.0 / dist);
-                // Match the RW spring math: vector = dir * ((2 - dist) * k)
                 Vec3d v1 = dirN.multiply((2.0 - dist) * 0.15);
                 velocity = velocity.subtract(v1);
                 position = position.subtract(v1);
                 travelDirection = Vec3d.ZERO;
             }
 
-            // Occasionally detach (RW: 0.0125)
             if (RANDOM.nextFloat() < 0.0125f) {
                 suckleTarget = null;
                 mode = MovementMode.Swarm;
                 onlySwarm = 40 + RANDOM.nextInt(361);
             }
         } else {
-            // Approach
             travelDirection = tip.subtract(position);
-            if (travelDirection.lengthSquared() > 1e-8) {
+            if (travelDirection.lengthSquared() > 1e-12) {
                 travelDirection = travelDirection.normalize();
             }
 
             if (position.squaredDistanceTo(tip) < (0.8 * 0.8)) {
                 attachedToSuckle = true;
             } else if (RANDOM.nextFloat() < 0.05f && !hasLineOfSight(world, position, tip)) {
-                // Abort if LoS is lost
                 suckleTarget = null;
                 mode = MovementMode.Swarm;
             }
         }
 
-        // In RW, color drifts toward currentBehavior.color; we approximate by drifting toward target.
-        colorX = lerp(colorX, targetColorX, 0.05f);
-        colorY = lerp(colorY, targetColorY, 0.05f);
+        colorX = lerp(colorX, currentBehavior.colorX, 0.05f);
+        colorY = lerp(colorY, currentBehavior.colorY, 0.05f);
     }
 
     // ---- FollowDijkstra (approximate) ----
@@ -535,7 +529,6 @@ public class NeuronSwarmer {
         if (world == null) return;
         mode = MovementMode.FollowDijkstra;
 
-        // Choose a random point near the zone boundary as an "exit" target.
         int minX = (int) Math.floor(zoneMin.x + 1);
         int minY = (int) Math.floor(zoneMin.y + 1);
         int minZ = (int) Math.floor(zoneMin.z + 1);
@@ -543,7 +536,6 @@ public class NeuronSwarmer {
         int maxY = (int) Math.floor(zoneMax.y - 1);
         int maxZ = (int) Math.floor(zoneMax.z - 1);
 
-        // Pick a boundary face
         int face = RANDOM.nextInt(6);
         int x = RANDOM.nextInt(maxX - minX + 1) + minX;
         int y = RANDOM.nextInt(maxY - minY + 1) + minY;
@@ -567,7 +559,6 @@ public class NeuronSwarmer {
         Direction bestDir = null;
         int bestScore = Integer.MAX_VALUE;
 
-        // Original is 2D + aimap, but the spirit is: take the neighbor that reduces exit distance.
         for (Direction d : Direction.values()) {
             BlockPos nb = here.offset(d);
             if (isBlockSolid(world, nb)) continue;
@@ -586,7 +577,7 @@ public class NeuronSwarmer {
             return;
         }
 
-        if (travelDirection.lengthSquared() > 1e-8) {
+        if (travelDirection.lengthSquared() > 1e-12) {
             travelDirection = travelDirection.normalize();
         }
 
@@ -599,9 +590,6 @@ public class NeuronSwarmer {
         }
     }
 
-    /**
-     * Get the zone this swarmer belongs to.
-     */
     public String getZoneName() {
         return zoneName;
     }
@@ -609,8 +597,8 @@ public class NeuronSwarmer {
     // ========== Utility methods ==========
 
     private static Vec3d randomNormalizedVector() {
-        double theta = RANDOM.nextDouble() * Math.PI * 2;
-        double phi = Math.acos(2 * RANDOM.nextDouble() - 1);
+        double theta = RANDOM.nextDouble() * Math.PI * 2.0;
+        double phi = Math.acos(2.0 * RANDOM.nextDouble() - 1.0);
         return new Vec3d(
                 Math.sin(phi) * Math.cos(theta),
                 Math.sin(phi) * Math.sin(theta),
@@ -619,14 +607,13 @@ public class NeuronSwarmer {
     }
 
     private static Vec3d slerp(Vec3d a, Vec3d b, double t) {
-        // Simplified slerp - just lerp and normalize for our purposes
         Vec3d result = new Vec3d(
                 lerp(a.x, b.x, t),
                 lerp(a.y, b.y, t),
                 lerp(a.z, b.z, t)
         );
         double len = result.length();
-        if (len > 0.0001) {
+        if (len > 1e-6) {
             return result.multiply(1.0 / len);
         }
         return a;
@@ -650,7 +637,7 @@ public class NeuronSwarmer {
     }
 
     private static double inverseLerp(double a, double b, double v) {
-        if (Math.abs(b - a) < 1e-9) return 0.0;
+        if (Math.abs(b - a) < 1e-12) return 0.0;
         double t = (v - a) / (b - a);
         return clamp(t, 0.0, 1.0);
     }
@@ -664,10 +651,9 @@ public class NeuronSwarmer {
     }
 
     private static Vec3d perpendicular3D(Vec3d v) {
-        // Pick a stable perpendicular in 3D.
         Vec3d up = new Vec3d(0, 1, 0);
         Vec3d p = v.crossProduct(up);
-        if (p.lengthSquared() < 1e-6) {
+        if (p.lengthSquared() < 1e-10) {
             p = v.crossProduct(new Vec3d(1, 0, 0));
         }
         return p;
@@ -684,10 +670,10 @@ public class NeuronSwarmer {
     }
 
     private boolean hasLineOfSight(ClientWorld world, Vec3d from, Vec3d to) {
-        // Manual LoS stepping to avoid version-specific RaycastContext signatures.
         Vec3d delta = to.subtract(from);
         double len = delta.length();
-        if (len < 1e-6) return true;
+        if (len < 1e-12) return true;
+
         int steps = Math.max(1, (int) Math.ceil(len / 0.5));
         Vec3d step = delta.multiply(1.0 / steps);
 
@@ -711,7 +697,6 @@ public class NeuronSwarmer {
     }
 
     private Vec3d terrainAvoidanceVector(ClientWorld world) {
-        // Sample neighbors and prefer directions with more open space.
         BlockPos p = BlockPos.ofFloored(position);
         Vec3d sum = Vec3d.ZERO;
 
@@ -728,17 +713,12 @@ public class NeuronSwarmer {
         return sum;
     }
 
-    /**
-     * Handles block collisions by checking surrounding blocks and adjusting velocity.
-     */
     private void handleBlockCollisions(ClientWorld world) {
         BlockPos currentBlock = BlockPos.ofFloored(position);
-        double collisionMargin = 0.3; // How close to get before being repelled
+        double collisionMargin = 0.3;
 
-        // Check all 6 directions for nearby solid blocks
         Vec3d pushForce = Vec3d.ZERO;
 
-        // Check each axis
         for (int axis = 0; axis < 3; axis++) {
             for (int dir = -1; dir <= 1; dir += 2) {
                 BlockPos checkPos = switch (axis) {
@@ -749,7 +729,6 @@ public class NeuronSwarmer {
                 };
 
                 if (isBlockSolid(world, checkPos)) {
-                    // Calculate distance to block face
                     double blockEdge = switch (axis) {
                         case 0 -> dir > 0 ? checkPos.getX() : checkPos.getX() + 1;
                         case 1 -> dir > 0 ? checkPos.getY() : checkPos.getY() + 1;
@@ -767,7 +746,6 @@ public class NeuronSwarmer {
                     double distToBlock = Math.abs(posComponent - blockEdge);
 
                     if (distToBlock < collisionMargin) {
-                        // Push away from the block
                         double pushStrength = (collisionMargin - distToBlock) / collisionMargin * 0.2;
                         Vec3d push = switch (axis) {
                             case 0 -> new Vec3d(-dir * pushStrength, 0, 0);
@@ -777,7 +755,6 @@ public class NeuronSwarmer {
                         };
                         pushForce = pushForce.add(push);
 
-                        // Also dampen velocity in this direction
                         double velComponent = switch (axis) {
                             case 0 -> velocity.x;
                             case 1 -> velocity.y;
@@ -785,7 +762,6 @@ public class NeuronSwarmer {
                             default -> 0;
                         };
 
-                        // If moving toward the block, reduce/reverse that velocity
                         if ((dir > 0 && velComponent > 0) || (dir < 0 && velComponent < 0)) {
                             velocity = switch (axis) {
                                 case 0 -> new Vec3d(velComponent * -0.3, velocity.y, velocity.z);
@@ -801,16 +777,13 @@ public class NeuronSwarmer {
 
         velocity = velocity.add(pushForce);
 
-        // Also check the current block (in case we're inside one)
         if (isBlockSolid(world, currentBlock)) {
-            // Find the nearest non-solid block and push toward it
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dy = -1; dy <= 1; dy++) {
                     for (int dz = -1; dz <= 1; dz++) {
                         if (dx == 0 && dy == 0 && dz == 0) continue;
                         BlockPos neighbor = currentBlock.add(dx, dy, dz);
                         if (!isBlockSolid(world, neighbor)) {
-                            // Push toward this open space
                             Vec3d toOpen = new Vec3d(
                                     neighbor.getX() + 0.5 - position.x,
                                     neighbor.getY() + 0.5 - position.y,
@@ -825,12 +798,8 @@ public class NeuronSwarmer {
         }
     }
 
-    /**
-     * Checks if a block is solid (should be collided with).
-     */
     private boolean isBlockSolid(ClientWorld world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
-        // Check if the block has any collision shape
         return !state.getCollisionShape(world, pos).isEmpty();
     }
 }
