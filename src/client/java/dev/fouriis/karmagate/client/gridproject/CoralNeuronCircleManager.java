@@ -33,8 +33,9 @@ public class CoralNeuronCircleManager {
     // Random for spawn probability
     private final Random random = Random.create();
     
-    // Spawn probability per floating endpoint per tick (similar to swarmer rate)
-    private static final float CIRCLE_SPAWN_CHANCE = 1f / 80f; // Higher chance than swarmers since there are fewer endpoints
+    // Spawn probability per floating endpoint per tick
+    // Set to 1.0 to always spawn immediately (for testing), normally would be ~1/80
+    private static final float CIRCLE_SPAWN_CHANCE = 1.0f;
     
     private CoralNeuronCircleManager() {}
     
@@ -93,6 +94,11 @@ public class CoralNeuronCircleManager {
                 e -> !e.isRemoved()
             );
             
+            // Debug: log entity count
+            if (!entities.isEmpty()) {
+                KarmaGateMod.LOGGER.info("[CoralNeuronCircle] Found {} CoralNeuronEntity in zone {}", entities.size(), zoneName);
+            }
+            
             // Process each entity's endpoints
             Set<String> activeKeys = new HashSet<>();
             
@@ -142,6 +148,7 @@ public class CoralNeuronCircleManager {
                 ownerA = new CoralNeuronEndpointOwner(entityId, true);
                 owners.add(ownerA);
                 ownersByKey.put(keyA, ownerA);
+                KarmaGateMod.LOGGER.info("[CoralNeuronCircle] Created owner for endpoint A of entity {}", entityId);
             }
             
             // Update position from entity
@@ -159,6 +166,7 @@ public class CoralNeuronCircleManager {
                 ownerB = new CoralNeuronEndpointOwner(entityId, false);
                 owners.add(ownerB);
                 ownersByKey.put(keyB, ownerB);
+                KarmaGateMod.LOGGER.info("[CoralNeuronCircle] Created owner for endpoint B of entity {}", entityId);
             }
             
             // Update position from entity
@@ -196,7 +204,11 @@ public class CoralNeuronCircleManager {
             
             if (!hasCircle && random.nextFloat() < CIRCLE_SPAWN_CHANCE) {
                 // Spawn a new circle for this endpoint
-                circleManager.spawnCircleForOwner(zoneName, owner);
+                boolean spawned = circleManager.spawnCircleForOwner(zoneName, owner);
+                if (spawned) {
+                    KarmaGateMod.LOGGER.info("[CoralNeuronCircle] Spawned circle for owner {} at position {}", 
+                        owner.getKey(), owner.getCirclePosition());
+                }
             }
         }
     }

@@ -50,7 +50,7 @@ public class CoralNeuronEntityRenderer extends EntityRenderer<CoralNeuronEntity>
         int r = 255, g = 60, blue = 80;
         int a = 255;
 
-        final float TWIST_PER_BLOCK = (float) (Math.PI / 2.0);
+        final float TWIST_PER_BLOCK = (float) (Math.PI);
         final float TWIST_NOISE_AMP = 0.0f;
 
         Vec3d tPrev = pts[firstIdx + 1].subtract(pts[firstIdx]);
