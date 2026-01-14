@@ -1,6 +1,7 @@
 package dev.fouriis.karmagate;
 
 import dev.fouriis.karmagate.client.AtcSkyFabricAdapter;
+import dev.fouriis.karmagate.client.gridproject.CoralNeuronCircleManager;
 import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerManager;
 import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerRenderer;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
@@ -8,6 +9,7 @@ import dev.fouriis.karmagate.entity.client.GateLightBlockRenderer;
 import dev.fouriis.karmagate.entity.client.HeatCoilRenderer;
 import dev.fouriis.karmagate.entity.client.KarmaGateBlockRenderer;
 import dev.fouriis.karmagate.entity.client.ShelterDoorRenderer;
+import dev.fouriis.karmagate.entity.client.CoralNeuronEntityRenderer;
 import dev.fouriis.karmagate.entity.client.WaterfallBlockRenderer;
 import dev.fouriis.karmagate.item.KarmaGateItemGeoRenderer;
 import dev.fouriis.karmagate.entity.client.HeatCoilItemModel;
@@ -27,6 +29,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.particle.v1.ParticleFactoryRegistry;
+import net.fabricmc.fabric.api.client.rendereregistry.v1.EntityRendererRegistry;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactories;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
@@ -65,6 +68,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		// Register neuron swarmer renderer
 		NeuronSwarmerRenderer.register();
+		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.VINE_ENTITY_TYPE, CoralNeuronEntityRenderer::new);
 
 		// Register Karma Gate item renderer with custom transforms
 		var gateItemRenderer = new KarmaGateItemGeoRenderer();
@@ -197,12 +201,15 @@ public class KarmaGateModClient implements ClientModInitializer {
 			SteamAudioController.get().clientTick();
 			// Update neuron swarmers
 			NeuronSwarmerManager.getInstance().tick();
+			// Update coral neuron endpoint circles
+			CoralNeuronCircleManager.getInstance().tick();
 		});
 
 		// Clear cached loop references on disconnect or new join to avoid stale sound state after rejoin
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
 			SteamAudioController.get().clear();
 			NeuronSwarmerManager.getInstance().clear();
+			CoralNeuronCircleManager.getInstance().clear();
 			clampLoops.values().forEach(MultiSound.Handle::stop);
 			screwLoops.values().forEach(MultiSound.Handle::stop);
 			clampLoops.clear();
@@ -211,6 +218,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
 			SteamAudioController.get().clear();
 			NeuronSwarmerManager.getInstance().clear();
+			CoralNeuronCircleManager.getInstance().clear();
 			clampLoops.values().forEach(MultiSound.Handle::stop);
 			screwLoops.values().forEach(MultiSound.Handle::stop);
 			clampLoops.clear();

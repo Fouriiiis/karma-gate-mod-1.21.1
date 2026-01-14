@@ -1,5 +1,6 @@
 package dev.fouriis.karmagate.client.swarmer;
 
+import dev.fouriis.karmagate.client.gridproject.IProjectedCircleOwner;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.util.math.BlockPos;
@@ -18,7 +19,7 @@ import java.util.List;
  *  - RW units are pixels; MC units are blocks. We map 16px = 1 block by default.
  *  - Only the Behavior leader decays behavior life each tick (RW behavior.leader).
  */
-public class NeuronSwarmer {
+public class NeuronSwarmer implements IProjectedCircleOwner {
 
     public enum MovementMode {
         Swarm,
@@ -801,5 +802,27 @@ public class NeuronSwarmer {
     private boolean isBlockSolid(ClientWorld world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         return !state.getCollisionShape(world, pos).isEmpty();
+    }
+
+    // ========== IProjectedCircleOwner implementation ==========
+    
+    @Override
+    public Vec3d getCirclePosition() {
+        return position;
+    }
+    
+    @Override
+    public Vec3d getLastCirclePosition() {
+        return lastPosition;
+    }
+    
+    @Override
+    public boolean isMarkedForRemoval() {
+        return markedForRemoval;
+    }
+    
+    @Override
+    public void markForRemoval() {
+        markedForRemoval = true;
     }
 }

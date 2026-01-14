@@ -1,16 +1,16 @@
 package dev.fouriis.karmagate.client.gridproject;
 
-import dev.fouriis.karmagate.client.swarmer.NeuronSwarmer;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.random.Random;
 
 /**
- * Represents a single projected circle attached to a neuron swarmer.
+ * Represents a single projected circle attached to a circle owner (NeuronSwarmer or CoralNeuron endpoint).
  * Handles animation state for radius wobble, blink, rotation, and spokes.
  * Based on Rain World's ProjectedCircle implementation.
  */
 public class ProjectedCircleInstance {
-    // Owning swarmer reference
-    private final NeuronSwarmer owner;
+    // Owning entity reference (swarmer or coral neuron endpoint)
+    private final IProjectedCircleOwner owner;
     
     // Radius animation
     private float baseRad;
@@ -48,12 +48,12 @@ public class ProjectedCircleInstance {
     private static final float MAX_BASE_RAD = 8.0f;
     
     /**
-     * Creates a new projected circle for a swarmer.
+     * Creates a new projected circle for an owner.
      * 
-     * @param owner The owning neuron swarmer
+     * @param owner The owning circle owner (swarmer, coral neuron endpoint, etc.)
      * @param sizeHint Size factor 0-1 (random if -1)
      */
-    public ProjectedCircleInstance(NeuronSwarmer owner, float sizeHint) {
+    public ProjectedCircleInstance(IProjectedCircleOwner owner, float sizeHint) {
         this.owner = owner;
         
         // Initialize size
@@ -102,12 +102,13 @@ public class ProjectedCircleInstance {
         lastBlink = blink;
         lastRotation = rotation;
         
-        // Update projected position - project from camera through neuron onto zone walls
+        // Update projected position - project from camera through owner onto zone walls
         if (owner != null && zone != null) {
-            // Ray from camera through neuron
-            double neuronX = owner.position.x;
-            double neuronY = owner.position.y;
-            double neuronZ = owner.position.z;
+            // Ray from camera through owner
+            Vec3d ownerPos = owner.getCirclePosition();
+            double neuronX = ownerPos.x;
+            double neuronY = ownerPos.y;
+            double neuronZ = ownerPos.z;
             
             // Direction from camera to neuron (ray direction)
             double dirX = neuronX - cameraX;
@@ -234,7 +235,7 @@ public class ProjectedCircleInstance {
         if (rotation < -360f) rotation += 360f;
         
         // Check if owner is still valid
-        if (owner != null && owner.markedForRemoval) {
+        if (owner != null && owner.isMarkedForRemoval()) {
             markedForRemoval = true;
         }
     }
@@ -275,7 +276,7 @@ public class ProjectedCircleInstance {
     public float getBaseRad() { return baseRad; }
     public int getSpokes() { return spokes; }
     public float getAlphaScale() { return alphaScale; }
-    public NeuronSwarmer getOwner() { return owner; }
+    public IProjectedCircleOwner getOwner() { return owner; }
     public int getAge() { return age; }
     
     // Setters

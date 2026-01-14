@@ -79,7 +79,7 @@ public class ProjectedCirclePatternManager {
         );
         
         // Remove circles whose owners are gone or marked for removal
-        circles.removeIf(c -> c.markedForRemoval || c.getOwner() == null || c.getOwner().markedForRemoval);
+        circles.removeIf(c -> c.markedForRemoval || c.getOwner() == null || c.getOwner().isMarkedForRemoval());
         
         // Tick existing circles with camera position
         for (ProjectedCircleInstance circle : circles) {
@@ -89,7 +89,7 @@ public class ProjectedCirclePatternManager {
         // Potentially spawn new circles from swarmers
         if (circles.size() < MAX_CIRCLES_PER_ZONE && swarmers != null) {
             for (NeuronSwarmer swarmer : swarmers) {
-                if (swarmer.markedForRemoval) continue;
+                if (swarmer.isMarkedForRemoval()) continue;
                 
                 // Check if this swarmer already owns a circle
                 boolean hasCircle = circles.stream()
@@ -163,6 +163,50 @@ public class ProjectedCirclePatternManager {
      */
     public List<ProjectedCircleInstance> getCircles(String zoneName) {
         return circlesByZone.getOrDefault(zoneName, Collections.emptyList());
+    }
+    
+    /**
+     * Gets mutable circle list for a zone, creating if needed.
+     * Used internally for adding circles.
+     */
+    private List<ProjectedCircleInstance> getOrCreateCircles(String zoneName) {
+        return circlesByZone.computeIfAbsent(zoneName, k -> new ArrayList<>());
+    }
+    
+    /**
+     * Spawns a circle for a generic circle owner (NeuronSwarmer or CoralNeuronEndpointOwner).
+     * Returns true if spawned, false if at capacity or owner already has a circle.
+     * 
+     * @param zoneName The zone to spawn in
+     * @param owner The circle owner
+     * @return True if spawned successfully
+     */
+    public boolean spawnCircleForOwner(String zoneName, IProjectedCircleOwner owner) {
+        if (owner == null || owner.isMarkedForRemoval()) {
+            return false;
+        }
+        
+        List<ProjectedCircleInstance> circles = getOrCreateCircles(zoneName);
+        
+        // Check capacity
+        if (circles.size() >= MAX_CIRCLES_PER_ZONE) {
+            return false;
+        }
+        
+        // Check if owner already has a circle
+        boolean hasCircle = circles.stream()
+            .anyMatch(c -> c.getOwner() == owner);
+        
+        if (hasCircle) {
+            return false;
+        }
+        
+        // Spawn new circle
+        float size = random.nextFloat();
+        ProjectedCircleInstance newCircle = new ProjectedCircleInstance(owner, size);
+        circles.add(newCircle);
+        
+        return true;
     }
     
     /**
