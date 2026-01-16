@@ -14,10 +14,14 @@ import java.util.List;
 /**
  * Neuron swarmer with Rain World SSOracleSwarmer-style flocking.
  *
- * Key correctness points vs RW:
- *  - Behavior adoption must be REFERENCE-based (shared Behavior object), not field copy.
- *  - RW units are pixels; MC units are blocks. We map 16px = 1 block by default.
- *  - Only the Behavior leader decays behavior life each tick (RW behavior.leader).
+ * Key parity fixes vs your prior version:
+ *  1) RW scale: Rain World tiles are 20px => 20px = 1 MC block (as you stated).
+ *  2) DO NOT overwrite travelDirection from velocity each tick (RW does not do this).
+ *     travelDirection is steering; velocity integrates from it.
+ *  3) Behavior "death" semantics: RW Behavior is a struct and becomes dead if the LEADER's
+ *     currentBehavior no longer equals that behavior (leader has moved on).
+ *     We replicate this by: isDead() = life<=0 OR leader removed OR leader.currentBehavior != this.
+ *  4) Terrain avoidance lerp factor shaped like RW (approx, since we don't have RW's AIMAP).
  */
 public class NeuronSwarmer implements IProjectedCircleOwner {
 
@@ -28,22 +32,22 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
     }
 
     // --- RW scale mapping ---
-    private static final double PX_PER_BLOCK = 16.0;
+    // User rule: Rain World tile = 20 pixels => 20 pixels = 1 MC block
+    private static final double PX_PER_BLOCK = 20.0;
     private static final double RW = 1.0 / PX_PER_BLOCK; // pixels -> blocks
 
     // RW constants mapped to blocks
     private static final double INTERACTION_RANGE = 400.0 * RW; // 400px
     private static final double INTERACTION_RANGE_SQ = INTERACTION_RANGE * INTERACTION_RANGE;
 
-    // Velocity integration in RW: vel += travelDirection * 0.8 (px/frame)
-    // Convert to blocks/tick: 0.8px -> 0.8/16 blocks
+    // RW integration: vel += travelDirection * 0.8 (px/frame)
     private static final double RW_ACCEL = 0.8 * RW;
 
-    // Damping map in RW: LerpMap(|vel|, 0.2, 3.0, 1.0, 0.9) in px
+    // RW damping map in px: LerpMap(|vel|, 0.2, 3.0, 1.0, 0.9)
     private static final double RW_DAMP_IN_MIN = 0.2 * RW;
     private static final double RW_DAMP_IN_MAX = 3.0 * RW;
 
-    // Work budget like RW (stops at 30 interacting neighbors)
+    // Work budget like RW (stops at ~30 interacting neighbors)
     private static final int MAX_INTERACTING_NEIGHBORS = 30;
 
     // Position and physics
@@ -51,7 +55,7 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
     public Vec3d lastPosition;
     public Vec3d velocity;
 
-    // RW: travelDirection
+    // RW: travelDirection is STEERING, not "velocity direction"
     public Vec3d travelDirection;
 
     public Vec3d direction;
@@ -62,16 +66,15 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
     // Rotation
     public float rotation;
     public float lastRotation;
-    public float revolveSpeed; // RW: swarmer field (lerps toward behavior.revolveSpeed)
+    public float revolveSpeed;
 
-    // RW: swarmer torque field (lerps toward behavior.torque neighborhood average)
     private float torque;
 
     // Color is per-swarmer and lerped toward behavior color
     public float colorX;
     public float colorY;
 
-    // Shared behavior object (THIS is critical)
+    // Shared behavior object (reference shared, but RW "dies" when leader moves on)
     public Behavior currentBehavior;
 
     // Zone reference
@@ -99,7 +102,7 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
 
     /**
      * RW Behavior struct equivalent.
-     * IMPORTANT: This is meant to be shared by reference among swarmers.
+     * We keep it as an object for sharing-by-reference, but emulate RW's "dead if leader moved on" rule.
      */
     public static final class Behavior {
         private final float dom;
@@ -126,10 +129,9 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
             dom = RANDOM.nextFloat();
 
             // RW: idealDistance = Lerp(10,300, r^2) px
-            // Convert to blocks:
             idealDistance = (float) (lerp(10f, 300f, RANDOM.nextFloat() * RANDOM.nextFloat()) * RW);
 
-            // RW:
+            // RW: life=1; deathSpeed = 1 / Lerp(40,220)
             life = 1f;
             deathSpeed = 1f / lerp(40f, 220f, RANDOM.nextFloat());
 
@@ -137,7 +139,7 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
             colorX = (float) (RANDOM.nextInt(3)) / 2f;
             colorY = RANDOM.nextFloat() < 0.75f ? 0f : 1f;
 
-            // RW: aimInFront = Lerp(40,300) px -> blocks
+            // RW: aimInFront = Lerp(40,300) px
             aimInFront = (float) (lerp(40f, 300f, RANDOM.nextFloat()) * RW);
 
             // RW: torque = 50% 0 else Lerp(-1,1)
@@ -154,8 +156,17 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
             suckle = RANDOM.nextFloat() < (1f / 6f);
         }
 
+        /**
+         * RW equivalence:
+         * - dead if life <= 0
+         * - OR leader removed
+         * - OR leader.currentBehavior != this (leader moved on => everyone holding this treats it as dead)
+         */
         public boolean isDead() {
-            return life <= 0f;
+            if (life <= 0f) return true;
+            if (leader == null) return true;
+            if (leader.markedForRemoval) return true;
+            return leader.currentBehavior != this;
         }
 
         public float dominance() {
@@ -176,12 +187,12 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
         this.lazyDirection = direction;
         this.lastLazyDirection = direction;
 
-        this.velocity = direction.multiply(0.0); // RW starts calm
+        this.velocity = Vec3d.ZERO; // RW starts calm
 
-        // Shared behavior object owned by this swarmer initially
+        // Own behavior initially
         this.currentBehavior = new Behavior(this);
 
-        // Swarmers start with behavior color
+        // Start with behavior color
         this.colorX = currentBehavior.colorX;
         this.colorY = currentBehavior.colorY;
 
@@ -203,10 +214,10 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
 
         rotation += revolveSpeed;
 
-        // RW: lazyDirection is a smoothed direction (visual)
+        // RW: lazyDirection is smoothed visual direction
         lazyDirection = slerp(lazyDirection, direction, 0.06);
 
-        // RW: direction = travelDirection at start of behavior
+        // RW: direction = travelDirection at start of update
         direction = travelDirection;
 
         if (mode == MovementMode.Swarm) {
@@ -222,9 +233,7 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
                         stuckListCounter--;
                     } else {
                         stuckList.add(0, position);
-                        if (stuckList.size() > 10) {
-                            stuckList.remove(stuckList.size() - 1);
-                        }
+                        if (stuckList.size() > 10) stuckList.remove(stuckList.size() - 1);
                         stuckListCounter = 80;
                     }
 
@@ -242,8 +251,11 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
             updateFollowDijkstra(world);
         }
 
-        // RW integration
+        // === RW integration ===
+        // vel += travelDirection * 0.8px
         velocity = velocity.add(travelDirection.multiply(RW_ACCEL));
+
+        // vel *= LerpMap(|vel|, 0.2, 3, 1, 0.9)
         double spd = velocity.length();
         double damp = lerpMap(spd, RW_DAMP_IN_MIN, RW_DAMP_IN_MAX, 1.0, 0.90);
         velocity = velocity.multiply(damp);
@@ -254,27 +266,14 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
 
         position = position.add(velocity);
 
+        // IMPORTANT PARITY FIX:
+        // RW does NOT do: travelDirection = velocity.normalized each tick.
+        // We only update 'direction' for visuals if we're moving.
         if (velocity.lengthSquared() > 1e-8) {
-            travelDirection = velocity.normalize();
-            direction = travelDirection;
+            direction = velocity.normalize();
         }
 
-        // Zone bounds clamp (kept from your version)
-        double margin = 10.0;
-        Vec3d boundaryPush = Vec3d.ZERO;
-        if (position.x < zoneMin.x + margin) boundaryPush = boundaryPush.add(1, 0, 0);
-        else if (position.x > zoneMax.x - margin) boundaryPush = boundaryPush.add(-1, 0, 0);
-
-        if (position.y < zoneMin.y + margin) boundaryPush = boundaryPush.add(0, 1, 0);
-        else if (position.y > zoneMax.y - margin) boundaryPush = boundaryPush.add(0, -1, 0);
-
-        if (position.z < zoneMin.z + margin) boundaryPush = boundaryPush.add(0, 0, 1);
-        else if (position.z > zoneMax.z - margin) boundaryPush = boundaryPush.add(0, 0, -1);
-
-        if (boundaryPush.lengthSquared() > 0) {
-            velocity = velocity.add(boundaryPush.normalize().multiply(0.15));
-        }
-
+        // Keep within zone (minimal clamp; no extra "boundary push" impulse)
         position = new Vec3d(
                 clamp(position.x, zoneMin.x + 1, zoneMax.x - 1),
                 clamp(position.y, zoneMin.y + 1, zoneMax.y - 1),
@@ -289,9 +288,9 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
             }
         }
 
-        // RW behavior lifetime logic:
-        // - if dead: create new behavior, 75% chance to keep previous color
-        // - else: only leader decays life
+        // === RW behavior lifetime logic ===
+        // In RW: if behavior is dead, create a new behavior; 75% chance keep old color.
+        // Else: only the behavior leader decays the life each tick.
         if (currentBehavior.isDead()) {
             float oldCX = currentBehavior.colorX;
             float oldCY = currentBehavior.colorY;
@@ -301,17 +300,17 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
                 currentBehavior.colorX = oldCX;
                 currentBehavior.colorY = oldCY;
             }
-        } else if (currentBehavior.leader == this) {
+        } else if (currentBehavior.leader == this && currentBehavior.leader.currentBehavior == currentBehavior) {
             currentBehavior.life -= currentBehavior.deathSpeed;
         }
 
-        // Drift swarmer color toward behavior color
+        // Drift swarmer color toward behavior color (RW-ish)
         colorX = lerp(colorX, currentBehavior.colorX, 0.05f);
         colorY = lerp(colorY, currentBehavior.colorY, 0.05f);
     }
 
     /**
-     * Near line-for-line port of SSOracleSwarmer.SwarmBehavior (but in 3D).
+     * Near line-for-line port of SSOracleSwarmer.SwarmBehavior (extended to 3D).
      */
     private void swarmBehavior(List<NeuronSwarmer> otherSwarmers, ClientWorld world) {
         Vec3d centroidAccum = Vec3d.ZERO;
@@ -325,10 +324,10 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
         float colAccumY = 0f;
         float colW = 0f;
 
-        // Rotation syncing (optional; kept for parity)
+        // Rotation syncing (optional; kept)
         float rotAccum = 0f;
 
-        int num6 = 0;
+        int interacted = 0;
         int breakAt = -1;
 
         int start = Math.max(0, Math.min(listBreakPoint, otherSwarmers.size()));
@@ -380,11 +379,11 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
                 float myDom = currentBehavior.dominance();
                 float otherDom = other.currentBehavior.dominance();
                 if (myDom < otherDom * (float) Math.pow(num8, 4.0)) {
-                    currentBehavior = other.currentBehavior; // <-- REFERENCE SHARE (critical)
+                    currentBehavior = other.currentBehavior; // shared reference
                 }
 
-                num6++;
-                if (num6 > MAX_INTERACTING_NEIGHBORS) {
+                interacted++;
+                if (interacted > MAX_INTERACTING_NEIGHBORS) {
                     breakAt = i;
                     break;
                 }
@@ -430,12 +429,18 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
         colorX = lerp(colorX, currentBehavior.colorX, 0.05f);
         colorY = lerp(colorY, currentBehavior.colorY, 0.05f);
 
-        // Terrain avoidance approximation (RW uses aimap proximity)
-        if (world != null && isNearSolid(world)) {
-            Vec3d avoid = terrainAvoidanceVector(world);
-            if (avoid.lengthSquared() > 1e-12) {
-                // RW lerp factor depends on proximity; we approximate a moderate push.
-                travelDirection = lerpVec(travelDirection, avoid.normalize(), 0.35);
+        // === Terrain avoidance (RW-shaped factor; still an approximation without AIMAP) ===
+        if (world != null) {
+            double prox = terrainProximity(world, 5.0); // approximate "terrainProximity" within 5 blocks
+            if (prox < 5.0) {
+                Vec3d avoid = terrainAvoidanceVector(world);
+                if (avoid.lengthSquared() > 1e-12) {
+                    // RW factor: 0.5 * Pow(InverseLerp(5,1,prox), 0.25)
+                    double t = 0.5 * Math.pow(inverseLerp(5.0, 1.0, prox), 0.25);
+                    // RW targets (vector3.normalized * 2)
+                    Vec3d target = avoid.normalize().multiply(2.0);
+                    travelDirection = lerpVec(travelDirection, target, t);
+                }
             }
         }
 
@@ -697,6 +702,34 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
         return false;
     }
 
+    /**
+     * Approximate RW terrain proximity: distance in blocks to the nearest solid block within maxDist.
+     * (RW uses AIMAP terrainProximity; we approximate via a small cubic search.)
+     */
+    private double terrainProximity(ClientWorld world, double maxDist) {
+        if (world == null) return maxDist;
+        BlockPos base = BlockPos.ofFloored(position);
+        int r = (int) Math.ceil(maxDist);
+
+        double best = maxDist;
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    BlockPos p = base.add(dx, dy, dz);
+                    if (!isBlockSolid(world, p)) continue;
+                    Vec3d c = new Vec3d(p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5);
+                    double d = position.distanceTo(c);
+                    if (d < best) best = d;
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * A cheap "move toward open space" vector.
+     * (Not RW AIMAP, but feeds the RW-shaped lerp factor above.)
+     */
     private Vec3d terrainAvoidanceVector(ClientWorld world) {
         BlockPos p = BlockPos.ofFloored(position);
         Vec3d sum = Vec3d.ZERO;
@@ -805,22 +838,22 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
     }
 
     // ========== IProjectedCircleOwner implementation ==========
-    
+
     @Override
     public Vec3d getCirclePosition() {
         return position;
     }
-    
+
     @Override
     public Vec3d getLastCirclePosition() {
         return lastPosition;
     }
-    
+
     @Override
     public boolean isMarkedForRemoval() {
         return markedForRemoval;
     }
-    
+
     @Override
     public void markForRemoval() {
         markedForRemoval = true;
