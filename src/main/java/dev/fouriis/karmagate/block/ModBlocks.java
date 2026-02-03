@@ -21,6 +21,7 @@ import net.minecraft.registry.Registries;
 import net.minecraft.registry.Registry;
 import net.minecraft.sound.BlockSoundGroup;
 import net.minecraft.util.Identifier;
+import net.minecraft.block.MapColor;
 
 public class ModBlocks {
     
@@ -77,6 +78,16 @@ public class ModBlocks {
             .strength(3.0f)
             .sounds(BlockSoundGroup.METAL)
             .nonOpaque()));
+
+    // Worm grass: invisible gameplay block (visuals handled by client renderer)
+    public static final Block WORM_GRASS = registerBlock("worm_grass",
+        new WormGrassBlock(Block.Settings.create()
+            .mapColor(MapColor.CLEAR)
+            .noCollision()
+            .nonOpaque()
+            .strength(0.0f)
+            .sounds(BlockSoundGroup.GRASS)
+            .dropsNothing()));
     
 
     private static Block registerBlock(String name, Block block) {
@@ -113,6 +124,7 @@ public class ModBlocks {
             entries.add(STEAM_EMITTER);
             entries.add(HOLOGRAM_PROJECTOR);
             entries.add(SHELTER_DOOR);
+            entries.add(WORM_GRASS);
         });
     }
 }

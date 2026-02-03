@@ -27,6 +27,10 @@ import dev.fouriis.karmagate.sound.MultiSound.Spec;
 import net.minecraft.registry.Registries;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import dev.fouriis.karmagate.client.wormgrass.WormGrassRenderCache;
+import dev.fouriis.karmagate.client.wormgrass.WormGrassWorldRenderer;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.particle.v1.ParticleFactoryRegistry;
 import net.fabricmc.fabric.api.client.rendereregistry.v1.EntityRendererRegistry;
@@ -215,6 +219,14 @@ public class KarmaGateModClient implements ClientModInitializer {
 			clampLoops.clear();
 			screwLoops.clear();
 		});
+
+		// --- Wormgrass client hooks ---
+		// Maintain a cache of wormgrass positions per chunk.
+		ClientChunkEvents.CHUNK_LOAD.register((world, chunk) -> WormGrassRenderCache.onChunkLoad(world, chunk));
+		ClientChunkEvents.CHUNK_UNLOAD.register((world, chunk) -> WormGrassRenderCache.onChunkUnload(world, chunk));
+
+		// Render after translucent world layers.
+		WorldRenderEvents.AFTER_ENTITIES.register(WormGrassWorldRenderer::render);
 		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
 			SteamAudioController.get().clear();
 			NeuronSwarmerManager.getInstance().clear();
