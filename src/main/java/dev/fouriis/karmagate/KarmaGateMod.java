@@ -3,7 +3,9 @@ package dev.fouriis.karmagate;
 import dev.fouriis.karmagate.block.ModBlocks;
 import dev.fouriis.karmagate.command.CoralNeuronCommands;
 import dev.fouriis.karmagate.command.ProjectionZoneCommands;
+import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
+import dev.fouriis.karmagate.item.ModItems;
 import dev.fouriis.karmagate.network.ModNetworking;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.ModSounds;
@@ -35,12 +37,23 @@ public class KarmaGateMod implements ModInitializer {
                     .build()
     );
 
+    public static final EntityType<GraffitiEntity> GRAFFITI_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "graffiti"),
+            FabricEntityTypeBuilder.<GraffitiEntity>create(SpawnGroup.MISC, GraffitiEntity::new)
+                    .dimensions(EntityDimensions.fixed(0.5f, 0.5f))
+                    .trackRangeBlocks(128)
+                    .trackedUpdateRate(20)
+                    .build()
+    );
+
 
     @Override
     public void onInitialize() {
         // Register mod content
         ModBlocks.registerModBlocks();
         ModBlockEntities.registerBlockEntities();
+        ModItems.registerModItems();
         ModParticles.register();
         ModSounds.registerModSounds();
         

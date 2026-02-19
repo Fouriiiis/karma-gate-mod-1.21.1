@@ -1,10 +1,13 @@
 package dev.fouriis.karmagate.network;
 
+import dev.fouriis.karmagate.KarmaGateMod;
+import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneManager;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.util.math.Direction;
 
 /**
  * Handles server-side networking for projection zones.
@@ -21,6 +24,29 @@ public class ModNetworking {
             ProjectionZoneSyncPayload.ID, 
             ProjectionZoneSyncPayload.CODEC
         );
+        
+        // Register the graffiti spawn payload type (client -> server)
+        PayloadTypeRegistry.playC2S().register(
+            SpawnGraffitiPayload.ID,
+            SpawnGraffitiPayload.CODEC
+        );
+        
+        // Handle graffiti spawn requests from clients
+        ServerPlayNetworking.registerGlobalReceiver(SpawnGraffitiPayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            context.server().execute(() -> {
+                // Spawn the graffiti entity on the server
+                GraffitiEntity graffiti = new GraffitiEntity(KarmaGateMod.GRAFFITI_ENTITY_TYPE, player.getWorld());
+                graffiti.setPosition(payload.x(), payload.y(), payload.z());
+                graffiti.setFacing(Direction.byId(payload.facingId()));
+                graffiti.setTexturePath(payload.texturePath());
+                
+                player.getWorld().spawnEntity(graffiti);
+                
+                KarmaGateMod.LOGGER.info("Spawned graffiti at ({}, {}, {}) with texture {} for player {}", 
+                    payload.x(), payload.y(), payload.z(), payload.texturePath(), player.getName().getString());
+            });
+        });
         
         // Sync zones to players when they join
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {

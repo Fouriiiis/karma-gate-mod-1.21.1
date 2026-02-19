@@ -48,7 +48,7 @@ public class ModBlockEntities {
         Registry.register(
             Registries.BLOCK_ENTITY_TYPE,
             Identifier.of(KarmaGateMod.MOD_ID, "karma_gate_part_be"),
-            BlockEntityType.Builder.create(KarmaGatePartBlock.PartBE::new, ModBlocks.KARMA_GATE_PART).build(null)
+            FabricBlockEntityTypeBuilder.create(KarmaGatePartBlock.PartBE::new, ModBlocks.KARMA_GATE_PART).build()
         );
     public static final BlockEntityType<SteamEmitterBlockEntity> STEAM_EMITTER_BLOCK_ENTITY =
         Registry.register(Registries.BLOCK_ENTITY_TYPE, Identifier.of(KarmaGateMod.MOD_ID, "steam_emitter_block_entity"),

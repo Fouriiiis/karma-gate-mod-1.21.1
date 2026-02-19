@@ -11,6 +11,7 @@ import dev.fouriis.karmagate.entity.client.KarmaGateBlockRenderer;
 import dev.fouriis.karmagate.entity.client.ShelterDoorRenderer;
 import dev.fouriis.karmagate.entity.client.CoralNeuronEntityRenderer;
 import dev.fouriis.karmagate.entity.client.WaterfallBlockRenderer;
+import dev.fouriis.karmagate.client.graffiti.GraffitiEntityRenderer;
 import dev.fouriis.karmagate.item.KarmaGateItemGeoRenderer;
 import dev.fouriis.karmagate.entity.client.HeatCoilItemModel;
 import dev.fouriis.karmagate.entity.client.GateLightItemModel;
@@ -73,6 +74,9 @@ public class KarmaGateModClient implements ClientModInitializer {
 		// Register neuron swarmer renderer
 		NeuronSwarmerRenderer.register();
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.VINE_ENTITY_TYPE, CoralNeuronEntityRenderer::new);
+		
+		// Register graffiti entity renderer
+		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.GRAFFITI_ENTITY_TYPE, GraffitiEntityRenderer::new);
 
 		// Register Karma Gate item renderer with custom transforms
 		var gateItemRenderer = new KarmaGateItemGeoRenderer();

@@ -105,7 +105,7 @@ public final class RainWorldFrameIndex {
      * Convenience loader for the project's rainWorld assets.
      */
     public static RainWorldFrameIndex loadDefault() {
-        return load("karma-gate-mod:textures/hologram/rainworld.png", "karma-gate-mod:hologram/rainWorld.json");
+        return load("karma-gate-mod:textures/hologram/rainworld.png", "karma-gate-mod:hologram/rainworld.json");
     }
 
     /**

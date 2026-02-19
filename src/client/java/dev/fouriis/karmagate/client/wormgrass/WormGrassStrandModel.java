@@ -8,69 +8,121 @@ import org.joml.Matrix4f;
 /**
  * Wormgrass strand rendering - creates curved, segmented strands that bend
  * smoothly from base to tip, matching Rain World's visual style.
+ *
+ * The cap and eye at the tip rotate to align with the strand's tangent direction.
  */
 public final class WormGrassStrandModel {
 
-    // Number of segments for the curved body
-    private static final int SEGMENTS = 5;
+    /**
+     * Segment count is a major perf lever because each segment emits 2 quads.
+     * 3 keeps the silhouette while cutting vertices ~40% vs 5.
+     */
+    private static final int SEGMENTS = 3;
 
     /**
-     * Emit a curved strand that bends toward a target position.
-     * The entire body curves smoothly, with the tip pointing along the curve tangent.
-     * 
-     * @param tipOffsetX Horizontal offset of tip from base (X)
-     * @param tipOffsetZ Horizontal offset of tip from base (Z)
+     * Avoid per-strand allocations (this was allocating 4 float arrays per strand).
+     * ThreadLocal keeps it render-thread safe.
      */
+    private static final ThreadLocal<float[]> TL_SEG_X = ThreadLocal.withInitial(() -> new float[SEGMENTS + 1]);
+    private static final ThreadLocal<float[]> TL_SEG_Y = ThreadLocal.withInitial(() -> new float[SEGMENTS + 1]);
+    private static final ThreadLocal<float[]> TL_SEG_Z = ThreadLocal.withInitial(() -> new float[SEGMENTS + 1]);
+    private static final ThreadLocal<float[]> TL_SEG_W = ThreadLocal.withInitial(() -> new float[SEGMENTS + 1]);
+
+    /**
+     * Very cheap far-LOD: a single vertical billboard quad rotated around Y to face the camera.
+     * This is intentionally minimal: no cap, no eye.
+     */
+    public static void emitBillboardY(
+            VertexConsumer vc,
+            Matrix4f posMat,
+            float x, float y, float z,
+            float camX, float camZ,
+            float halfWidth,
+            float height,
+            int light,
+            float r, float g, float b
+    ) {
+        // Y-axis billboard (faces camera horizontally)
+        float dx = camX - x;
+        float dz = camZ - z;
+        float len = (float) Math.sqrt(dx * dx + dz * dz);
+        if (len < 1.0e-4f) {
+            dx = 1f;
+            dz = 0f;
+            len = 1f;
+        }
+        dx /= len;
+        dz /= len;
+
+        // Right vector perpendicular on XZ plane
+        float rx = -dz;
+        float rz = dx;
+
+        float x0 = x - rx * halfWidth;
+        float z0 = z - rz * halfWidth;
+        float x1 = x + rx * halfWidth;
+        float z1 = z + rz * halfWidth;
+
+        float y0 = y;
+        float y1 = y + height;
+
+        float a = 1.0f;
+        // Normal roughly faces camera
+        float nx = dx;
+        float ny = 0f;
+        float nz = dz;
+
+        vertex(vc, posMat, x0, y0, z0, r, g, b, a, 0f, 1f, light, nx, ny, nz);
+        vertex(vc, posMat, x1, y0, z1, r, g, b, a, 1f, 1f, light, nx, ny, nz);
+        vertex(vc, posMat, x1, y1, z1, r, g, b, a, 1f, 0f, light, nx, ny, nz);
+        vertex(vc, posMat, x0, y1, z0, r, g, b, a, 0f, 0f, light, nx, ny, nz);
+    }
+
     public static void emitCurvedStrand(
             VertexConsumer vc,
             Matrix4f posMat,
             float baseX, float baseY, float baseZ,
-            float tipOffsetX, float tipOffsetZ,
+            float tipOffsetX, float tipOffsetY, float tipOffsetZ,
             float width,
             float height,
             int light,
             float r, float g, float b,
             float eyeOpenT
     ) {
-        // Generate curved segment positions using quadratic bezier-like interpolation
-        // Base -> Control point (straight up) -> Tip
-        float[] segX = new float[SEGMENTS + 1];
-        float[] segY = new float[SEGMENTS + 1];
-        float[] segZ = new float[SEGMENTS + 1];
-        float[] segWidth = new float[SEGMENTS + 1];
-        
-        // Control point is above the base, creating a natural droop/curve
+        float[] segX = TL_SEG_X.get();
+        float[] segY = TL_SEG_Y.get();
+        float[] segZ = TL_SEG_Z.get();
+        float[] segWidth = TL_SEG_W.get();
+
+        // Control point above base (gives natural curve)
         float ctrlX = baseX + tipOffsetX * 0.25f;
-        float ctrlY = baseY + height * 0.65f;
+        float ctrlY = baseY + height * 0.65f + tipOffsetY * 0.25f;
         float ctrlZ = baseZ + tipOffsetZ * 0.25f;
-        
+
         float tipX = baseX + tipOffsetX;
-        float tipY = baseY + height;
+        float tipY = baseY + height + tipOffsetY;
         float tipZ = baseZ + tipOffsetZ;
-        
+
         for (int i = 0; i <= SEGMENTS; i++) {
             float t = i / (float) SEGMENTS;
-            
-            // Quadratic bezier: P = (1-t)²*P0 + 2*(1-t)*t*P1 + t²*P2
+
             float mt = 1f - t;
             float mt2 = mt * mt;
             float t2 = t * t;
             float twoMtT = 2f * mt * t;
-            
+
             segX[i] = mt2 * baseX + twoMtT * ctrlX + t2 * tipX;
             segY[i] = mt2 * baseY + twoMtT * ctrlY + t2 * tipY;
             segZ[i] = mt2 * baseZ + twoMtT * ctrlZ + t2 * tipZ;
-            
-            // Width tapers from base to tip
+
+            // Taper, but DO NOT shrink too hard at the very end (prevents needle tips)
             float taperT = smoothstep(t);
-            segWidth[i] = width * MathHelper.lerp(taperT, 1.0f, 0.3f);
+            float tipFloor = 0.45f;
+            segWidth[i] = width * MathHelper.lerp(taperT, 1.0f, tipFloor);
         }
-        
-        // Emit body segments as connected quads (X-cross pattern)
+
+        // Body segments as connected X-cross quads
         for (int i = 0; i < SEGMENTS; i++) {
-            float t = (i + 0.5f) / (float) SEGMENTS;
-            
-            // Calculate segment direction for proper quad orientation
             float dirX = segX[i + 1] - segX[i];
             float dirY = segY[i + 1] - segY[i];
             float dirZ = segZ[i + 1] - segZ[i];
@@ -82,9 +134,7 @@ public final class WormGrassStrandModel {
             } else {
                 dirX = 0; dirY = 1; dirZ = 0;
             }
-            
-            // Two perpendicular directions for X-cross
-            // First: perpendicular in XZ plane
+
             float perpX1, perpZ1;
             float xzLen = (float) Math.sqrt(dirX * dirX + dirZ * dirZ);
             if (xzLen > 0.001f) {
@@ -94,26 +144,24 @@ public final class WormGrassStrandModel {
                 perpX1 = 1f;
                 perpZ1 = 0f;
             }
-            
-            // Second: rotated 90 degrees around the direction
+
             float perpX2 = perpZ1;
             float perpZ2 = -perpX1;
-            
-            // Emit two quads forming an X cross-section
+
             emitSegmentQuad(vc, posMat,
                     segX[i], segY[i], segZ[i], segWidth[i],
                     segX[i + 1], segY[i + 1], segZ[i + 1], segWidth[i + 1],
                     perpX1, perpZ1,
                     light, r, g, b);
-            
+
             emitSegmentQuad(vc, posMat,
                     segX[i], segY[i], segZ[i], segWidth[i],
                     segX[i + 1], segY[i + 1], segZ[i + 1], segWidth[i + 1],
                     perpX2, perpZ2,
                     light, r, g, b);
         }
-        
-        // Calculate tip tangent direction for proper tip orientation
+
+        // Tip tangent direction (for placing cap/eye)
         float tipDirX = segX[SEGMENTS] - segX[SEGMENTS - 1];
         float tipDirY = segY[SEGMENTS] - segY[SEGMENTS - 1];
         float tipDirZ = segZ[SEGMENTS] - segZ[SEGMENTS - 1];
@@ -125,52 +173,144 @@ public final class WormGrassStrandModel {
         } else {
             tipDirX = 0; tipDirY = 1; tipDirZ = 0;
         }
+
+        // Build orthonormal basis from tangent direction
+        // tangent = tipDir, we need two perpendicular vectors
+        float bupX = 0f, bupY = 1f, bupZ = 0f;
+        // If tangent is nearly vertical, use a different up vector
+        if (Math.abs(tipDirY) > 0.99f) {
+            bupX = 1f; bupY = 0f; bupZ = 0f;
+        }
         
-        // Emit pointed tip oriented along the tangent
-        float tipWidth2 = segWidth[SEGMENTS] * 0.65f;
-        float tipLength = width * 0.7f;
-        emitPointedTip(vc, posMat,
-                segX[SEGMENTS], segY[SEGMENTS], segZ[SEGMENTS],
-                tipDirX, tipDirY, tipDirZ,
-                tipWidth2, tipLength,
+        // perpA = up cross tangent (normalized)
+        float perpAx = bupY * tipDirZ - bupZ * tipDirY;
+        float perpAy = bupZ * tipDirX - bupX * tipDirZ;
+        float perpAz = bupX * tipDirY - bupY * tipDirX;
+        float perpALen = (float) Math.sqrt(perpAx * perpAx + perpAy * perpAy + perpAz * perpAz);
+        if (perpALen > 0.0001f) {
+            perpAx /= perpALen;
+            perpAy /= perpALen;
+            perpAz /= perpALen;
+        }
+        
+        // perpB = tangent cross perpA (normalized)
+        float perpBx = tipDirY * perpAz - tipDirZ * perpAy;
+        float perpBy = tipDirZ * perpAx - tipDirX * perpAz;
+        float perpBz = tipDirX * perpAy - tipDirY * perpAx;
+        float perpBLen = (float) Math.sqrt(perpBx * perpBx + perpBy * perpBy + perpBz * perpBz);
+        if (perpBLen > 0.0001f) {
+            perpBx /= perpBLen;
+            perpBy /= perpBLen;
+            perpBz /= perpBLen;
+        }
+
+        // --------------------------------------------------------------------
+        // BLUNT CAP - two crossed quads oriented perpendicular to tangent
+        // --------------------------------------------------------------------
+        float tipW = segWidth[SEGMENTS];
+        float capSize = tipW * 0.9f;
+
+        // Move cap slightly forward along tangent
+        float capX = segX[SEGMENTS] + tipDirX * (tipW * 0.05f);
+        float capY = segY[SEGMENTS] + tipDirY * (tipW * 0.05f);
+        float capZ = segZ[SEGMENTS] + tipDirZ * (tipW * 0.05f);
+
+        // Emit cap as two crossed quads perpendicular to tangent
+        emitTangentAlignedQuad(vc, posMat, capX, capY, capZ,
+                capSize, capSize,
+                perpAx, perpAy, perpAz,
+                perpBx, perpBy, perpBz,
                 light, r, g, b);
-        
-        // Emit eye if awake
+        emitTangentAlignedQuad(vc, posMat, capX, capY, capZ,
+                capSize, capSize,
+                perpBx, perpBy, perpBz,
+                -perpAx, -perpAy, -perpAz,
+                light, r, g, b);
+
+        // --------------------------------------------------------------------
+        // EYE AT THE TIP - oriented perpendicular to tangent
+        // --------------------------------------------------------------------
         if (eyeOpenT > 0f) {
             float open = MathHelper.clamp(eyeOpenT, 0f, 1f);
-            float eyeWidth = width * MathHelper.lerp(open, 0.22f, 0.50f);
-            float eyeHeight = Math.max(0.02f, width * MathHelper.lerp(open, 0.12f, 0.30f));
-            
-            // Position eye on the upper part of the curve, but not at the very tip
-            float eyeT = 0.78f;
-            int eyeSeg = (int) (eyeT * SEGMENTS);
-            float eyeLocalT = (eyeT * SEGMENTS) - eyeSeg;
-            eyeSeg = Math.min(eyeSeg, SEGMENTS - 1);
-            
-            float eyeX = MathHelper.lerp(eyeLocalT, segX[eyeSeg], segX[eyeSeg + 1]);
-            float eyeY = MathHelper.lerp(eyeLocalT, segY[eyeSeg], segY[eyeSeg + 1]);
-            float eyeZ = MathHelper.lerp(eyeLocalT, segZ[eyeSeg], segZ[eyeSeg + 1]);
-            
-            // Eye direction should face outward from the curve tangent
-            float eyeDirX = segX[eyeSeg + 1] - segX[eyeSeg];
-            float eyeDirZ = segZ[eyeSeg + 1] - segZ[eyeSeg];
-            float eyeYaw = (float) Math.atan2(eyeDirZ, eyeDirX);
-            
+
+            float eyeSize = tipW * MathHelper.lerp(open, 0.35f, 0.70f);
+
+            // Place eye slightly behind the cap along tangent
+            float eyeBack = tipW * 0.08f;
+            float eyeX = segX[SEGMENTS] - tipDirX * eyeBack;
+            float eyeY = segY[SEGMENTS] - tipDirY * eyeBack;
+            float eyeZ = segZ[SEGMENTS] - tipDirZ * eyeBack;
+
+            // Offset to one side so it's visible
+            float side = (randSigned(hashFromPos(segX[SEGMENTS], segY[SEGMENTS], segZ[SEGMENTS])) >= 0f) ? 1f : -1f;
+            eyeX += perpAx * (tipW * 0.15f) * side;
+            eyeY += perpAy * (tipW * 0.15f) * side;
+            eyeZ += perpAz * (tipW * 0.15f) * side;
+
             float eyeR = 0.20f;
             float eyeG = 0.00f;
             float eyeB = 1.00f;
-            
-            emitEyeQuads(vc, posMat,
-                    eyeX, eyeY, eyeZ,
-                    eyeWidth, eyeHeight,
-                    eyeYaw,
+
+            // Eye as crossed quads perpendicular to tangent
+            emitTangentAlignedQuad(vc, posMat, eyeX, eyeY, eyeZ,
+                    eyeSize, eyeSize,
+                    perpAx, perpAy, perpAz,
+                    perpBx, perpBy, perpBz,
+                    light, eyeR, eyeG, eyeB);
+            emitTangentAlignedQuad(vc, posMat, eyeX, eyeY, eyeZ,
+                    eyeSize, eyeSize,
+                    perpBx, perpBy, perpBz,
+                    -perpAx, -perpAy, -perpAz,
                     light, eyeR, eyeG, eyeB);
         }
     }
-    
+
     /**
-     * Emit a segment quad between two points with specified width at each end.
+     * Emit a quad centered at (x,y,z), oriented in the plane defined by two perpendicular vectors.
+     * This allows the quad to rotate with the strand's tangent direction.
      */
+    private static void emitTangentAlignedQuad(
+            VertexConsumer vc, Matrix4f posMat,
+            float x, float y, float z,
+            float width, float height,
+            float rightX, float rightY, float rightZ,
+            float upX, float upY, float upZ,
+            int light,
+            float r, float g, float b
+    ) {
+        float hw = width * 0.5f;
+        float hh = height * 0.5f;
+
+        // Four corners: center +/- right*hw +/- up*hh
+        float x0 = x - rightX * hw - upX * hh;
+        float y0 = y - rightY * hw - upY * hh;
+        float z0 = z - rightZ * hw - upZ * hh;
+
+        float x1 = x + rightX * hw - upX * hh;
+        float y1 = y + rightY * hw - upY * hh;
+        float z1 = z + rightZ * hw - upZ * hh;
+
+        float x2 = x + rightX * hw + upX * hh;
+        float y2 = y + rightY * hw + upY * hh;
+        float z2 = z + rightZ * hw + upZ * hh;
+
+        float x3 = x - rightX * hw + upX * hh;
+        float y3 = y - rightY * hw + upY * hh;
+        float z3 = z - rightZ * hw + upZ * hh;
+
+        // Normal = right cross up
+        float nx = rightY * upZ - rightZ * upY;
+        float ny = rightZ * upX - rightX * upZ;
+        float nz = rightX * upY - rightY * upX;
+
+        float a = 1.0f;
+
+        vertex(vc, posMat, x0, y0, z0, r, g, b, a, 0f, 1f, light, nx, ny, nz);
+        vertex(vc, posMat, x1, y1, z1, r, g, b, a, 1f, 1f, light, nx, ny, nz);
+        vertex(vc, posMat, x2, y2, z2, r, g, b, a, 1f, 0f, light, nx, ny, nz);
+        vertex(vc, posMat, x3, y3, z3, r, g, b, a, 0f, 0f, light, nx, ny, nz);
+    }
+
     private static void emitSegmentQuad(
             VertexConsumer vc, Matrix4f posMat,
             float x0, float y0, float z0, float w0,
@@ -181,144 +321,33 @@ public final class WormGrassStrandModel {
     ) {
         float hw0 = w0 * 0.5f;
         float hw1 = w1 * 0.5f;
-        
-        // Four corners of the quad
+
         float ax = x0 - perpX * hw0;
         float ay = y0;
         float az = z0 - perpZ * hw0;
-        
+
         float bx = x0 + perpX * hw0;
         float by = y0;
         float bz = z0 + perpZ * hw0;
-        
+
         float cx = x1 + perpX * hw1;
         float cy = y1;
         float cz = z1 + perpZ * hw1;
-        
+
         float dx = x1 - perpX * hw1;
         float dy = y1;
         float dz = z1 - perpZ * hw1;
-        
-        // Normal pointing perpendicular to the quad
+
         float nx = -perpZ;
         float ny = 0f;
         float nz = perpX;
-        
+
         float a = 1.0f;
-        
-        // Emit quad (counter-clockwise winding)
+
         vertex(vc, posMat, ax, ay, az, r, g, b, a, 0f, 1f, light, nx, ny, nz);
         vertex(vc, posMat, bx, by, bz, r, g, b, a, 1f, 1f, light, nx, ny, nz);
         vertex(vc, posMat, cx, cy, cz, r, g, b, a, 1f, 0f, light, nx, ny, nz);
         vertex(vc, posMat, dx, dy, dz, r, g, b, a, 0f, 0f, light, nx, ny, nz);
-    }
-    
-    /**
-     * Emit a pointed tip oriented along a direction vector.
-     */
-    private static void emitPointedTip(
-            VertexConsumer vc, Matrix4f posMat,
-            float baseX, float baseY, float baseZ,
-            float dirX, float dirY, float dirZ,
-            float width, float length,
-            int light,
-            float r, float g, float b
-    ) {
-        // Tip point
-        float ptX = baseX + dirX * length;
-        float ptY = baseY + dirY * length;
-        float ptZ = baseZ + dirZ * length;
-        
-        // Perpendicular directions for the base
-        float perpX1, perpZ1;
-        float xzLen = (float) Math.sqrt(dirX * dirX + dirZ * dirZ);
-        if (xzLen > 0.001f) {
-            perpX1 = -dirZ / xzLen;
-            perpZ1 = dirX / xzLen;
-        } else {
-            perpX1 = 1f;
-            perpZ1 = 0f;
-        }
-        float perpX2 = perpZ1;
-        float perpZ2 = -perpX1;
-        
-        float hw = width * 0.5f;
-        
-        // Emit two triangular faces (forming a 4-sided pyramid tip)
-        // Using quads with the tip point duplicated
-        
-        // Face 1
-        float a1x = baseX - perpX1 * hw;
-        float a1z = baseZ - perpZ1 * hw;
-        float b1x = baseX + perpX1 * hw;
-        float b1z = baseZ + perpZ1 * hw;
-        
-        vertex(vc, posMat, a1x, baseY, a1z, r, g, b, 1f, 0f, 1f, light, -perpZ1, 0.5f, perpX1);
-        vertex(vc, posMat, b1x, baseY, b1z, r, g, b, 1f, 1f, 1f, light, -perpZ1, 0.5f, perpX1);
-        vertex(vc, posMat, ptX, ptY, ptZ, r, g, b, 1f, 0.5f, 0f, light, -perpZ1, 0.5f, perpX1);
-        vertex(vc, posMat, ptX, ptY, ptZ, r, g, b, 1f, 0.5f, 0f, light, -perpZ1, 0.5f, perpX1);
-        
-        // Face 2 (rotated 90 degrees)
-        float a2x = baseX - perpX2 * hw;
-        float a2z = baseZ - perpZ2 * hw;
-        float b2x = baseX + perpX2 * hw;
-        float b2z = baseZ + perpZ2 * hw;
-        
-        vertex(vc, posMat, a2x, baseY, a2z, r, g, b, 1f, 0f, 1f, light, -perpZ2, 0.5f, perpX2);
-        vertex(vc, posMat, b2x, baseY, b2z, r, g, b, 1f, 1f, 1f, light, -perpZ2, 0.5f, perpX2);
-        vertex(vc, posMat, ptX, ptY, ptZ, r, g, b, 1f, 0.5f, 0f, light, -perpZ2, 0.5f, perpX2);
-        vertex(vc, posMat, ptX, ptY, ptZ, r, g, b, 1f, 0.5f, 0f, light, -perpZ2, 0.5f, perpX2);
-    }
-    
-    /**
-     * Emit eye quads (X-cross pattern for visibility from all angles).
-     */
-    private static void emitEyeQuads(
-            VertexConsumer vc, Matrix4f posMat,
-            float x, float y, float z,
-            float width, float height,
-            float yaw,
-            int light,
-            float r, float g, float b
-    ) {
-        // Two quads at 90-degree angles
-        emitVerticalQuad(vc, posMat, x, y - height * 0.5f, z, width, height, yaw, light, r, g, b);
-        emitVerticalQuad(vc, posMat, x, y - height * 0.5f, z, width, height, 
-                yaw + (float)(Math.PI * 0.5), light, r, g, b);
-    }
-    
-    /**
-     * Simple vertical quad centered at a position.
-     */
-    private static void emitVerticalQuad(
-            VertexConsumer vc,
-            Matrix4f posMat,
-            float baseX, float baseY, float baseZ,
-            float width,
-            float height,
-            float yaw,
-            int light,
-            float r, float g, float b
-    ) {
-        float dx = MathHelper.cos(yaw);
-        float dz = MathHelper.sin(yaw);
-
-        float hx = dx * (width * 0.5f);
-        float hz = dz * (width * 0.5f);
-
-        float y0 = baseY;
-        float y1 = baseY + height;
-
-        float x0 = baseX - hx, z0 = baseZ - hz;
-        float x1 = baseX + hx, z1 = baseZ + hz;
-
-        float a = 1.0f;
-        float nx = -dz, ny = 0f, nz = dx;
-
-        vertex(vc, posMat, x0, y0, z0, r, g, b, a, 0f, 1f, light, nx, ny, nz);
-        vertex(vc, posMat, x1, y0, z1, r, g, b, a, 1f, 1f, light, nx, ny, nz);
-        vertex(vc, posMat, x1, y1, z1, r, g, b, a, 1f, 0f, light, nx, ny, nz);
-        vertex(vc, posMat, x0, y1, z0, r, g, b, a, 0f, 0f, light, nx, ny, nz);
     }
 
     private static void vertex(
@@ -337,16 +366,33 @@ public final class WormGrassStrandModel {
                 .light(light)
                 .normal(nx, ny, nz);
     }
-    
+
     private static float smoothstep(float t) {
         t = MathHelper.clamp(t, 0f, 1f);
         return t * t * (3f - 2f * t);
     }
 
+    // Tiny deterministic helper so eye chooses a consistent side per strand
+    private static long hashFromPos(float x, float y, float z) {
+        long xi = (long)Math.floor(x * 8.0);
+        long yi = (long)Math.floor(y * 8.0);
+        long zi = (long)Math.floor(z * 8.0);
+        long h = xi * 0x9E3779B97F4A7C15L ^ yi * 0xC2B2AE3D27D4EB4FL ^ zi * 0x165667B19E3779F9L;
+        h ^= (h >>> 33);
+        h *= 0xff51afd7ed558ccdL;
+        h ^= (h >>> 33);
+        return h;
+    }
+
+    private static float randSigned(long h) {
+        // [-1..+1]
+        return (((h >>> 40) & 0xFFFFFFL) / (float)0x7FFFFFL) - 1.0f;
+    }
+
     // ========================================================================
-    // Legacy methods for compatibility - delegate to new curved strand
+    // Legacy methods for compatibility
     // ========================================================================
-    
+
     public static void emitAwakeStrandLashX(
             VertexConsumer vc,
             Matrix4f posMat,
@@ -359,7 +405,7 @@ public final class WormGrassStrandModel {
             float r, float g, float b,
             float eyeOpenT
     ) {
-        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, tipOffsetX, tipOffsetZ,
+        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, tipOffsetX, 0f, tipOffsetZ,
                 width, height, light, r, g, b, eyeOpenT);
     }
 
@@ -373,8 +419,7 @@ public final class WormGrassStrandModel {
             int light,
             float r, float g, float b
     ) {
-        // Dormant = no offset, no eye
-        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, 0f, 0f,
+        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, 0f, 0f, 0f,
                 width, height, light, r, g, b, 0f);
     }
 
@@ -389,10 +434,9 @@ public final class WormGrassStrandModel {
             float r, float g, float b,
             float eyeOpenT
     ) {
-        // Awake but no lean = small random offset based on yaw
         float offsetX = MathHelper.cos(yawRadians) * 0.05f;
         float offsetZ = MathHelper.sin(yawRadians) * 0.05f;
-        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, offsetX, offsetZ,
+        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, offsetX, 0f, offsetZ,
                 width, height, light, r, g, b, eyeOpenT);
     }
 
@@ -408,7 +452,7 @@ public final class WormGrassStrandModel {
             float r, float g, float b,
             float eyeOpenT
     ) {
-        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, tipOffsetX, tipOffsetZ,
+        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, tipOffsetX, 0f, tipOffsetZ,
                 width, height, light, r, g, b, eyeOpenT);
     }
 
@@ -423,7 +467,7 @@ public final class WormGrassStrandModel {
             int light,
             float r, float g, float b
     ) {
-        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, tipOffsetX, tipOffsetZ,
+        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, tipOffsetX, 0f, tipOffsetZ,
                 width, height, light, r, g, b, 0f);
     }
 
@@ -438,7 +482,7 @@ public final class WormGrassStrandModel {
             int light,
             float r, float g, float b
     ) {
-        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, tipOffsetX, tipOffsetZ,
+        emitCurvedStrand(vc, posMat, baseX, baseY, baseZ, tipOffsetX, 0f, tipOffsetZ,
                 width, height, light, r, g, b, 0f);
     }
 
