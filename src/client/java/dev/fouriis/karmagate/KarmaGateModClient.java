@@ -32,6 +32,8 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import dev.fouriis.karmagate.client.wormgrass.WormGrassRenderCache;
 import dev.fouriis.karmagate.client.wormgrass.WormGrassWorldRenderer;
+import dev.fouriis.karmagate.client.rot.RotRenderCache;
+import dev.fouriis.karmagate.client.rot.RotWorldRenderer;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.particle.v1.ParticleFactoryRegistry;
 import net.fabricmc.fabric.api.client.rendereregistry.v1.EntityRendererRegistry;
@@ -222,6 +224,8 @@ public class KarmaGateModClient implements ClientModInitializer {
 			screwLoops.values().forEach(MultiSound.Handle::stop);
 			clampLoops.clear();
 			screwLoops.clear();
+			RotRenderCache.clearAll();
+			RotWorldRenderer.clearCache();
 		});
 
 		// --- Wormgrass client hooks ---
@@ -231,6 +235,14 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		// Render after translucent world layers.
 		WorldRenderEvents.AFTER_ENTITIES.register(WormGrassWorldRenderer::render);
+
+		// --- Rot (Daddy Corruption) client hooks ---
+		// Maintain a cache of rot block positions per chunk.
+		ClientChunkEvents.CHUNK_LOAD.register((world, chunk) -> RotRenderCache.onChunkLoad(world, chunk));
+		ClientChunkEvents.CHUNK_UNLOAD.register((world, chunk) -> RotRenderCache.onChunkUnload(world, chunk));
+
+		// Render corruption spheres with eye patterns.
+		WorldRenderEvents.AFTER_ENTITIES.register(RotWorldRenderer::render);
 		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
 			SteamAudioController.get().clear();
 			NeuronSwarmerManager.getInstance().clear();
@@ -239,6 +251,8 @@ public class KarmaGateModClient implements ClientModInitializer {
 			screwLoops.values().forEach(MultiSound.Handle::stop);
 			clampLoops.clear();
 			screwLoops.clear();
+			RotRenderCache.clearAll();
+			RotWorldRenderer.clearCache();
 		});
 	}
 

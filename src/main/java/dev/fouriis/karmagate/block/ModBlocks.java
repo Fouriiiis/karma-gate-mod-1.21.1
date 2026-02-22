@@ -90,6 +90,16 @@ public class ModBlocks {
             .strength(0.0f)
             .sounds(BlockSoundGroup.GRASS)
             .dropsNothing()));
+
+    // Rot (Daddy Corruption): invisible block that renders flesh clusters on adjacent surfaces
+    public static final Block ROT_BLOCK = registerBlock("rot_block",
+        new RotBlock(Block.Settings.create()
+            .mapColor(MapColor.CLEAR)
+            .noCollision()
+            .nonOpaque()
+            .strength(0.0f)
+            .sounds(BlockSoundGroup.SLIME)
+            .dropsNothing()));
     
 
     private static Block registerBlock(String name, Block block) {
@@ -127,6 +137,7 @@ public class ModBlocks {
             entries.add(HOLOGRAM_PROJECTOR);
             entries.add(SHELTER_DOOR);
             entries.add(WORM_GRASS);
+            entries.add(ROT_BLOCK);
         });
     }
 }
