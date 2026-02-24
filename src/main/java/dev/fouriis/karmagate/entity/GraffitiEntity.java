@@ -26,6 +26,16 @@ public class GraffitiEntity extends Entity {
     private static final TrackedData<Float> CORNER_2_V = DataTracker.registerData(GraffitiEntity.class, TrackedDataHandlerRegistry.FLOAT);
     private static final TrackedData<Float> CORNER_3_H = DataTracker.registerData(GraffitiEntity.class, TrackedDataHandlerRegistry.FLOAT);
     private static final TrackedData<Float> CORNER_3_V = DataTracker.registerData(GraffitiEntity.class, TrackedDataHandlerRegistry.FLOAT);
+
+    private static final TrackedData<Float> CORNER_0_OPACITY = DataTracker.registerData(GraffitiEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Float> CORNER_1_OPACITY = DataTracker.registerData(GraffitiEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Float> CORNER_2_OPACITY = DataTracker.registerData(GraffitiEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Float> CORNER_3_OPACITY = DataTracker.registerData(GraffitiEntity.class, TrackedDataHandlerRegistry.FLOAT);
+
+    private static final TrackedData<Float> CORNER_0_MELT = DataTracker.registerData(GraffitiEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Float> CORNER_1_MELT = DataTracker.registerData(GraffitiEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Float> CORNER_2_MELT = DataTracker.registerData(GraffitiEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Float> CORNER_3_MELT = DataTracker.registerData(GraffitiEntity.class, TrackedDataHandlerRegistry.FLOAT);
     
     // Default size (same as renderer defaults)
     private static final float DEFAULT_HALF_WIDTH = (203f / 16f * 0.15f) / 2f;
@@ -49,6 +59,16 @@ public class GraffitiEntity extends Entity {
         builder.add(CORNER_2_V, DEFAULT_HALF_HEIGHT);
         builder.add(CORNER_3_H, -DEFAULT_HALF_WIDTH);  // top-left
         builder.add(CORNER_3_V, DEFAULT_HALF_HEIGHT);
+
+        builder.add(CORNER_0_OPACITY, 1.0f);
+        builder.add(CORNER_1_OPACITY, 1.0f);
+        builder.add(CORNER_2_OPACITY, 1.0f);
+        builder.add(CORNER_3_OPACITY, 1.0f);
+
+        builder.add(CORNER_0_MELT, 0.0f);
+        builder.add(CORNER_1_MELT, 0.0f);
+        builder.add(CORNER_2_MELT, 0.0f);
+        builder.add(CORNER_3_MELT, 0.0f);
     }
 
     public void setFacing(Direction direction) {
@@ -96,6 +116,46 @@ public class GraffitiEntity extends Entity {
             case 3 -> { dataTracker.set(CORNER_3_H, h); dataTracker.set(CORNER_3_V, v); }
         }
     }
+
+    public float getCornerOpacity(int corner) {
+        return switch (corner) {
+            case 0 -> dataTracker.get(CORNER_0_OPACITY);
+            case 1 -> dataTracker.get(CORNER_1_OPACITY);
+            case 2 -> dataTracker.get(CORNER_2_OPACITY);
+            case 3 -> dataTracker.get(CORNER_3_OPACITY);
+            default -> 1.0f;
+        };
+    }
+
+    public void setCornerOpacity(int corner, float value) {
+        float clamped = clamp01(value);
+        switch (corner) {
+            case 0 -> dataTracker.set(CORNER_0_OPACITY, clamped);
+            case 1 -> dataTracker.set(CORNER_1_OPACITY, clamped);
+            case 2 -> dataTracker.set(CORNER_2_OPACITY, clamped);
+            case 3 -> dataTracker.set(CORNER_3_OPACITY, clamped);
+        }
+    }
+
+    public float getCornerMelt(int corner) {
+        return switch (corner) {
+            case 0 -> dataTracker.get(CORNER_0_MELT);
+            case 1 -> dataTracker.get(CORNER_1_MELT);
+            case 2 -> dataTracker.get(CORNER_2_MELT);
+            case 3 -> dataTracker.get(CORNER_3_MELT);
+            default -> 0.0f;
+        };
+    }
+
+    public void setCornerMelt(int corner, float value) {
+        float clamped = clamp01(value);
+        switch (corner) {
+            case 0 -> dataTracker.set(CORNER_0_MELT, clamped);
+            case 1 -> dataTracker.set(CORNER_1_MELT, clamped);
+            case 2 -> dataTracker.set(CORNER_2_MELT, clamped);
+            case 3 -> dataTracker.set(CORNER_3_MELT, clamped);
+        }
+    }
     
     // Get all corners as array of [h, v] pairs
     public float[][] getCorners() {
@@ -119,6 +179,12 @@ public class GraffitiEntity extends Entity {
             if (nbt.contains("Corner" + i + "H")) {
                 setCorner(i, nbt.getFloat("Corner" + i + "H"), nbt.getFloat("Corner" + i + "V"));
             }
+            if (nbt.contains("Corner" + i + "Opacity")) {
+                setCornerOpacity(i, nbt.getFloat("Corner" + i + "Opacity"));
+            }
+            if (nbt.contains("Corner" + i + "Melt")) {
+                setCornerMelt(i, nbt.getFloat("Corner" + i + "Melt"));
+            }
         }
     }
 
@@ -129,7 +195,13 @@ public class GraffitiEntity extends Entity {
         for (int i = 0; i < 4; i++) {
             nbt.putFloat("Corner" + i + "H", getCornerH(i));
             nbt.putFloat("Corner" + i + "V", getCornerV(i));
+            nbt.putFloat("Corner" + i + "Opacity", getCornerOpacity(i));
+            nbt.putFloat("Corner" + i + "Melt", getCornerMelt(i));
         }
+    }
+
+    private static float clamp01(float value) {
+        return value < 0.0f ? 0.0f : Math.min(value, 1.0f);
     }
 
     @Override

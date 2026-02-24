@@ -21,6 +21,9 @@ public final class GraffitiShaders implements ClientModInitializer {
         
         // Register corner interaction handler for graffiti editing
         GraffitiCornerHandler.register();
+
+        // Register right-click config handler
+        GraffitiConfigHandler.register();
         
         // Register the graffiti picker opener
         GraffitiPickerOpener.setOpener(data -> {

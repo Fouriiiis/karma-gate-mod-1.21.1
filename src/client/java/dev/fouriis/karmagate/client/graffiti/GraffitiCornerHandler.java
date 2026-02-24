@@ -2,9 +2,11 @@ package dev.fouriis.karmagate.client.graffiti;
 
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.item.ModItems;
+import dev.fouriis.karmagate.network.UpdateGraffitiPayload;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.*;
 import net.minecraft.client.util.math.MatrixStack;
@@ -14,6 +16,8 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Matrix4f;
 
+import java.util.OptionalDouble;
+
 import java.util.List;
 
 /**
@@ -22,6 +26,23 @@ import java.util.List;
 public class GraffitiCornerHandler {
     private static final float CORNER_SELECT_RADIUS = 0.15f;
     private static final float MAX_EDIT_DISTANCE = 10f;
+
+    private static final RenderLayer EDIT_LINES = RenderLayer.of(
+        "graffiti_edit_lines",
+        VertexFormats.POSITION_COLOR,
+        VertexFormat.DrawMode.LINES,
+        256,
+        false,
+        false,
+        RenderLayer.MultiPhaseParameters.builder()
+            .program(RenderPhase.LINES_PROGRAM)
+            .lineWidth(new RenderPhase.LineWidth(OptionalDouble.of(1.0)))
+            .layering(RenderPhase.VIEW_OFFSET_Z_LAYERING)
+            .depthTest(RenderPhase.ALWAYS_DEPTH_TEST)
+            .writeMaskState(RenderPhase.COLOR_MASK)
+            .cull(RenderPhase.DISABLE_CULLING)
+            .build(false)
+    );
     
     private static GraffitiEntity selectedEntity = null;
     private static int selectedCorner = -1;
@@ -105,6 +126,9 @@ public class GraffitiCornerHandler {
         } else if (!leftClick && isDragging) {
             // Stop dragging
             isDragging = false;
+            if (selectedEntity != null) {
+                sendCornerUpdate(selectedEntity);
+            }
         }
         
         // Update corner position while dragging
@@ -201,13 +225,13 @@ public class GraffitiCornerHandler {
         Vec3d cameraPos = context.camera().getPos();
         
         VertexConsumerProvider.Immediate immediate = client.getBufferBuilders().getEntityVertexConsumers();
-        VertexConsumer lineBuffer = immediate.getBuffer(RenderLayer.getLines());
+        VertexConsumer lineBuffer = immediate.getBuffer(EDIT_LINES);
         
         for (GraffitiEntity graffiti : nearbyGraffiti) {
             renderGraffitiBorder(matrices, lineBuffer, graffiti, cameraPos);
         }
         
-        immediate.draw(RenderLayer.getLines());
+        immediate.draw(EDIT_LINES);
     }
     
     private static void renderGraffitiBorder(MatrixStack matrices, VertexConsumer buffer, 
@@ -254,13 +278,12 @@ public class GraffitiCornerHandler {
     
     private static void drawLine(VertexConsumer buffer, Matrix4f mat, Vec3d from, Vec3d to,
                                  float r, float g, float b, float a) {
-        Vec3d dir = to.subtract(from).normalize();
         buffer.vertex(mat, (float)from.x, (float)from.y, (float)from.z)
               .color(r, g, b, a)
-              .normal((float)dir.x, (float)dir.y, (float)dir.z);
+              ;
         buffer.vertex(mat, (float)to.x, (float)to.y, (float)to.z)
               .color(r, g, b, a)
-              .normal((float)dir.x, (float)dir.y, (float)dir.z);
+              ;
     }
     
     private static void drawCornerMarker(VertexConsumer buffer, Matrix4f mat, Vec3d pos, float size,
@@ -282,5 +305,27 @@ public class GraffitiCornerHandler {
     
     public static int getSelectedCorner() {
         return selectedCorner;
+    }
+
+    private static void sendCornerUpdate(GraffitiEntity graffiti) {
+        float[] opacities = new float[4];
+        float[] melts = new float[4];
+        float[] cornerH = new float[4];
+        float[] cornerV = new float[4];
+        for (int i = 0; i < 4; i++) {
+            opacities[i] = graffiti.getCornerOpacity(i);
+            melts[i] = graffiti.getCornerMelt(i);
+            cornerH[i] = graffiti.getCornerH(i);
+            cornerV[i] = graffiti.getCornerV(i);
+        }
+
+        ClientPlayNetworking.send(new UpdateGraffitiPayload(
+            graffiti.getId(),
+            graffiti.getTexturePath(),
+            opacities,
+            melts,
+            cornerH,
+            cornerV
+        ));
     }
 }

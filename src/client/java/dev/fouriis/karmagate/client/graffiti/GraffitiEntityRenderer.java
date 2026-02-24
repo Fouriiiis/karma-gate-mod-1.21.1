@@ -68,8 +68,21 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
         Identifier texture = getEntityTexture(entity);
         VertexConsumer vc = vertexConsumers.getBuffer(GraffitiRenderLayer.get(texture));
         Matrix4f mat = matrices.peek().getPositionMatrix();
+        boolean useCustomShader = GraffitiRenderLayer.useCustomShader();
 
         float[][] entityCorners = entity.getCorners();
+        float[] cornerOpacity = new float[] {
+            entity.getCornerOpacity(0),
+            entity.getCornerOpacity(1),
+            entity.getCornerOpacity(2),
+            entity.getCornerOpacity(3)
+        };
+        float[] cornerMelt = new float[] {
+            entity.getCornerMelt(0),
+            entity.getCornerMelt(1),
+            entity.getCornerMelt(2),
+            entity.getCornerMelt(3)
+        };
 
         // Bounds in local (H,V)
         float minH = Float.MAX_VALUE, maxH = Float.MIN_VALUE;
@@ -114,21 +127,22 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
 
                     extractFromModel(
                         quadsToDraw, model, state, blockPos, facing,
-                        entityX, entityY, entityZ, entityCorners, world, seeded
+                        entityX, entityY, entityZ, entityCorners, cornerOpacity, cornerMelt, world, seeded
                     );
                 }
             }
         }
 
         for (DecalQuad dq : quadsToDraw) {
-            renderQuad(mat, vc, dq, world);
+            renderQuad(mat, vc, dq, world, useCustomShader);
         }
     }
 
     private void extractFromModel(List<DecalQuad> out, BakedModel model, BlockState state,
                                   BlockPos blockPos, Direction entityFacing,
                                   double entityX, double entityY, double entityZ,
-                                  float[][] entityCorners, World world, Random random) {
+                                  float[][] entityCorners, float[] cornerOpacity, float[] cornerMelt,
+                                  World world, Random random) {
 
         Direction[] dirs = {
             entityFacing.getOpposite(),
@@ -142,7 +156,7 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
             List<BakedQuad> quads = model.getQuads(state, dir, random);
             for (BakedQuad quad : quads) {
                 extractFromQuad(out, quad, blockPos, dir, entityFacing,
-                    entityX, entityY, entityZ, entityCorners, world);
+                    entityX, entityY, entityZ, entityCorners, cornerOpacity, cornerMelt, world);
             }
         }
 
@@ -152,7 +166,7 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
             Direction qd = quad.getFace();
             if (isRelevant(qd, entityFacing)) {
                 extractFromQuad(out, quad, blockPos, qd, entityFacing,
-                    entityX, entityY, entityZ, entityCorners, world);
+                    entityX, entityY, entityZ, entityCorners, cornerOpacity, cornerMelt, world);
             }
         }
     }
@@ -167,7 +181,8 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
 
     private void extractFromQuad(List<DecalQuad> out, BakedQuad quad, BlockPos blockPos, Direction quadDir,
                                  Direction entityFacing, double entityX, double entityY, double entityZ,
-                                 float[][] entityCorners, World world) {
+                                 float[][] entityCorners, float[] cornerOpacity, float[] cornerMelt,
+                                 World world) {
 
         if (wouldQuadBeOccluded(world, blockPos, quadDir)) return;
 
@@ -196,7 +211,12 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
             double rz = bz + z - entityZ + nz * DECAL_OFFSET;
 
             float[] uv = computeUV(rx, ry, rz, entityCorners, entityFacing);
-            poly.add(new Vtx(rx, ry, rz, uv[0], uv[1]));
+            float u = uv[0];
+            float vTex = uv[1];
+            float v = 1.0f - vTex;
+            float opacity = bilerp(cornerOpacity, u, v);
+            float melt = bilerp(cornerMelt, u, v);
+            poly.add(new Vtx(rx, ry, rz, u, vTex, opacity, melt));
         }
 
         // Quick reject: no overlap with [0..1] UV area
@@ -338,8 +358,10 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
         double z = a.z + (b.z - a.z) * t;
         float u = a.u + (b.u - a.u) * t;
         float v = a.v + (b.v - a.v) * t;
+        float opacity = a.opacity + (b.opacity - a.opacity) * t;
+        float melt = a.melt + (b.melt - a.melt) * t;
 
-        return new Vtx(x, y, z, u, v);
+        return new Vtx(x, y, z, u, v, opacity, melt);
     }
 
     /**
@@ -398,15 +420,17 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
         return ax * by - ay * bx;
     }
 
-    private void renderQuad(Matrix4f mat, VertexConsumer vc, DecalQuad dq, World world) {
+    private void renderQuad(Matrix4f mat, VertexConsumer vc, DecalQuad dq, World world, boolean useCustomShader) {
         int blockLight = world.getLightLevel(LightType.BLOCK, dq.lightPos);
         int skyLight = world.getLightLevel(LightType.SKY, dq.lightPos);
         int packedLight = LightmapTextureManager.pack(blockLight, skyLight);
 
         for (int i = 0; i < 4; i++) {
             Vtx v = dq.v[i];
+            int a = MathHelper.clamp((int) (v.opacity * 255.0f), 0, 255);
+            int b = useCustomShader ? MathHelper.clamp((int) (v.melt * 255.0f), 0, 255) : 255;
             vc.vertex(mat, (float) v.x, (float) v.y, (float) v.z)
-                .color(255, 255, 255, 255)
+                .color(255, 255, b, a)
                 .texture(v.u, v.v)
                 .overlay(OverlayTexture.DEFAULT_UV)
                 .light(packedLight)
@@ -414,16 +438,28 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
         }
     }
 
+    private float bilerp(float[] corners, float u, float v) {
+        float cu = MathHelper.clamp(u, 0.0f, 1.0f);
+        float cv = MathHelper.clamp(v, 0.0f, 1.0f);
+        float a = MathHelper.lerp(cu, corners[0], corners[1]);
+        float b = MathHelper.lerp(cu, corners[3], corners[2]);
+        return MathHelper.lerp(cv, a, b);
+    }
+
     private static final class Vtx {
         final double x, y, z;
         final float u, v;
+        final float opacity;
+        final float melt;
 
-        Vtx(double x, double y, double z, float u, float v) {
+        Vtx(double x, double y, double z, float u, float v, float opacity, float melt) {
             this.x = x;
             this.y = y;
             this.z = z;
             this.u = u;
             this.v = v;
+            this.opacity = opacity;
+            this.melt = melt;
         }
     }
 

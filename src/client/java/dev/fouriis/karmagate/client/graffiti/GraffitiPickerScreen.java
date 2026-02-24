@@ -30,9 +30,10 @@ public class GraffitiPickerScreen extends Screen {
     private static final int PADDING = 8;
     private static final int COLUMNS = 6;
     
-    // Pending spawn data
+    // Pending spawn data (only used when placing new graffiti)
     private final double spawnX, spawnY, spawnZ;
     private final Direction facing;
+    private final java.util.function.Consumer<String> onTextureSelected;
     
     // Available textures
     private final List<GraffitiTexture> textures = new ArrayList<>();
@@ -42,11 +43,21 @@ public class GraffitiPickerScreen extends Screen {
     private int maxScroll = 0;
     
     public GraffitiPickerScreen(double x, double y, double z, Direction facing) {
+        this(x, y, z, facing, null);
+    }
+
+    public GraffitiPickerScreen(java.util.function.Consumer<String> onTextureSelected) {
+        this(0.0, 0.0, 0.0, Direction.NORTH, onTextureSelected);
+    }
+
+    private GraffitiPickerScreen(double x, double y, double z, Direction facing,
+                                 java.util.function.Consumer<String> onTextureSelected) {
         super(Text.literal("Select Graffiti"));
         this.spawnX = x;
         this.spawnY = y;
         this.spawnZ = z;
         this.facing = facing;
+        this.onTextureSelected = onTextureSelected;
     }
     
     @Override
@@ -209,17 +220,23 @@ public class GraffitiPickerScreen extends Screen {
     }
     
     private void selectTexture(GraffitiTexture texture) {
+        if (onTextureSelected != null) {
+            onTextureSelected.accept(texture.fileName());
+            this.close();
+            return;
+        }
+
         // Send spawn packet to server
         SpawnGraffitiPayload payload = new SpawnGraffitiPayload(
             spawnX, spawnY, spawnZ,
             facing.getId(),
             texture.fileName()
         );
-        
+
         ClientPlayNetworking.send(payload);
-        
+
         KarmaGateMod.LOGGER.info("Selected graffiti texture: {}", texture.fileName());
-        
+
         this.close();
     }
     

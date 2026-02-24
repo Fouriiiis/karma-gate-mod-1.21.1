@@ -12,7 +12,7 @@ public final class GraffitiRenderLayer {
         // so vanilla entity translucent works reliably with shader packs.
         //
         // If your custom shader is active, this still works too.
-        if (isIrisShaderPackActive()) {
+        if (!useCustomShader()) {
             return RenderLayer.getEntityTranslucentCull(texture);
         }
 
@@ -20,6 +20,10 @@ public final class GraffitiRenderLayer {
         // If PROGRAM isn't ready yet, fall back.
         RenderLayer custom = CustomGraffitiLayer.get(texture);
         return custom != null ? custom : RenderLayer.getEntityTranslucentCull(texture);
+    }
+
+    public static boolean useCustomShader() {
+        return !isIrisShaderPackActive() && GraffitiShaders.PROGRAM != null;
     }
 
     /**

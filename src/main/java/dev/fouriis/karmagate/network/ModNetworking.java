@@ -30,6 +30,11 @@ public class ModNetworking {
             SpawnGraffitiPayload.ID,
             SpawnGraffitiPayload.CODEC
         );
+
+        PayloadTypeRegistry.playC2S().register(
+            UpdateGraffitiPayload.ID,
+            UpdateGraffitiPayload.CODEC
+        );
         
         // Handle graffiti spawn requests from clients
         ServerPlayNetworking.registerGlobalReceiver(SpawnGraffitiPayload.ID, (payload, context) -> {
@@ -45,6 +50,30 @@ public class ModNetworking {
                 
                 KarmaGateMod.LOGGER.info("Spawned graffiti at ({}, {}, {}) with texture {} for player {}", 
                     payload.x(), payload.y(), payload.z(), payload.texturePath(), player.getName().getString());
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(UpdateGraffitiPayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            context.server().execute(() -> {
+                var entity = player.getWorld().getEntityById(payload.entityId());
+                if (!(entity instanceof GraffitiEntity graffiti)) return;
+                if (!graffiti.isAlive()) return;
+
+                double distSq = player.squaredDistanceTo(graffiti.getPos());
+                if (distSq > 100.0) return;
+
+                graffiti.setTexturePath(payload.texturePath());
+
+                float[] opacity = payload.cornerOpacity();
+                float[] melt = payload.cornerMelt();
+                float[] cornerH = payload.cornerH();
+                float[] cornerV = payload.cornerV();
+                for (int i = 0; i < 4; i++) {
+                    graffiti.setCornerOpacity(i, opacity[i]);
+                    graffiti.setCornerMelt(i, melt[i]);
+                    graffiti.setCorner(i, cornerH[i], cornerV[i]);
+                }
             });
         });
         
