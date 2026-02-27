@@ -15,6 +15,8 @@ import java.util.*;
  */
 public final class WormGrassStrandModel {
 
+    public static final boolean funny_pulsating_effect = false;
+
     /**
      * Segment count is a major perf lever because each segment emits 2 quads.
      * 3 keeps the silhouette while cutting vertices ~40% vs 5.
@@ -127,6 +129,12 @@ public final class WormGrassStrandModel {
         float tipY = baseY + height + tipOffsetY;
         float tipZ = baseZ + tipOffsetZ;
 
+        long strandHashEarly = hashFromPos(baseX, baseY, baseZ);
+        float pulsePhase = ((strandHashEarly >>> 16) & 0xFFFFL) * (float)(2.0 * Math.PI / 0xFFFFL);
+        float pulseSpeed = swayTime * 2.5f;
+        float pulseWaveLen = (float)(2.0 * Math.PI);
+        float pulseAmp = 0.05f;
+
         for (int i = 0; i <= segments; i++) {
             float t = i / (float) segments;
 
@@ -144,7 +152,16 @@ public final class WormGrassStrandModel {
             // the middle, matching Rain World's organic strand shape.
             float biasedPos = MathHelper.lerp(0.2f, t, 0.5f); // map [0,1] → [0.1,0.9]
             float sineProfile = (float) Math.sin(biasedPos * Math.PI);
-            segWidth[i] = width * (0.30f + 0.70f * sineProfile);
+
+            if(funny_pulsating_effect) {
+                float baseSegWidth = width * (0.30f + 0.70f * sineProfile);
+
+                float pulseFactor = 1.0f + pulseAmp * (float) Math.sin(pulsePhase + pulseSpeed - t * pulseWaveLen);
+                segWidth[i] = baseSegWidth * pulseFactor;
+            }
+            else {
+                segWidth[i] = width * (0.30f + 0.70f * sineProfile);
+            }
         }
 
         float initialDirX = segX[1] - segX[0];

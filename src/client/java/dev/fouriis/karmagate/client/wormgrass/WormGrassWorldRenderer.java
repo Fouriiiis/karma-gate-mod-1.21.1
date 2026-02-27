@@ -3,6 +3,9 @@ package dev.fouriis.karmagate.client.wormgrass;
 import com.mojang.blaze3d.systems.RenderSystem;
 import dev.fouriis.karmagate.block.ModBlocks;
 import dev.fouriis.karmagate.hologram.RainWorldFrameIndex;
+import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
+import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
+import net.brickcraftdream.librainworldmc.client.atlas.FAtlasManager;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.*;
@@ -38,6 +41,7 @@ public final class WormGrassWorldRenderer {
         final float perpBx, perpBy, perpBz;
         final float tipDirX, tipDirY, tipDirZ;
         final float tipW;
+        final float strandWidth;
         final float eyeOpen;
         final int light;
         final long strandHash;
@@ -46,12 +50,13 @@ public final class WormGrassWorldRenderer {
                    float perpAx, float perpAy, float perpAz,
                    float perpBx, float perpBy, float perpBz,
                    float tipDirX, float tipDirY, float tipDirZ,
-                   float tipW, float eyeOpen, int light, long strandHash) {
+                   float tipW, float strandWidth, float eyeOpen, int light, long strandHash) {
             this.x = x; this.y = y; this.z = z;
             this.perpAx = perpAx; this.perpAy = perpAy; this.perpAz = perpAz;
             this.perpBx = perpBx; this.perpBy = perpBy; this.perpBz = perpBz;
             this.tipDirX = tipDirX; this.tipDirY = tipDirY; this.tipDirZ = tipDirZ;
             this.tipW = tipW;
+            this.strandWidth = strandWidth;
             this.eyeOpen = eyeOpen;
             this.light = light;
             this.strandHash = strandHash;
@@ -181,9 +186,16 @@ public final class WormGrassWorldRenderer {
     private static final ArrayList<PendingEye> framePendingEyes = new ArrayList<>();
     private static final ArrayList<Long> physicsSnapshot = new ArrayList<>();
 
+    private static FAtlasManager atlasManager;
+    private static FAtlasElement wormgrass_eye;
+
     public static void render(WorldRenderContext context) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.world == null || client.player == null) return;
+        if(atlasManager == null) {
+            atlasManager = LibrainworldmcClient.getAtlasManager();
+            wormgrass_eye = atlasManager.getElementWithName("tinyStar");
+        }
 
         ClientWorld world = client.world;
         double camX = context.camera().getPos().x;
@@ -563,7 +575,6 @@ public final class WormGrassWorldRenderer {
                             strandExcitement, swayTime
                     );
 
-                    //eyeOpen = 1;
                     if(eyeOpen > 0f) {
                         float bezierCtrlX = x + lashX * 0.25f;
                         float bezierCtrlY = y + strandHeight * 0.65f + lashY * 0.25f;
@@ -596,22 +607,28 @@ public final class WormGrassWorldRenderer {
                             tipTangentZ = 1;
                         }
 
-                        float eyeRightX = billboardRight.x;
-                        float eyeRightY = billboardRight.y;
-                        float eyeRightZ = billboardRight.z;
+                        float refX = 0f, refY = 1f, refZ = 0f;
+                        if (Math.abs(tipTangentY) > 0.99f) { refX = 1f; refY = 0f; refZ = 0f; }
+                        float crossAx = tipTangentY * refZ - tipTangentZ * refY;
+                        float crossAy = tipTangentZ * refX - tipTangentX * refZ;
+                        float crossAz = tipTangentX * refY - tipTangentY * refX;
+                        float crossALen = (float) Math.sqrt(crossAx * crossAx + crossAy * crossAy + crossAz * crossAz);
+                        if (crossALen > 0.0001f) { crossAx /= crossALen; crossAy /= crossALen; crossAz /= crossALen; }
 
-                        float eyeUpX = billboardUp.x;
-                        float eyeUpY = billboardUp.y;
-                        float eyeUpZ = billboardUp.z;
+                        float crossBx = tipTangentY * crossAz - tipTangentZ * crossAy;
+                        float crossBy = tipTangentZ * crossAx - tipTangentX * crossAz;
+                        float crossBz = tipTangentX * crossAy - tipTangentY * crossAx;
+                        float crossBLen = (float) Math.sqrt(crossBx * crossBx + crossBy * crossBy + crossBz * crossBz);
+                        if (crossBLen > 0.0001f) { crossBx /= crossBLen; crossBy /= crossBLen; crossBz /= crossBLen; }
 
                         float eyeWidthAtTip = width * MathHelper.lerp(smoothstep(1f), 1.0f, 0.45f);
 
                         framePendingEyes.add(new PendingEye(
                                 strandTipX, strandTipY, strandTipZ,
-                                eyeRightX, eyeRightY, eyeRightZ,
-                                eyeUpX, eyeUpY, eyeUpZ,
+                                crossAx, crossAy, crossAz,
+                                crossBx, crossBy, crossBz,
                                 tipTangentX, tipTangentY, tipTangentZ,
-                                eyeWidthAtTip, eyeOpen, light, h
+                                eyeWidthAtTip, width, eyeOpen, light, h
                         ));
                     }
                 }
@@ -624,7 +641,7 @@ public final class WormGrassWorldRenderer {
             matrices.push();
             matrices.translate(-camX, -camY, -camZ);
             Matrix4f eyePosMat = matrices.peek().getPositionMatrix();
-            VertexConsumer evc = consumers.getBuffer(RenderLayer.getEntityCutoutNoCull(WHITE));
+            VertexConsumer evc = consumers.getBuffer(RenderLayer.getEntityCutoutNoCull(wormgrass_eye.textureIdentifier));
 
             for(PendingEye eye : framePendingEyes) {
                 float openAmount = MathHelper.clamp(eye.eyeOpen, 0f, 1f);
@@ -640,38 +657,35 @@ public final class WormGrassWorldRenderer {
                 eyeCenterY += eye.perpAy * (eye.tipW * 0.15f) * lateralSide;
                 eyeCenterZ += eye.perpAz * (eye.tipW * 0.15f) * lateralSide;
 
-                float nudge = eye.tipW * 0.55f;
-                eyeCenterX += billboardTowardCam.x * nudge;
-                eyeCenterY += billboardTowardCam.y * nudge;
-                eyeCenterZ += billboardTowardCam.z * nudge;
+                float toCamX = (float)(camX - eyeCenterX);
+                float toCamY = (float)(camY - eyeCenterY);
+                float toCamZ = (float)(camZ - eyeCenterZ);
+                float toCamLen = (float) Math.sqrt(toCamX * toCamX + toCamY * toCamY + toCamZ * toCamZ);
+                if (toCamLen > 0.0001f) { toCamX /= toCamLen; toCamY /= toCamLen; toCamZ /= toCamLen; }
+
+                float tubeRadius = eye.strandWidth * 0.5f - 0.005f;
+                eyeCenterX += toCamX * tubeRadius;
+                eyeCenterY += toCamY * tubeRadius;
+                eyeCenterZ += toCamZ * tubeRadius;
+
+                float verticalDelta = (float)(camY - eye.y);
+                eyeCenterY += verticalDelta * 0.005f;
 
                 float eyeColorR = 0.20f, eyeColorG = 0.00f, eyeColorB = 1.00f, eyeColorA = 1.0f;
 
                 float halfWidth  = eyeSize * 0.5f;
                 float halfHeight = eyeSize * 0.5f;
 
-                float faceNormalX = eye.perpAy * eye.perpBz - eye.perpAz * eye.perpBy;
-                float faceNormalY = eye.perpAz * eye.perpBx - eye.perpAx * eye.perpBz;
-                float faceNormalZ = eye.perpAx * eye.perpBy - eye.perpAy * eye.perpBx;
-
-                float crossedFaceNormalX = eye.perpBy * (-eye.perpAz) - eye.perpBz * (-eye.perpAy);
-                float crossedFaceNormalY = eye.perpBz * (-eye.perpAx) - eye.perpBx * (-eye.perpAz);
-                float crossedFaceNormalZ = eye.perpBx * (-eye.perpAy) - eye.perpBy * (-eye.perpAx);
+                float qRightX = billboardRight.x, qRightY = billboardRight.y, qRightZ = billboardRight.z;
+                float qUpX    = billboardUp.x,    qUpY    = billboardUp.y,    qUpZ    = billboardUp.z;
+                float qNormX  = billboardTowardCam.x, qNormY = billboardTowardCam.y, qNormZ = billboardTowardCam.z;
 
                 emitEyeQuad(evc, eyePosMat,
                         eyeCenterX, eyeCenterY, eyeCenterZ,
                         halfWidth, halfHeight,
-                        eye.perpAx, eye.perpAy, eye.perpAz,
-                        eye.perpBx, eye.perpBy, eye.perpBz,
-                        faceNormalX, faceNormalY, faceNormalZ,
-                        eyeColorR, eyeColorG, eyeColorB, eyeColorA, eye.light);
-
-                emitEyeQuad(evc, eyePosMat,
-                        eyeCenterX, eyeCenterY, eyeCenterZ,
-                        halfWidth, halfHeight,
-                        eye.perpBx, eye.perpBy, eye.perpBz,
-                        -eye.perpAx, -eye.perpAy, -eye.perpAz,
-                        crossedFaceNormalX, crossedFaceNormalY, crossedFaceNormalZ,
+                        qRightX, qRightY, qRightZ,
+                        qUpX, qUpY, qUpZ,
+                        qNormX, qNormY, qNormZ,
                         eyeColorR, eyeColorG, eyeColorB, eyeColorA, eye.light);
             }
             matrices.pop();
