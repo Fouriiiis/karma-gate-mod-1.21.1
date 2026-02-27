@@ -1,14 +1,11 @@
 package dev.fouriis.karmagate.client.wormgrass;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import dev.fouriis.karmagate.block.ModBlocks;
 import dev.fouriis.karmagate.hologram.RainWorldFrameIndex;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.RenderLayer;
-import net.minecraft.client.render.Frustum;
-import net.minecraft.client.render.VertexConsumer;
-import net.minecraft.client.render.VertexConsumerProvider;
-import net.minecraft.client.render.WorldRenderer;
+import net.minecraft.client.render.*;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.LivingEntity;
@@ -16,9 +13,11 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
+
 import net.minecraft.util.math.ChunkPos;
 import org.joml.Matrix4f;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -28,8 +27,36 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static dev.fouriis.karmagate.client.wormgrass.WormGrassStrandModel.*;
+
 public final class WormGrassWorldRenderer {
     private static final Identifier WHITE = Identifier.ofVanilla("textures/misc/white.png");
+
+    private static final class PendingEye {
+        final float x, y, z;
+        final float perpAx, perpAy, perpAz;
+        final float perpBx, perpBy, perpBz;
+        final float tipDirX, tipDirY, tipDirZ;
+        final float tipW;
+        final float eyeOpen;
+        final int light;
+        final long strandHash;
+
+        PendingEye(float x, float y, float z,
+                   float perpAx, float perpAy, float perpAz,
+                   float perpBx, float perpBy, float perpBz,
+                   float tipDirX, float tipDirY, float tipDirZ,
+                   float tipW, float eyeOpen, int light, long strandHash) {
+            this.x = x; this.y = y; this.z = z;
+            this.perpAx = perpAx; this.perpAy = perpAy; this.perpAz = perpAz;
+            this.perpBx = perpBx; this.perpBy = perpBy; this.perpBz = perpBz;
+            this.tipDirX = tipDirX; this.tipDirY = tipDirY; this.tipDirZ = tipDirZ;
+            this.tipW = tipW;
+            this.eyeOpen = eyeOpen;
+            this.light = light;
+            this.strandHash = strandHash;
+        }
+    }
 
     @SuppressWarnings("unused")
     private static final RainWorldFrameIndex FRAME_INDEX = RainWorldFrameIndex.load(
@@ -44,16 +71,19 @@ public final class WormGrassWorldRenderer {
     // -------------------------------------------------------------------------
     // LOD / culling
     // -------------------------------------------------------------------------
-    /** Full geometry + physics. */
-    private static final float LOD_NEAR = 18.0f;
-    /** Full geometry but no per-strand physics (cheap procedural sway). */
-    private static final float LOD_MID  = 32.0f;
-    /** Single billboard quad per *block* (no per-sample carpet). */
-    private static final float LOD_FAR  = 60.0f;
+    /** Full square-tube geometry + full physics. lodLevel 0..1 */
+    private static final float LOD_HIGH_DIST   = 16.0f;
+    /** Flat crossing quads per segment, no physics (procedural sway only). lodLevel 1..2 */
+    private static final float LOD_MEDIUM_DIST = 32.0f;
+    /** Single flat crossing quad base-to-tip + cap, no physics. lodLevel 2..3 */
+    private static final float LOD_LOW_DIST    = 64.0f;
+    /** Single Y-axis billboard per strand, no curve, no cap. lodLevel 3..4 */
+    private static final float LOD_POTATO_DIST = 128.0f;
 
-    private static final float LOD_NEAR_SQ = LOD_NEAR * LOD_NEAR;
-    private static final float LOD_MID_SQ  = LOD_MID  * LOD_MID;
-    private static final float LOD_FAR_SQ  = LOD_FAR  * LOD_FAR;
+    private static final float LOD_HIGH_DIST_SQ = LOD_HIGH_DIST * LOD_HIGH_DIST;
+    private static final float LOD_MEDIUM_DIST_SQ = LOD_MEDIUM_DIST * LOD_MEDIUM_DIST;
+    private static final float LOD_LOW_DIST_SQ = LOD_LOW_DIST * LOD_LOW_DIST;
+    private static final float LOD_POTATO_DIST_SQ = LOD_POTATO_DIST * LOD_POTATO_DIST;
 
     /** Prevent runaway strand state creation. */
     private static final int MAX_STRAND_STATES = 25_000;
@@ -122,6 +152,8 @@ public final class WormGrassWorldRenderer {
     private static final float REST_SNAP_DIST_SQ = 1.0e-6f;
     private static final float REST_SNAP_VEL_SQ = 1.0e-6f;
 
+    private static final int ENTITY_SCAN_INTERVAL = 5;
+
     private static final float LATCH_RANGE = 1.5f;
     private static final float LATCH_RANGE_SQ = LATCH_RANGE * LATCH_RANGE;
     private static final float LATCH_BREAK_RANGE = 3.0f;
@@ -129,31 +161,42 @@ public final class WormGrassWorldRenderer {
 
     // Per-strand state tracking for physics-based animation
     private static final Map<Long, StrandAnimState> STRAND_ANIM_STATES = new HashMap<>();
-    
+
     // Tick tracking for physics updates
     private static long lastPhysicsTick = 0;
+
+    private static long lastEntityScanTick = -1;
+    private static List<LivingEntity> cachedEntities = new ArrayList<>();
+    private static final java.util.Set<Long> AWAKE_STRAND_KEYS = new HashSet<>();
 
     public static void render(WorldRenderContext context) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.world == null || client.player == null) return;
 
         ClientWorld world = client.world;
-        Vec3d cam = context.camera().getPos();
+        double camX = context.camera().getPos().x;
+        double camY = context.camera().getPos().y;
+        double camZ = context.camera().getPos().z;
         float tickDelta = context.tickCounter().getTickDelta(true);
+
+        Quaternionf camRot = new Quaternionf(context.camera().getRotation());
+        Vector3f billboardRight = camRot.transform(new Vector3f(1f, 0f, 0f));
+        Vector3f billboardUp = camRot.transform(new Vector3f(0f, 1f, 0f));
+        Vector3f billboardTowardCam = camRot.transform(new Vector3f(0f, 0f, 1f));
         Frustum frustum = context.frustum();
 
         // Run physics tick if enough time has passed (~20 TPS)
         long now = world.getTime();
-        if (now != lastPhysicsTick) {
+        if (now != lastPhysicsTick && (lastPhysicsTick + 1) <= now) {
             lastPhysicsTick = now;
-            tickPhysics(world, cam);
+            tickPhysics(world, camX, camY, camZ);
         }
 
         MatrixStack matrices = context.matrixStack();
         matrices.push();
 
         // IMPORTANT: In AFTER_ENTITIES the stack is commonly NOT camera-relative.
-        matrices.translate(-cam.x, -cam.y, -cam.z);
+        matrices.translate(-camX, -camY, -camZ);
 
         Matrix4f posMat = matrices.peek().getPositionMatrix();
 
@@ -165,8 +208,10 @@ public final class WormGrassWorldRenderer {
 
         VertexConsumer vc = consumers.getBuffer(RenderLayer.getEntityCutoutNoCull(WHITE));
 
-        int camChunkX = MathHelper.floor(cam.x / 16.0);
-        int camChunkZ = MathHelper.floor(cam.z / 16.0);
+        ArrayList<PendingEye> pendingEyes = new ArrayList<>();
+
+        int camChunkX = MathHelper.floor(camX / 16.0);
+        int camChunkZ = MathHelper.floor(camZ / 16.0);
 
         double maxDistBlocks = VIEW_DISTANCE_CHUNKS * 16.0;
         double maxDistSq = maxDistBlocks * maxDistBlocks;
@@ -184,10 +229,8 @@ public final class WormGrassWorldRenderer {
         //
         // So we collect TWO sets:
         //  (1) analysisSet: all wormgrass blocks within the analysis radius (independent of frustum)
-        //  (2) detailedPositions/billboardPositions: the actually visible blocks we will draw
+        //  (2) detailedPositions: the actually visible blocks we will draw
         HashSet<Long> analysisSet = new HashSet<>(4096);
-        // Far positions: render a single billboard per block.
-        ArrayList<Long> billboardPositions = new ArrayList<>(2048);
 
         for (int dz = -VIEW_DISTANCE_CHUNKS; dz <= VIEW_DISTANCE_CHUNKS; dz++) {
             for (int dx = -VIEW_DISTANCE_CHUNKS; dx <= VIEW_DISTANCE_CHUNKS; dx++) {
@@ -203,17 +246,14 @@ public final class WormGrassWorldRenderer {
                 for (long packed : positions) {
                     BlockPos pos = BlockPos.fromLong(packed);
 
-                    double ddx = (pos.getX() + 0.5) - cam.x;
-                    double ddz = (pos.getZ() + 0.5) - cam.z;
+                    double ddx = (pos.getX() + 0.5) - camX;
+                    double ddz = (pos.getZ() + 0.5) - camZ;
                     double distSq = ddx * ddx + ddz * ddz;
                     if (distSq > maxDistSq) continue;
 
-                    // Only consider actual wormgrass.
-                    if (world.getBlockState(pos).getBlock() != ModBlocks.WORM_GRASS) continue;
-
                     // Camera-independent analysis set used for patch/depth computation.
-                    // Include everything up to the far LOD radius so patch size doesn't depend on frustum.
-                    if (distSq <= LOD_FAR_SQ) {
+                    // Include everything up to the potato LOD radius so patch size doesn't depend on frustum.
+                    if (distSq <= LOD_POTATO_DIST_SQ) {
                         analysisSet.add(packed);
                     }
 
@@ -224,41 +264,13 @@ public final class WormGrassWorldRenderer {
                         if (!frustum.isVisible(box)) continue;
                     }
 
-                    // LOD split: far uses billboard, closer uses detailed.
-                    if (distSq > LOD_MID_SQ) {
-                        if (distSq <= LOD_FAR_SQ) billboardPositions.add(packed);
-                    } else {
+                    if (distSq <= LOD_POTATO_DIST_SQ) {
                         detailedPositions.add(packed);
                     }
                 }
             }
         }
 
-        if (detailedPositions.isEmpty() && billboardPositions.isEmpty()) {
-            matrices.pop();
-            return;
-        }
-
-        // PASS 1.5: far billboard rendering (no patch/depth needed)
-        if (!billboardPositions.isEmpty()) {
-            // Simple color roughly matching mid-depth. (If you want, you can sample depth later.)
-            float r = 0.30f, g = 0.02f, b = 0.12f;
-            for (long packed : billboardPositions) {
-                BlockPos pos = BlockPos.fromLong(packed);
-                int light = WorldRenderer.getLightmapCoordinates(world, pos);
-                float x = pos.getX() + 0.5f;
-                float z = pos.getZ() + 0.5f;
-                WormGrassStrandModel.emitBillboardY(
-                        vc, posMat,
-                        x, pos.getY(), z,
-                        (float) cam.x, (float) cam.z,
-                        0.40f,
-                        2.10f,
-                        light,
-                        r, g, b
-                );
-            }
-        }
 
         if (detailedPositions.isEmpty()) {
             matrices.pop();
@@ -293,8 +305,8 @@ public final class WormGrassWorldRenderer {
             PatchCell cell = patchCellByPos.get(packed);
             if (cell == null) continue;
 
-            double bdx = (pos.getX() + 0.5) - cam.x;
-            double bdz = (pos.getZ() + 0.5) - cam.z;
+            double bdx = (pos.getX() + 0.5) - camX;
+            double bdz = (pos.getZ() + 0.5) - camZ;
             double blockDistSq = bdx * bdx + bdz * bdz;
 
             // Patch-scale maturity (constant over the component)
@@ -310,7 +322,7 @@ public final class WormGrassWorldRenderer {
 
             // Dynamic density: farther blocks get sparser sampling.
             float spacing = GRID_SPACING;
-            if (blockDistSq > LOD_NEAR_SQ) spacing *= 1.55f;
+            if (blockDistSq > LOD_HIGH_DIST_SQ) spacing *= 1.55f;
 
             // Block bounds (+bleed) in world space
             float blockMinX = pos.getX() - BLEED;
@@ -386,43 +398,74 @@ public final class WormGrassWorldRenderer {
                     );
 
                     float yaw = (float) (rand01(h ^ 0x123456789ABCDEFL) * Math.PI);
-                    
+
                     // -------------------------
                     // PHYSICS-BASED STRAND ANIMATION
                     // -------------------------
                     float lashX, lashY, lashZ;
                     float strandExcitement;
 
-                    // Only allocate + simulate strand physics in near LOD.
+                    // Determine the LOD level for this strand based on its distance.
+                    // 0..1 = high (full square tube + full physics)
+                    // 1..2 = medium (flat crossing quads per segment, procedural sway)
+                    // 2..3 = low (single flat crossing quad base-to-tip + cap, no sway)
+                    // 3..4 = potato (Y-axis billboard, no curve)
+                    float strandLodLevel;
+                    if (blockDistSq <= LOD_HIGH_DIST_SQ) {
+                        strandLodLevel = 0f;
+                    } else if (blockDistSq <= LOD_MEDIUM_DIST_SQ) {
+                        strandLodLevel = 1f;
+                    } else if (blockDistSq <= LOD_LOW_DIST_SQ) {
+                        strandLodLevel = 2f;
+                    } else {
+                        strandLodLevel = 3f;
+                    }
+
+                    // Segment count: high = 3, medium = 2, low = 1, potato = ignored (billboard)
+                    int strandSegments;
+                    if (strandLodLevel <= 1f) {
+                        strandSegments = WormGrassStrandModel.SEGMENTS;
+                    } else if (strandLodLevel <= 2f) {
+                        strandSegments = WormGrassStrandModel.SEGMENTS_MID;
+                    } else {
+                        strandSegments = 1;
+                    }
+
+                    // Only allocate + simulate strand physics in high LOD.
                     StrandAnimState strandState = null;
-                    if (blockDistSq <= LOD_NEAR_SQ) {
+                    if (strandLodLevel <= 1f) {
                         strandState = getOrCreateStrandState(h, x, y, z, baseStrandHeight);
                     }
 
+                    float t = (world.getTime() + tickDelta) * 0.15f;
+                    float phase = ((h >>> 16) & 0xFFFF) * 0.01f;
+                    float sway = MathHelper.sin(t + phase) * 0.06f * depthScale;
+                    float sway2 = MathHelper.cos(t * 0.9f + phase * 1.3f) * 0.04f * depthScale;
+                    float sway3 = MathHelper.sin(t * 0.7f + phase) * 0.03f * depthScale;
+
                     if (strandState != null) {
-                        // Get interpolated tip offset for smooth rendering (including vertical)
-                        lashX = strandState.getLerpTipOffsetX(tickDelta);
-                        lashY = strandState.getLerpTipOffsetY(tickDelta);
+                        lashX = strandState.getLerpTipOffsetX(tickDelta) + sway;
+                        lashY = strandState.getLerpTipOffsetY(tickDelta) + sway2;
                         lashZ = strandState.getLerpTipOffsetZ(tickDelta);
                         strandExcitement = strandState.excitement;
-                    } else {
-                        // Mid LOD: cheap procedural sway (smooth, no allocations)
-                        float t = (world.getTime() + tickDelta) * 0.15f;
-                        float phase = ((h >>> 16) & 0xFFFF) * 0.01f;
-                        float sway = MathHelper.sin(t + phase) * 0.06f * depthScale;
-                        float sway2 = MathHelper.cos(t * 0.9f + phase * 1.3f) * 0.04f * depthScale;
+                    } else if (strandLodLevel <= 2f) {
                         lashX = sway;
                         lashZ = sway2;
-                        lashY = MathHelper.sin(t * 0.7f + phase) * 0.03f * depthScale;
+                        lashY = sway3;
+                        strandExcitement = 0f;
+                    } else {
+                        lashX = sway;
+                        lashZ = sway2;
+                        lashY = sway3;
                         strandExcitement = 0f;
                     }
-                    
+
                     // Apply excitement-based scaling to height and width
                     float excitementHeightBoost = MathHelper.lerp(strandExcitement, 1.0f, AWAKEN_HEIGHT_BOOST);
                     float excitementWidthBoost = MathHelper.lerp(strandExcitement, 1.0f, AWAKEN_THICKNESS_BOOST);
                     float strandHeight = baseStrandHeight * excitementHeightBoost;
                     width *= excitementWidthBoost;
-                    
+
                     // Rotate yaw toward target when excited
                     if (strandExcitement > 0.05f && (lashX != 0 || lashZ != 0)) {
                         float targetYaw = (float) Math.atan2(lashZ, lashX);
@@ -432,8 +475,7 @@ public final class WormGrassWorldRenderer {
                     float eyeOpen = MathHelper.clamp(strandExcitement * MathHelper.lerp(
                             rand01(h ^ 0x9E3779B97F4A7C15L), 0.75f, 1.15f), 0f, 1f);
                     if (strandState != null && strandState.isAttached) eyeOpen = 1.0f;
-                    // Mid LOD: skip eye entirely (big vertex + overdraw saver)
-                    if (blockDistSq > LOD_NEAR_SQ) eyeOpen = 0f;
+                    if (strandLodLevel > 1f) eyeOpen = 0f;
 
                     WormGrassStrandModel.emitCurvedStrand(
                             vc, posMat,
@@ -442,45 +484,215 @@ public final class WormGrassWorldRenderer {
                             width, strandHeight,
                             light,
                             r, g, b,
-                            eyeOpen
+                            strandLodLevel,
+                            strandSegments,
+                            (float) camX, (float) camZ
                     );
+
+                    //eyeOpen = 1;
+                    if(eyeOpen > 0f) {
+                        float bezierCtrlX = x + lashX * 0.25f;
+                        float bezierCtrlY = y + strandHeight * 0.65f + lashY * 0.25f;
+                        float bezierCtrlZ = z + lashZ * 0.25f;
+
+                        float strandTipX = x + lashX;
+                        float strandTipY = y + strandHeight + lashY;
+                        float strandTipZ = z + lashZ;
+
+                        float lastSegT = (WormGrassStrandModel.SEGMENTS - 1) / (float) WormGrassStrandModel.SEGMENTS;
+                        float lastSegOneMinusT = 1f - lastSegT;
+                        float lastSegPtX = lastSegOneMinusT * lastSegOneMinusT * x + 2f * lastSegOneMinusT * lastSegT * bezierCtrlX + lastSegT * lastSegT * strandTipX;
+                        float lastSegPtY = lastSegOneMinusT * lastSegOneMinusT * y + 2f * lastSegOneMinusT * lastSegT * bezierCtrlY + lastSegT * lastSegT * strandTipY;
+                        float lastSegPtZ = lastSegOneMinusT * lastSegOneMinusT * z + 2f * lastSegOneMinusT * lastSegT * bezierCtrlZ + lastSegT * lastSegT * strandTipZ;
+
+                        float tipTangentX = strandTipX - lastSegPtX;
+                        float tipTangentY = strandTipY - lastSegPtY;
+                        float tipTangentZ = strandTipZ - lastSegPtZ;
+
+                        float tipTangentLen = (float) Math.sqrt(tipTangentX * tipTangentX + tipTangentY * tipTangentY + tipTangentZ * tipTangentZ);
+
+                        if(tipTangentLen > 0.0001f) {
+                            tipTangentX /= tipTangentLen;
+                            tipTangentY /= tipTangentLen;
+                            tipTangentZ /= tipTangentLen;
+                        }
+                        else {
+                            tipTangentX = 1;
+                            tipTangentY = 0;
+                            tipTangentZ = 1;
+                        }
+
+                        float eyeRightX = billboardRight.x;
+                        float eyeRightY = billboardRight.y;
+                        float eyeRightZ = billboardRight.z;
+
+                        float eyeUpX = billboardUp.x;
+                        float eyeUpY = billboardUp.y;
+                        float eyeUpZ = billboardUp.z;
+
+                        float eyeWidthAtTip = width * MathHelper.lerp(smoothstep(1f), 1.0f, 0.45f);
+
+                        pendingEyes.add(new PendingEye(
+                                strandTipX, strandTipY, strandTipZ,
+                                eyeRightX, eyeRightY, eyeRightZ,
+                                eyeUpX, eyeUpY, eyeUpZ,
+                                tipTangentX, tipTangentY, tipTangentZ,
+                                eyeWidthAtTip, eyeOpen, light, h
+                        ));
+                    }
                 }
             }
         }
 
         matrices.pop();
+
+        if(!pendingEyes.isEmpty()) {
+            matrices.push();
+            matrices.translate(-camX, -camY, -camZ);
+            Matrix4f eyePosMat = matrices.peek().getPositionMatrix();
+            VertexConsumer evc = consumers.getBuffer(RenderLayer.getEntityCutoutNoCull(WHITE));
+
+            for(PendingEye eye : pendingEyes) {
+                float openAmount = MathHelper.clamp(eye.eyeOpen, 0f, 1f);
+                float eyeSize = eye.tipW * MathHelper.lerp(openAmount, 0.0f, 0.70f);
+
+                float backsetAlongTangent = eye.tipW * 0.08f;
+                float eyeCenterX = eye.x - eye.tipDirX * backsetAlongTangent;
+                float eyeCenterY = eye.y - eye.tipDirY * backsetAlongTangent;
+                float eyeCenterZ = eye.z - eye.tipDirZ * backsetAlongTangent;
+
+                float lateralSide = (randSigned(eye.strandHash) >= 0f) ? 1f : -1f;
+                eyeCenterX += eye.perpAx * (eye.tipW * 0.15f) * lateralSide;
+                eyeCenterY += eye.perpAy * (eye.tipW * 0.15f) * lateralSide;
+                eyeCenterZ += eye.perpAz * (eye.tipW * 0.15f) * lateralSide;
+
+                float nudge = eye.tipW * 0.55f;
+                eyeCenterX += billboardTowardCam.x * nudge;
+                eyeCenterY += billboardTowardCam.y * nudge;
+                eyeCenterZ += billboardTowardCam.z * nudge;
+
+                float eyeColorR = 0.20f, eyeColorG = 0.00f, eyeColorB = 1.00f, eyeColorA = 1.0f;
+
+                float halfWidth  = eyeSize * 0.5f;
+                float halfHeight = eyeSize * 0.5f;
+
+                float faceNormalX = eye.perpAy * eye.perpBz - eye.perpAz * eye.perpBy;
+                float faceNormalY = eye.perpAz * eye.perpBx - eye.perpAx * eye.perpBz;
+                float faceNormalZ = eye.perpAx * eye.perpBy - eye.perpAy * eye.perpBx;
+
+                float crossedFaceNormalX = eye.perpBy * (-eye.perpAz) - eye.perpBz * (-eye.perpAy);
+                float crossedFaceNormalY = eye.perpBz * (-eye.perpAx) - eye.perpBx * (-eye.perpAz);
+                float crossedFaceNormalZ = eye.perpBx * (-eye.perpAy) - eye.perpBy * (-eye.perpAx);
+
+                emitEyeQuad(evc, eyePosMat,
+                        eyeCenterX, eyeCenterY, eyeCenterZ,
+                        halfWidth, halfHeight,
+                        eye.perpAx, eye.perpAy, eye.perpAz,
+                        eye.perpBx, eye.perpBy, eye.perpBz,
+                        faceNormalX, faceNormalY, faceNormalZ,
+                        eyeColorR, eyeColorG, eyeColorB, eyeColorA, eye.light);
+
+                emitEyeQuad(evc, eyePosMat,
+                        eyeCenterX, eyeCenterY, eyeCenterZ,
+                        halfWidth, halfHeight,
+                        eye.perpBx, eye.perpBy, eye.perpBz,
+                        -eye.perpAx, -eye.perpAy, -eye.perpAz,
+                        crossedFaceNormalX, crossedFaceNormalY, crossedFaceNormalZ,
+                        eyeColorR, eyeColorG, eyeColorB, eyeColorA, eye.light);
+            }
+            matrices.pop();
+        }
+    }
+
+    private static void emitEyeQuad(
+            VertexConsumer vertexConsumer, Matrix4f positionMatrix,
+            float centerX, float centerY, float centerZ,
+            float halfWidth, float halfHeight,
+            float rightX, float rightY, float rightZ,
+            float upX, float upY, float upZ,
+            float faceNormalX, float faceNormalY, float faceNormalZ,
+            float colorR, float colorG, float colorB, float colorA,
+            int packedLight
+    ) {
+        float bottomLeftX = centerX - rightX * halfWidth - upX * halfHeight;
+        float bottomLeftY = centerY - rightY * halfWidth - upY * halfHeight;
+        float bottomLeftZ = centerZ - rightZ * halfWidth - upZ * halfHeight;
+
+        float bottomRightX = centerX + rightX * halfWidth - upX * halfHeight;
+        float bottomRightY = centerY + rightY * halfWidth - upY * halfHeight;
+        float bottomRightZ = centerZ + rightZ * halfWidth - upZ * halfHeight;
+
+        float topRightX = centerX + rightX * halfWidth + upX * halfHeight;
+        float topRightY = centerY + rightY * halfWidth + upY * halfHeight;
+        float topRightZ = centerZ + rightZ * halfWidth + upZ * halfHeight;
+
+        float topLeftX = centerX - rightX * halfWidth + upX * halfHeight;
+        float topLeftY = centerY - rightY * halfWidth + upY * halfHeight;
+        float topLeftZ = centerZ - rightZ * halfWidth + upZ * halfHeight;
+
+        vertexConsumer.vertex(positionMatrix, bottomLeftX, bottomLeftY, bottomLeftZ)
+                .color(colorR, colorG, colorB, colorA)
+                .texture(0f, 1f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(packedLight)
+                .normal(faceNormalX, faceNormalY, faceNormalZ);
+
+        vertexConsumer.vertex(positionMatrix, bottomRightX, bottomRightY, bottomRightZ)
+                .color(colorR, colorG, colorB, colorA)
+                .texture(1f, 1f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(packedLight)
+                .normal(faceNormalX, faceNormalY, faceNormalZ);
+
+        vertexConsumer.vertex(positionMatrix, topRightX, topRightY, topRightZ)
+                .color(colorR, colorG, colorB, colorA)
+                .texture(1f, 0f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(packedLight)
+                .normal(faceNormalX, faceNormalY, faceNormalZ);
+
+        vertexConsumer.vertex(positionMatrix, topLeftX, topLeftY, topLeftZ)
+                .color(colorR, colorG, colorB, colorA)
+                .texture(0f, 0f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(packedLight)
+                .normal(faceNormalX, faceNormalY, faceNormalZ);
     }
 
     // ---- Per-strand physics state ----
-    
+
     private static final class StrandAnimState {
         final float baseX, baseY, baseZ;
         final float length;
         final long strandHash;
-        
+
         // Current tip position (world coords)
         float tipX, tipY, tipZ;
         // Previous tick tip position (for interpolation)
         float lastTipX, lastTipY, lastTipZ;
         // Velocity
         float velX, velY, velZ;
-        
+
         // Behavioral state
         float excitement;
-        Vec3d targetPos;
+        boolean hasTarget;
+        float targetX, targetY, targetZ;
         boolean isAttached;
         UUID attachedEntityId;
-        
+
+        boolean isAtRest;
+        boolean awake;
+
         // Time tracking
         long lastUpdateTick;
-        
+
         StrandAnimState(long strandHash, float baseX, float baseY, float baseZ, float length) {
             this.strandHash = strandHash;
             this.baseX = baseX;
             this.baseY = baseY;
             this.baseZ = baseZ;
             this.length = length;
-            
+
             // Start at rest (straight up)
             this.tipX = baseX;
             this.tipY = baseY + length;
@@ -488,30 +700,35 @@ public final class WormGrassWorldRenderer {
             this.lastTipX = tipX;
             this.lastTipY = tipY;
             this.lastTipZ = tipZ;
-            
+
             this.excitement = 0f;
-            this.targetPos = null;
+            this.hasTarget = false;
+            this.targetX = 0f;
+            this.targetY = 0f;
+            this.targetZ = 0f;
             this.isAttached = false;
+            this.isAtRest = true;
+            this.awake = false;
             this.lastUpdateTick = 0;
         }
-        
+
         float getLerpTipOffsetX(float tickDelta) {
             float lerped = MathHelper.lerp(tickDelta, lastTipX, tipX);
             return lerped - baseX;
         }
-        
+
         float getLerpTipOffsetY(float tickDelta) {
             float lerped = MathHelper.lerp(tickDelta, lastTipY, tipY);
             // Return offset from the "rest" position (baseY + length)
             return lerped - (baseY + length);
         }
-        
+
         float getLerpTipOffsetZ(float tickDelta) {
             float lerped = MathHelper.lerp(tickDelta, lastTipZ, tipZ);
             return lerped - baseZ;
         }
     }
-    
+
     private static StrandAnimState getOrCreateStrandState(long strandHash, float x, float y, float z, float length) {
         StrandAnimState state = STRAND_ANIM_STATES.get(strandHash);
         if (state == null) {
@@ -523,95 +740,147 @@ public final class WormGrassWorldRenderer {
         }
         return state;
     }
-    
+
     /**
      * Physics tick - updates all strand states based on nearby entities.
      * Called once per game tick from render().
      */
-    private static void tickPhysics(ClientWorld world, Vec3d cam) {
-        // Clean up distant strands
-        double cleanupDistSq = 80.0 * 80.0;
+    private static void tickPhysics(ClientWorld world, double camX, double camY, double camZ) {
+        long currentTick = world.getTime();
+        double physicsCleanupDistSq = (LOD_HIGH_DIST + 16.0) * (LOD_HIGH_DIST + 16.0);
         STRAND_ANIM_STATES.entrySet().removeIf(entry -> {
             StrandAnimState s = entry.getValue();
-            double dx = s.baseX - cam.x;
-            double dy = s.baseY - cam.y;
-            double dz = s.baseZ - cam.z;
-            return dx * dx + dy * dy + dz * dz > cleanupDistSq;
+            double dx = s.baseX - camX;
+            double dy = s.baseY - camY;
+            double dz = s.baseZ - camZ;
+            if (dx * dx + dy * dy + dz * dz > physicsCleanupDistSq) {
+                AWAKE_STRAND_KEYS.remove(entry.getKey());
+                return true;
+            }
+            return false;
         });
-        
-        // Find entities for targeting
-        Box searchBox = new Box(
-                cam.x - AWAKEN_RANGE * 2, cam.y - AWAKEN_RANGE * 2, cam.z - AWAKEN_RANGE * 2,
-                cam.x + AWAKEN_RANGE * 2, cam.y + AWAKEN_RANGE * 2, cam.z + AWAKEN_RANGE * 2
-        );
-        List<LivingEntity> entities = world.getEntitiesByClass(
-                LivingEntity.class, searchBox,
-                e -> e.isAlive() && !e.isSpectator() && !e.isInCreativeMode()
-        );
-        
-        long currentTick = world.getTime();
-        
-        // Update each strand
-        for (StrandAnimState strand : STRAND_ANIM_STATES.values()) {
-            updateStrandPhysics(strand, entities, currentTick);
+
+        boolean doEntityScan = (currentTick - lastEntityScanTick) >= ENTITY_SCAN_INTERVAL
+                || lastEntityScanTick < 0;
+
+        if (doEntityScan) {
+            lastEntityScanTick = currentTick;
+
+            Box searchBox = new Box(
+                    camX - AWAKEN_RANGE * 2, camY - AWAKEN_RANGE * 2, camZ - AWAKEN_RANGE * 2,
+                    camX + AWAKEN_RANGE * 2, camY + AWAKEN_RANGE * 2, camZ + AWAKEN_RANGE * 2
+            );
+            cachedEntities = world.getEntitiesByClass(
+                    LivingEntity.class, searchBox,
+                    e -> e.isAlive() && !e.isSpectator() && !e.isInCreativeMode()
+            );
+
+            for (StrandAnimState s : STRAND_ANIM_STATES.values()) {
+                s.awake = false;
+            }
+            AWAKE_STRAND_KEYS.clear();
+            for (Map.Entry<Long, StrandAnimState> entry : STRAND_ANIM_STATES.entrySet()) {
+                StrandAnimState s = entry.getValue();
+                if (!s.isAtRest) {
+                    s.awake = true;
+                    AWAKE_STRAND_KEYS.add(entry.getKey());
+                    continue;
+                }
+
+                for (LivingEntity entity : cachedEntities) {
+                    float etx = (float) entity.getX();
+                    float ety = (float) (entity.getY() + entity.getHeight() * 0.5f);
+                    float etz = (float) entity.getZ();
+                    float ddx = etx - s.baseX;
+                    float ddy = ety - s.baseY;
+                    float ddz = etz - s.baseZ;
+                    if (ddx * ddx + ddy * ddy + ddz * ddz <= AWAKEN_RANGE_SQ) {
+                        s.awake = true;
+                        s.isAtRest = false;
+                        AWAKE_STRAND_KEYS.add(entry.getKey());
+                        break;
+                    }
+                }
+            }
+        }
+        float loopTimeSeconds = (System.nanoTime() % 100_000_000_000L) * 1e-9f;
+        Long[] awakeSnapshot = AWAKE_STRAND_KEYS.toArray(new Long[0]);
+        for (Long key : awakeSnapshot) {
+            StrandAnimState strand = STRAND_ANIM_STATES.get(key);
+            if (strand == null) continue;
+            if (strand.isAtRest && strand.excitement <= DORMANT_BEGIN_T && !strand.awake) continue;
+            updateStrandPhysics(strand, cachedEntities, currentTick, loopTimeSeconds);
         }
     }
-    
-    private static void updateStrandPhysics(StrandAnimState strand, List<LivingEntity> entities, long currentTick) {
+
+    private static void updateStrandPhysics(StrandAnimState strand, List<LivingEntity> entities, long currentTick, float timeSeconds) {
+        if (strand.isAtRest && strand.excitement <= DORMANT_BEGIN_T) return;
+
         // Skip if already updated this tick
         if (strand.lastUpdateTick == currentTick) return;
         strand.lastUpdateTick = currentTick;
-        
+
         // Save previous position for interpolation
         strand.lastTipX = strand.tipX;
         strand.lastTipY = strand.tipY;
         strand.lastTipZ = strand.tipZ;
-        
-        Vec3d base = new Vec3d(strand.baseX, strand.baseY, strand.baseZ);
-        
+
         // Find best target
         float bestExcitement = 0f;
-        Vec3d bestTarget = null;
+        float bestTargetX = 0f, bestTargetY = 0f, bestTargetZ = 0f;
+        boolean foundTarget = false;
         LivingEntity bestEntity = null;
-        
+
         for (LivingEntity entity : entities) {
-            Vec3d entityPos = entity.getPos().add(0, entity.getHeight() * 0.5, 0);
-            double distSq = entityPos.squaredDistanceTo(base);
-            
+            float etx = (float) entity.getX();
+            float ety = (float) (entity.getY() + entity.getHeight() * 0.5);
+            float etz = (float) entity.getZ();
+
+            float ddx = etx - strand.baseX;
+            float ddy = ety - strand.baseY;
+            float ddz = etz - strand.baseZ;
+            float distSq = ddx * ddx + ddy * ddy + ddz * ddz;
+
             if (distSq > AWAKEN_RANGE_SQ) continue;
-            
+
             float dist = (float) Math.sqrt(distSq);
             float excitement = 1.0f - (dist / AWAKEN_RANGE);
             excitement = smoothstep(MathHelper.clamp(excitement, 0f, 1f));
-            
+
             if (excitement > bestExcitement) {
                 bestExcitement = excitement;
-                bestTarget = entityPos;
+                bestTargetX = etx;
+                bestTargetY = ety;
+                bestTargetZ = etz;
+                foundTarget = true;
                 bestEntity = entity;
             }
         }
-        
-        strand.targetPos = bestTarget;
-        
+
+        strand.hasTarget = foundTarget;
+        strand.targetX = bestTargetX;
+        strand.targetY = bestTargetY;
+        strand.targetZ = bestTargetZ;
+
         // Update excitement with smooth rise/fall (matching C# behavior)
         if (bestExcitement > strand.excitement) {
-            // Rise faster when creature is close
             strand.excitement = Math.min(strand.excitement + EXCITEMENT_RISE * bestExcitement + 0.02f, 1.0f);
         } else {
-            // Fall gradually - slower decay for smooth return to dormant
             strand.excitement = Math.max(strand.excitement - EXCITEMENT_FALL * (1.0f - strand.excitement * 0.5f), 0.0f);
         }
-        
+
         // Check for latch
-        if (bestEntity != null && bestTarget != null) {
-            Vec3d tipPos = new Vec3d(strand.tipX, strand.tipY, strand.tipZ);
-            double tipDistSq = bestTarget.squaredDistanceTo(tipPos);
+        if (bestEntity != null && foundTarget) {
+            float tdx = bestTargetX - strand.tipX;
+            float tdy = bestTargetY - strand.tipY;
+            float tdz = bestTargetZ - strand.tipZ;
+            float tipDistSq = tdx * tdx + tdy * tdy + tdz * tdz;
             if (tipDistSq <= LATCH_RANGE_SQ && strand.excitement > 0.75f) {
                 strand.isAttached = true;
                 strand.attachedEntityId = bestEntity.getUuid();
             }
         }
-        
+
         // Check if latch should break
         if (strand.isAttached && strand.attachedEntityId != null) {
             LivingEntity attached = findEntityById(entities, strand.attachedEntityId);
@@ -619,18 +888,26 @@ public final class WormGrassWorldRenderer {
                 strand.isAttached = false;
                 strand.attachedEntityId = null;
             } else {
-                Vec3d attachedPos = attached.getPos().add(0, attached.getHeight() * 0.5, 0);
-                if (attachedPos.squaredDistanceTo(base) > LATCH_BREAK_RANGE_SQ) {
+                float ax = (float) attached.getX();
+                float ay = (float) (attached.getY() + attached.getHeight() * 0.5);
+                float az = (float) attached.getZ();
+                float adx = ax - strand.baseX;
+                float ady = ay - strand.baseY;
+                float adz = az - strand.baseZ;
+                if (adx * adx + ady * ady + adz * adz > LATCH_BREAK_RANGE_SQ) {
                     strand.isAttached = false;
                     strand.attachedEntityId = null;
                 } else {
                     // Stay attached - set target to entity
-                    strand.targetPos = attachedPos;
+                    strand.hasTarget = true;
+                    strand.targetX = ax;
+                    strand.targetY = ay;
+                    strand.targetZ = az;
                     strand.excitement = 1.0f;
                 }
             }
         }
-        
+
         // Apply physics
         strand.tipX += strand.velX;
         strand.tipY += strand.velY;
@@ -640,8 +917,8 @@ public final class WormGrassWorldRenderer {
         // Smoothly blend active motion vs dormant return-to-rest.
         // activeT = 1 when excited, 0 when dormant.
         // -----------------------------------------------------------------
-        boolean hasMeaningfulTarget = (strand.isAttached && strand.targetPos != null)
-                || (strand.targetPos != null && strand.excitement > DORMANT_BEGIN_T);
+        boolean hasMeaningfulTarget = (strand.isAttached && strand.hasTarget)
+                || (strand.hasTarget && strand.excitement > DORMANT_BEGIN_T);
 
         float activeT;
         if (!hasMeaningfulTarget) {
@@ -662,42 +939,42 @@ public final class WormGrassWorldRenderer {
         // Gravity is disabled when dormant to prevent perpetual micro-motion.
         // (Note: sign preserved as in existing behavior; only scaled down when dormant.)
         strand.velY += 0.012f * activeT;
-        
-        if (strand.isAttached && strand.targetPos != null) {
+
+        if (strand.isAttached && strand.hasTarget) {
             // Attached: stick to entity with some give
-            float dx = (float) strand.targetPos.x - strand.tipX;
-            float dy = (float) strand.targetPos.y - strand.tipY;
-            float dz = (float) strand.targetPos.z - strand.tipZ;
+            float dx = strand.targetX - strand.tipX;
+            float dy = strand.targetY - strand.tipY;
+            float dz = strand.targetZ - strand.tipZ;
             strand.velX += dx * 0.35f;
             strand.velY += dy * 0.35f;
             strand.velZ += dz * 0.35f;
-        } else if (strand.targetPos != null && activeT > 0.0001f) {
+        } else if (strand.hasTarget && activeT > 0.0001f) {
             // Reaching toward target
-            float dx = (float) strand.targetPos.x - strand.tipX;
-            float dy = (float) strand.targetPos.y - strand.tipY;
-            float dz = (float) strand.targetPos.z - strand.tipZ;
+            float dx = strand.targetX - strand.tipX;
+            float dy = strand.targetY - strand.tipY;
+            float dz = strand.targetZ - strand.tipZ;
             float dist = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
-            
+
             if (dist > 0.01f) {
                 float nx = dx / dist;
                 float ny = dy / dist;
                 float nz = dz / dist;
-                
+
                 // Reach force scales with excitement
                 float reachForce = (strand.excitement * activeT) * MathHelper.lerp(
                         MathHelper.clamp(dist * 0.3f, 0f, 1f),
                         0.06f, 0.015f
                 );
-                
+
                 // Add wiggle/thrashing when excited (matches C# behavior)
-                float time = (System.nanoTime() % 100000000000L) * 0.000000001f;
+                float time = timeSeconds;
                 float phase = (strand.strandHash & 0xFFFF) * 0.0001f;
                 float wiggle = MathHelper.sin(time * 5.5f + phase) * (strand.excitement * activeT) * 0.025f;
                 float thrash = MathHelper.sin(time * 8.2f + phase * 1.7f) * (strand.excitement * activeT) * 0.018f;
-                
+
                 float perpX = -nz;
                 float perpZ = nx;
-                
+
                 strand.velX += nx * reachForce + perpX * wiggle + nx * thrash;
                 strand.velY += ny * reachForce;
                 strand.velZ += nz * reachForce + perpZ * wiggle + nz * thrash;
@@ -731,36 +1008,36 @@ public final class WormGrassWorldRenderer {
                 strand.velX = 0f;
                 strand.velY = 0f;
                 strand.velZ = 0f;
+                strand.isAtRest = true;
+                strand.awake = false;
+                AWAKE_STRAND_KEYS.remove(strand.strandHash);
             }
         }
-        
+
         // Constrain tip to maximum reach from base
         float dx = strand.tipX - strand.baseX;
         float dy = strand.tipY - strand.baseY;
         float dz = strand.tipZ - strand.baseZ;
         float dist = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
-        
+
         float maxReach = strand.length * (strand.isAttached ? 1.5f : 1.0f);
-        if (dist > maxReach) {
+        if (dist > maxReach && dist > 0.0001f) {
             float nx = dx / dist;
             float ny = dy / dist;
             float nz = dz / dist;
-            float pullback = (dist - maxReach) * 0.2f;
-            strand.tipX -= nx * pullback;
-            strand.tipY -= ny * pullback;
-            strand.tipZ -= nz * pullback;
-            strand.velX -= nx * pullback * 0.5f;
-            strand.velY -= ny * pullback * 0.5f;
-            strand.velZ -= nz * pullback * 0.5f;
+            float overshoot = dist - maxReach;
+            float correctionStrength = 0.35f;
+            strand.velX -= nx * overshoot * correctionStrength;
+            strand.velY -= ny * overshoot * correctionStrength;
+            strand.velZ -= nz * overshoot * correctionStrength;
         }
-        
+
         // Ensure tip doesn't go below base
         if (strand.tipY < strand.baseY + 0.1f) {
-            strand.tipY = strand.baseY + 0.1f;
-            strand.velY = Math.max(strand.velY, 0f);
+            strand.velY += (strand.baseY + 0.1f - strand.tipY) * 0.4f;
         }
     }
-    
+
     private static LivingEntity findEntityById(List<LivingEntity> entities, UUID id) {
         for (LivingEntity e : entities) {
             if (e.getUuid().equals(id)) return e;
