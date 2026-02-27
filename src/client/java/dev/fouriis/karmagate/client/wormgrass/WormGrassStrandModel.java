@@ -78,13 +78,19 @@ public final class WormGrassStrandModel {
         float y1 = y + height;
 
         float a = 1.0f;
-        // Normal roughly faces camera
-        float nx = dx;
-        float ny = 0f;
-        float nz = dz;
+        // Per-strand normal perturbation for varied shader lighting
+        long bHash = hashFromPos(x, y, z);
+        float nx = dx + randSigned(bHash) * 0.35f;
+        float ny = 0.15f * randSigned(bHash ^ 0xABCDE);
+        float nz = dz + randSigned(bHash ^ 0x12345) * 0.35f;
+        float nLen = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (nLen > 1e-5f) { nx /= nLen; ny /= nLen; nz /= nLen; }
 
-        vertex(vc, posMat, x0, y0, z0, r, g, b, a, 0f, 1f, light, nx, ny, nz);
-        vertex(vc, posMat, x1, y0, z1, r, g, b, a, 1f, 1f, light, nx, ny, nz);
+        float baseDarken = 0.35f;
+        float bR = r * baseDarken, bG = g * baseDarken, bB = b * baseDarken;
+
+        vertex(vc, posMat, x0, y0, z0, bR, bG, bB, a, 0f, 1f, light, nx, ny, nz);
+        vertex(vc, posMat, x1, y0, z1, bR, bG, bB, a, 1f, 1f, light, nx, ny, nz);
         vertex(vc, posMat, x1, y1, z1, r, g, b, a, 1f, 0f, light, nx, ny, nz);
         vertex(vc, posMat, x0, y1, z0, r, g, b, a, 0f, 0f, light, nx, ny, nz);
     }
@@ -100,7 +106,8 @@ public final class WormGrassStrandModel {
             float r, float g, float b,
             float lodLevel,
             int segments,
-            float camX, float camZ
+            float camX, float camZ,
+            float excitement, float swayTime
     ) {
         if (lodLevel > 3f) {
             emitPotatoBillboard(vc, posMat, baseX, baseY, baseZ, camX, camZ, width * 3.0f, height, light, r, g, b);
@@ -132,9 +139,12 @@ public final class WormGrassStrandModel {
             segY[i] = oneMinusTSquared * baseY + twoOneMinusTT * controlPointY + tSquared * tipY;
             segZ[i] = oneMinusTSquared * baseZ + twoOneMinusTT * controlPointZ + tSquared * tipZ;
 
-            float taperT = smoothstep(t);
-            float tipWidthFloor = 0.45f;
-            segWidth[i] = width * MathHelper.lerp(taperT, 1.0f, tipWidthFloor);
+            // Sine-based width profile (C# wormGrass.cs segment radius pattern).
+            // Creates a worm-like spindle: thinner at base and tip, widest in
+            // the middle, matching Rain World's organic strand shape.
+            float biasedPos = MathHelper.lerp(0.2f, t, 0.5f); // map [0,1] → [0.1,0.9]
+            float sineProfile = (float) Math.sin(biasedPos * Math.PI);
+            segWidth[i] = width * (0.30f + 0.70f * sineProfile);
         }
 
         float initialDirX = segX[1] - segX[0];
@@ -178,7 +188,75 @@ public final class WormGrassStrandModel {
             perp2Z /= perp2Len;
         }
 
-        if (lodLevel <= 1f) {
+        // Per-strand normal perturbation — rotate the perpendicular frame by a
+        // random angle around the initial direction. This gives each strand
+        // unique face normals so shader directional lighting varies per-strand,
+        // preventing the "blob of uniform color" look.
+        long strandHash = hashFromPos(baseX, baseY, baseZ);
+        float perturbAngle = randSigned(strandHash) * 0.4f; // ±~23 degrees
+        float cosP = MathHelper.cos(perturbAngle);
+        float sinP = MathHelper.sin(perturbAngle);
+        float rp1X = perp1X * cosP + perp2X * sinP;
+        float rp1Y = perp1Y * cosP + perp2Y * sinP;
+        float rp1Z = perp1Z * cosP + perp2Z * sinP;
+        float rp2X = -perp1X * sinP + perp2X * cosP;
+        float rp2Y = -perp1Y * sinP + perp2Y * cosP;
+        float rp2Z = -perp1Z * sinP + perp2Z * cosP;
+        perp1X = rp1X; perp1Y = rp1Y; perp1Z = rp1Z;
+        perp2X = rp2X; perp2Y = rp2Y; perp2Z = rp2Z;
+
+        // Stretched radius: adjust per-segment width based on inter-segment
+        // distance ratio (C# wormGrass.cs stretchedRad pattern). Segments that
+        // are stretched apart get thinner; compressed segments fatten up.
+        // Only meaningful when the strand is actually bending (high LOD physics).
+        if (segments > 1) {
+            float restSegDist = height / segments;
+            for (int si = 0; si < segments; si++) {
+                float sdx = segX[si + 1] - segX[si];
+                float sdy = segY[si + 1] - segY[si];
+                float sdz = segZ[si + 1] - segZ[si];
+                float actualDist = (float) Math.sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
+                if (actualDist > 0.001f) {
+                    float ratio = restSegDist / actualDist;
+                    float stretchFactor;
+                    if (ratio > 1.0f) {
+                        // Compressed: expand slightly, cap at 1.5×
+                        stretchFactor = Math.min(MathHelper.lerp(0.4f, ratio, 1.0f), 1.5f);
+                    } else {
+                        // Stretched: contract with power curve
+                        stretchFactor = (float) Math.pow(ratio, 0.65f);
+                    }
+                    // Damp effect at base/tip (strongest in middle), matching C#
+                    float segCenter = ((float) si + 0.5f) / segments;
+                    float posDamp = (float) Math.sin(segCenter * Math.PI);
+                    stretchFactor = MathHelper.lerp(1f - posDamp, 1.0f, stretchFactor);
+                    segWidth[si] *= stretchFactor;
+                }
+            }
+        }
+
+        // Mid-strand excitement wiggle (C# per-segment vel += RNV() * excitement).
+        // Offsets the bezier control point with time-varying noise when the strand
+        // is excited, creating independent mid-strand movement separate from the tip.
+        if (excitement > 0.01f) {
+            float midPhase = ((strandHash >>> 24) & 0xFFFF) * 0.01f;
+            float wiggleAmt = excitement * 0.06f * height;
+            controlPointX += MathHelper.sin(swayTime * 7.3f + midPhase) * wiggleAmt;
+            controlPointZ += MathHelper.cos(swayTime * 6.1f + midPhase * 1.5f) * wiggleAmt;
+            controlPointY += MathHelper.sin(swayTime * 5.7f + midPhase * 0.8f) * wiggleAmt * 0.3f;
+
+            // Recompute segment positions with wiggled control point
+            for (int ri = 0; ri <= segments; ri++) {
+                float rt = ri / (float) segments;
+                float rOneMinusT = 1f - rt;
+                segX[ri] = rOneMinusT * rOneMinusT * baseX + 2f * rOneMinusT * rt * controlPointX + rt * rt * tipX;
+                segY[ri] = rOneMinusT * rOneMinusT * baseY + 2f * rOneMinusT * rt * controlPointY + rt * rt * tipY;
+                segZ[ri] = rOneMinusT * rOneMinusT * baseZ + 2f * rOneMinusT * rt * controlPointZ + rt * rt * tipZ;
+            }
+        }
+
+        // Base-to-tip color gradient factor range
+        float BASE_DARKEN = 0.30f;        if (lodLevel <= 1f) {
             float[] ring = TL_RING.get();
 
             float prevDirX = initialDirX, prevDirY = initialDirY, prevDirZ = initialDirZ;
@@ -297,6 +375,13 @@ public final class WormGrassStrandModel {
 
                 float alpha = 1f;
 
+                // Base-to-tip color gradient — darkens the strand base for visual
+                // depth and breaks up uniformity under shader lighting.
+                float btmS = BASE_DARKEN + (1f - BASE_DARKEN) * ((float) i / segments);
+                float topS = BASE_DARKEN + (1f - BASE_DARKEN) * ((float) (i + 1) / segments);
+                float br = r * btmS, bg = g * btmS, bb = b * btmS;
+                float tr = r * topS, tg = g * topS, tb = b * topS;
+
                 float facePosPerpNormalX = ring[bottomRingBase]     - bottomCentreX;
                 float facePosPerpNormalY = ring[bottomRingBase + 1] - bottomCentreY;
                 float facePosPerpNormalZ = ring[bottomRingBase + 2] - bottomCentreZ;
@@ -307,10 +392,10 @@ public final class WormGrassStrandModel {
                     facePosPerpNormalZ /= facePosPerpNormalLen;
                 }
 
-                vertex(vc, posMat, cornerBottomDx, cornerBottomDy, cornerBottomDz, r, g, b, alpha, 0f, 1f, light, facePosPerpNormalX, facePosPerpNormalY, facePosPerpNormalZ);
-                vertex(vc, posMat, cornerBottomAx, cornerBottomAy, cornerBottomAz, r, g, b, alpha, 1f, 1f, light, facePosPerpNormalX, facePosPerpNormalY, facePosPerpNormalZ);
-                vertex(vc, posMat, cornerTopAx,    cornerTopAy,    cornerTopAz,    r, g, b, alpha, 1f, 0f, light, facePosPerpNormalX, facePosPerpNormalY, facePosPerpNormalZ);
-                vertex(vc, posMat, cornerTopDx,    cornerTopDy,    cornerTopDz,    r, g, b, alpha, 0f, 0f, light, facePosPerpNormalX, facePosPerpNormalY, facePosPerpNormalZ);
+                vertex(vc, posMat, cornerBottomDx, cornerBottomDy, cornerBottomDz, br, bg, bb, alpha, 0f, 1f, light, facePosPerpNormalX, facePosPerpNormalY, facePosPerpNormalZ);
+                vertex(vc, posMat, cornerBottomAx, cornerBottomAy, cornerBottomAz, br, bg, bb, alpha, 1f, 1f, light, facePosPerpNormalX, facePosPerpNormalY, facePosPerpNormalZ);
+                vertex(vc, posMat, cornerTopAx,    cornerTopAy,    cornerTopAz,    tr, tg, tb, alpha, 1f, 0f, light, facePosPerpNormalX, facePosPerpNormalY, facePosPerpNormalZ);
+                vertex(vc, posMat, cornerTopDx,    cornerTopDy,    cornerTopDz,    tr, tg, tb, alpha, 0f, 0f, light, facePosPerpNormalX, facePosPerpNormalY, facePosPerpNormalZ);
 
                 float faceNegPerpNormalX = ring[bottomRingBase + 3] - bottomCentreX;
                 float faceNegPerpNormalY = ring[bottomRingBase + 4] - bottomCentreY;
@@ -322,10 +407,10 @@ public final class WormGrassStrandModel {
                     faceNegPerpNormalZ /= faceNegPerpNormalLen;
                 }
 
-                vertex(vc, posMat, cornerBottomCx, cornerBottomCy, cornerBottomCz, r, g, b, alpha, 0f, 1f, light, faceNegPerpNormalX, faceNegPerpNormalY, faceNegPerpNormalZ);
-                vertex(vc, posMat, cornerBottomBx, cornerBottomBy, cornerBottomBz, r, g, b, alpha, 1f, 1f, light, faceNegPerpNormalX, faceNegPerpNormalY, faceNegPerpNormalZ);
-                vertex(vc, posMat, cornerTopBx,    cornerTopBy,    cornerTopBz,    r, g, b, alpha, 1f, 0f, light, faceNegPerpNormalX, faceNegPerpNormalY, faceNegPerpNormalZ);
-                vertex(vc, posMat, cornerTopCx,    cornerTopCy,    cornerTopCz,    r, g, b, alpha, 0f, 0f, light, faceNegPerpNormalX, faceNegPerpNormalY, faceNegPerpNormalZ);
+                vertex(vc, posMat, cornerBottomCx, cornerBottomCy, cornerBottomCz, br, bg, bb, alpha, 0f, 1f, light, faceNegPerpNormalX, faceNegPerpNormalY, faceNegPerpNormalZ);
+                vertex(vc, posMat, cornerBottomBx, cornerBottomBy, cornerBottomBz, br, bg, bb, alpha, 1f, 1f, light, faceNegPerpNormalX, faceNegPerpNormalY, faceNegPerpNormalZ);
+                vertex(vc, posMat, cornerTopBx,    cornerTopBy,    cornerTopBz,    tr, tg, tb, alpha, 1f, 0f, light, faceNegPerpNormalX, faceNegPerpNormalY, faceNegPerpNormalZ);
+                vertex(vc, posMat, cornerTopCx,    cornerTopCy,    cornerTopCz,    tr, tg, tb, alpha, 0f, 0f, light, faceNegPerpNormalX, faceNegPerpNormalY, faceNegPerpNormalZ);
 
                 float facePosPerp1NormalX = ring[bottomRingBase + 6] - bottomCentreX;
                 float facePosPerp1NormalY = ring[bottomRingBase + 7] - bottomCentreY;
@@ -337,10 +422,10 @@ public final class WormGrassStrandModel {
                     facePosPerp1NormalZ /= facePosPerp1NormalLen;
                 }
 
-                vertex(vc, posMat, cornerBottomBx, cornerBottomBy, cornerBottomBz, r, g, b, alpha, 0f, 1f, light, facePosPerp1NormalX, facePosPerp1NormalY, facePosPerp1NormalZ);
-                vertex(vc, posMat, cornerBottomAx, cornerBottomAy, cornerBottomAz, r, g, b, alpha, 1f, 1f, light, facePosPerp1NormalX, facePosPerp1NormalY, facePosPerp1NormalZ);
-                vertex(vc, posMat, cornerTopAx,    cornerTopAy,    cornerTopAz,    r, g, b, alpha, 1f, 0f, light, facePosPerp1NormalX, facePosPerp1NormalY, facePosPerp1NormalZ);
-                vertex(vc, posMat, cornerTopBx,    cornerTopBy,    cornerTopBz,    r, g, b, alpha, 0f, 0f, light, facePosPerp1NormalX, facePosPerp1NormalY, facePosPerp1NormalZ);
+                vertex(vc, posMat, cornerBottomBx, cornerBottomBy, cornerBottomBz, br, bg, bb, alpha, 0f, 1f, light, facePosPerp1NormalX, facePosPerp1NormalY, facePosPerp1NormalZ);
+                vertex(vc, posMat, cornerBottomAx, cornerBottomAy, cornerBottomAz, br, bg, bb, alpha, 1f, 1f, light, facePosPerp1NormalX, facePosPerp1NormalY, facePosPerp1NormalZ);
+                vertex(vc, posMat, cornerTopAx,    cornerTopAy,    cornerTopAz,    tr, tg, tb, alpha, 1f, 0f, light, facePosPerp1NormalX, facePosPerp1NormalY, facePosPerp1NormalZ);
+                vertex(vc, posMat, cornerTopBx,    cornerTopBy,    cornerTopBz,    tr, tg, tb, alpha, 0f, 0f, light, facePosPerp1NormalX, facePosPerp1NormalY, facePosPerp1NormalZ);
 
                 float faceNegPerp1NormalX = ring[bottomRingBase + 9]  - bottomCentreX;
                 float faceNegPerp1NormalY = ring[bottomRingBase + 10] - bottomCentreY;
@@ -352,10 +437,10 @@ public final class WormGrassStrandModel {
                     faceNegPerp1NormalZ /= faceNegPerp1NormalLen;
                 }
 
-                vertex(vc, posMat, cornerBottomDx, cornerBottomDy, cornerBottomDz, r, g, b, alpha, 0f, 1f, light, faceNegPerp1NormalX, faceNegPerp1NormalY, faceNegPerp1NormalZ);
-                vertex(vc, posMat, cornerBottomCx, cornerBottomCy, cornerBottomCz, r, g, b, alpha, 1f, 1f, light, faceNegPerp1NormalX, faceNegPerp1NormalY, faceNegPerp1NormalZ);
-                vertex(vc, posMat, cornerTopCx,    cornerTopCy,    cornerTopCz,    r, g, b, alpha, 1f, 0f, light, faceNegPerp1NormalX, faceNegPerp1NormalY, faceNegPerp1NormalZ);
-                vertex(vc, posMat, cornerTopDx,    cornerTopDy,    cornerTopDz,    r, g, b, alpha, 0f, 0f, light, faceNegPerp1NormalX, faceNegPerp1NormalY, faceNegPerp1NormalZ);
+                vertex(vc, posMat, cornerBottomDx, cornerBottomDy, cornerBottomDz, br, bg, bb, alpha, 0f, 1f, light, faceNegPerp1NormalX, faceNegPerp1NormalY, faceNegPerp1NormalZ);
+                vertex(vc, posMat, cornerBottomCx, cornerBottomCy, cornerBottomCz, br, bg, bb, alpha, 1f, 1f, light, faceNegPerp1NormalX, faceNegPerp1NormalY, faceNegPerp1NormalZ);
+                vertex(vc, posMat, cornerTopCx,    cornerTopCy,    cornerTopCz,    tr, tg, tb, alpha, 1f, 0f, light, faceNegPerp1NormalX, faceNegPerp1NormalY, faceNegPerp1NormalZ);
+                vertex(vc, posMat, cornerTopDx,    cornerTopDy,    cornerTopDz,    tr, tg, tb, alpha, 0f, 0f, light, faceNegPerp1NormalX, faceNegPerp1NormalY, faceNegPerp1NormalZ);
             }
 
             int lastRingBase = segments * 12;
@@ -543,15 +628,20 @@ public final class WormGrassStrandModel {
 
                 float alpha = 1f;
 
-                vertex(vc, posMat, bottomMidNegPerp1X, bottomMidNegPerp1Y, bottomMidNegPerp1Z, r, g, b, alpha, 0f, 1f, light, axisX, axisY, axisZ);
-                vertex(vc, posMat, bottomMidPerp1X, bottomMidPerp1Y, bottomMidPerp1Z, r, g, b, alpha, 1f, 1f, light, axisX, axisY, axisZ);
-                vertex(vc, posMat, topMidPerp1X, topMidPerp1Y, topMidPerp1Z, r, g, b, alpha, 1f, 0f, light, axisX, axisY, axisZ);
-                vertex(vc, posMat, topMidNegPerp1X, topMidNegPerp1Y, topMidNegPerp1Z, r, g, b, alpha, 0f, 0f, light, axisX, axisY, axisZ);
+                float btmS = BASE_DARKEN + (1f - BASE_DARKEN) * ((float) i / segments);
+                float topS = BASE_DARKEN + (1f - BASE_DARKEN) * ((float) (i + 1) / segments);
+                float br = r * btmS, bg = g * btmS, bb = b * btmS;
+                float tr = r * topS, tg = g * topS, tb = b * topS;
 
-                vertex(vc, posMat, bottomMidNegPerp2X, bottomMidNegPerp2Y, bottomMidNegPerp2Z, r, g, b, alpha, 0f, 1f, light, axisX, axisY, axisZ);
-                vertex(vc, posMat, bottomMidPerp2X, bottomMidPerp2Y, bottomMidPerp2Z, r, g, b, alpha, 1f, 1f, light, axisX, axisY, axisZ);
-                vertex(vc, posMat, topMidPerp2X, topMidPerp2Y, topMidPerp2Z, r, g, b, alpha, 1f, 0f, light, axisX, axisY, axisZ);
-                vertex(vc, posMat, topMidNegPerp2X, topMidNegPerp2Y, topMidNegPerp2Z, r, g, b, alpha, 0f, 0f, light, axisX, axisY, axisZ);
+                vertex(vc, posMat, bottomMidNegPerp1X, bottomMidNegPerp1Y, bottomMidNegPerp1Z, br, bg, bb, alpha, 0f, 1f, light, axisX, axisY, axisZ);
+                vertex(vc, posMat, bottomMidPerp1X, bottomMidPerp1Y, bottomMidPerp1Z, br, bg, bb, alpha, 1f, 1f, light, axisX, axisY, axisZ);
+                vertex(vc, posMat, topMidPerp1X, topMidPerp1Y, topMidPerp1Z, tr, tg, tb, alpha, 1f, 0f, light, axisX, axisY, axisZ);
+                vertex(vc, posMat, topMidNegPerp1X, topMidNegPerp1Y, topMidNegPerp1Z, tr, tg, tb, alpha, 0f, 0f, light, axisX, axisY, axisZ);
+
+                vertex(vc, posMat, bottomMidNegPerp2X, bottomMidNegPerp2Y, bottomMidNegPerp2Z, br, bg, bb, alpha, 0f, 1f, light, axisX, axisY, axisZ);
+                vertex(vc, posMat, bottomMidPerp2X, bottomMidPerp2Y, bottomMidPerp2Z, br, bg, bb, alpha, 1f, 1f, light, axisX, axisY, axisZ);
+                vertex(vc, posMat, topMidPerp2X, topMidPerp2Y, topMidPerp2Z, tr, tg, tb, alpha, 1f, 0f, light, axisX, axisY, axisZ);
+                vertex(vc, posMat, topMidNegPerp2X, topMidNegPerp2Y, topMidNegPerp2Z, tr, tg, tb, alpha, 0f, 0f, light, axisX, axisY, axisZ);
 
                 bottomMidPerp1X = topMidPerp1X;
                 bottomMidPerp1Y = topMidPerp1Y;
@@ -582,13 +672,7 @@ public final class WormGrassStrandModel {
                 prevDirZ = currentDirZ;
             }
 
-            emitTangentAlignedQuad(vc, posMat,
-                    segX[segments], segY[segments] + 0.00001f, segZ[segments],
-                    segWidth[segments], segWidth[segments],
-                    perp1X, perp1Y, perp1Z,
-                    perp2X, perp2Y, perp2Z,
-                    light, r, g, b
-            );
+            // No cap on medium LOD — only visible at close range.
 
         } else {
             float baseMidPerp1X = segX[0] + perp1X * segWidth[0] * 0.5f;
@@ -635,23 +719,19 @@ public final class WormGrassStrandModel {
 
             float alpha = 1f;
 
-            vertex(vc, posMat, baseMidNegPerp1X, baseMidNegPerp1Y, baseMidNegPerp1Z, r, g, b, alpha, 0f, 1f, light, strandAxisX, strandAxisY, strandAxisZ);
-            vertex(vc, posMat, baseMidPerp1X, baseMidPerp1Y, baseMidPerp1Z, r, g, b, alpha, 1f, 1f, light, strandAxisX, strandAxisY, strandAxisZ);
+            float br = r * BASE_DARKEN, bg = g * BASE_DARKEN, bb = b * BASE_DARKEN;
+
+            vertex(vc, posMat, baseMidNegPerp1X, baseMidNegPerp1Y, baseMidNegPerp1Z, br, bg, bb, alpha, 0f, 1f, light, strandAxisX, strandAxisY, strandAxisZ);
+            vertex(vc, posMat, baseMidPerp1X, baseMidPerp1Y, baseMidPerp1Z, br, bg, bb, alpha, 1f, 1f, light, strandAxisX, strandAxisY, strandAxisZ);
             vertex(vc, posMat, tipMidPerp1X, tipMidPerp1Y, tipMidPerp1Z, r, g, b, alpha, 1f, 0f, light, strandAxisX, strandAxisY, strandAxisZ);
             vertex(vc, posMat, tipMidNegPerp1X, tipMidNegPerp1Y, tipMidNegPerp1Z, r, g, b, alpha, 0f, 0f, light, strandAxisX, strandAxisY, strandAxisZ);
 
-            vertex(vc, posMat, baseMidNegPerp2X, baseMidNegPerp2Y, baseMidNegPerp2Z, r, g, b, alpha, 0f, 1f, light, strandAxisX, strandAxisY, strandAxisZ);
-            vertex(vc, posMat, baseMidPerp2X, baseMidPerp2Y, baseMidPerp2Z, r, g, b, alpha, 1f, 1f, light, strandAxisX, strandAxisY, strandAxisZ);
+            vertex(vc, posMat, baseMidNegPerp2X, baseMidNegPerp2Y, baseMidNegPerp2Z, br, bg, bb, alpha, 0f, 1f, light, strandAxisX, strandAxisY, strandAxisZ);
+            vertex(vc, posMat, baseMidPerp2X, baseMidPerp2Y, baseMidPerp2Z, br, bg, bb, alpha, 1f, 1f, light, strandAxisX, strandAxisY, strandAxisZ);
             vertex(vc, posMat, tipMidPerp2X, tipMidPerp2Y, tipMidPerp2Z, r, g, b, alpha, 1f, 0f, light, strandAxisX, strandAxisY, strandAxisZ);
             vertex(vc, posMat, tipMidNegPerp2X, tipMidNegPerp2Y, tipMidNegPerp2Z, r, g, b, alpha, 0f, 0f, light, strandAxisX, strandAxisY, strandAxisZ);
 
-            emitTangentAlignedQuad(vc, posMat,
-                    segX[segments], segY[segments] + 0.00001f, segZ[segments],
-                    segWidth[segments], segWidth[segments],
-                    perp1X, perp1Y, perp1Z,
-                    perp2X, perp2Y, perp2Z,
-                    light, r, g, b
-            );
+            // No cap on low LOD — not visible at this distance and saves 4 vertices per strand.
         }
     }
 
@@ -688,13 +768,22 @@ public final class WormGrassStrandModel {
         float bottomY = y;
         float topY = y + height;
 
-        float normalX = dirToCamX;
-        float normalY = 0f;
-        float normalZ = dirToCamZ;
+        // Per-strand normal perturbation for varied shader lighting
+        long bHash = hashFromPos(x, y, z);
+        float pertX = randSigned(bHash) * 0.35f;
+        float pertZ = randSigned(bHash ^ 0x12345) * 0.35f;
+        float normalX = dirToCamX + pertX;
+        float normalY = 0.15f * randSigned(bHash ^ 0xABCDE);
+        float normalZ = dirToCamZ + pertZ;
+        float nLen = (float) Math.sqrt(normalX * normalX + normalY * normalY + normalZ * normalZ);
+        if (nLen > 1e-5f) { normalX /= nLen; normalY /= nLen; normalZ /= nLen; }
         float alpha = 1f;
 
-        vertex(vc, posMat, leftX, bottomY, leftZ, r, g, b, alpha, 0f, 1f, light, normalX, normalY, normalZ);
-        vertex(vc, posMat, rightEdgeX, bottomY, rightEdgeZ, r, g, b, alpha, 1f, 1f, light, normalX, normalY, normalZ);
+        float baseDarken = 0.35f;
+        float bR = r * baseDarken, bG = g * baseDarken, bB = b * baseDarken;
+
+        vertex(vc, posMat, leftX, bottomY, leftZ, bR, bG, bB, alpha, 0f, 1f, light, normalX, normalY, normalZ);
+        vertex(vc, posMat, rightEdgeX, bottomY, rightEdgeZ, bR, bG, bB, alpha, 1f, 1f, light, normalX, normalY, normalZ);
         vertex(vc, posMat, rightEdgeX, topY, rightEdgeZ, r, g, b, alpha, 1f, 0f, light, normalX, normalY, normalZ);
         vertex(vc, posMat, leftX, topY, leftZ, r, g, b, alpha, 0f, 0f, light, normalX, normalY, normalZ);
     }

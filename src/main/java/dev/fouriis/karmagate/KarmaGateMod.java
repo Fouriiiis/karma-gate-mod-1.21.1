@@ -5,6 +5,7 @@ import dev.fouriis.karmagate.command.CoralNeuronCommands;
 import dev.fouriis.karmagate.command.ProjectionZoneCommands;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
+import dev.fouriis.karmagate.entity.stowaway.StowawayBugEntity;
 import dev.fouriis.karmagate.item.ModItems;
 import dev.fouriis.karmagate.network.ModNetworking;
 import dev.fouriis.karmagate.particle.ModParticles;
@@ -44,6 +45,16 @@ public class KarmaGateMod implements ModInitializer {
                     .dimensions(EntityDimensions.fixed(0.5f, 0.5f))
                     .trackRangeBlocks(128)
                     .trackedUpdateRate(20)
+                    .build()
+    );
+
+    public static final EntityType<StowawayBugEntity> STOWAWAY_BUG_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "stowaway_bug"),
+            FabricEntityTypeBuilder.<StowawayBugEntity>create(SpawnGroup.MONSTER, StowawayBugEntity::new)
+                    .dimensions(EntityDimensions.fixed(1.5f, 2.0f))
+                    .trackRangeBlocks(128)
+                    .trackedUpdateRate(3)
                     .build()
     );
 

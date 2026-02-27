@@ -21,6 +21,13 @@ public final class WormGrassRenderCache {
     // key = ChunkPos.toLong(x,z), value = list of packed BlockPos longs.
     private static final Map<Long, List<Long>> CHUNK_TO_POSITIONS = new HashMap<>();
 
+    /** Monotonically increasing version — bumped on every chunk/block change. */
+    private static volatile int dirtyVersion = 0;
+
+    public static int getDirtyVersion() {
+        return dirtyVersion;
+    }
+
     public static void onChunkLoad(ClientWorld world, Chunk chunk) {
         long key = ChunkPos.toLong(chunk.getPos().x, chunk.getPos().z);
 
@@ -56,11 +63,13 @@ public final class WormGrassRenderCache {
         } else {
             CHUNK_TO_POSITIONS.put(key, positions);
         }
+        dirtyVersion++;
     }
 
     public static void onChunkUnload(ClientWorld world, Chunk chunk) {
         long key = ChunkPos.toLong(chunk.getPos().x, chunk.getPos().z);
         CHUNK_TO_POSITIONS.remove(key);
+        dirtyVersion++;
     }
 
     public static List<Long> getPositionsForChunk(int chunkX, int chunkZ) {
@@ -86,6 +95,7 @@ public final class WormGrassRenderCache {
         }
         long lp = BlockPos.asLong(pos.getX(), pos.getY(), pos.getZ());
         if (!list.contains(lp)) list.add(lp);
+        dirtyVersion++;
     }
 
     /**
@@ -102,10 +112,27 @@ public final class WormGrassRenderCache {
         long lp = BlockPos.asLong(pos.getX(), pos.getY(), pos.getZ());
         list.remove(lp);
         if (list.isEmpty()) CHUNK_TO_POSITIONS.remove(key);
+        dirtyVersion++;
+    }
+
+    /**
+     * Check whether a packed block position exists anywhere in loaded chunks.
+     * Used by the renderer to distinguish "real patch edge" from "edge of analysis set".
+     */
+    public static boolean hasPosition(int x, int y, int z) {
+        int cx = x >> 4;
+        int cz = z >> 4;
+        long key = ChunkPos.toLong(cx, cz);
+        List<Long> list = CHUNK_TO_POSITIONS.get(key);
+        if (list == null) return false;
+        long packed = BlockPos.asLong(x, y, z);
+        // Typically ≤256 entries per chunk-layer, so linear scan is fine.
+        return list.contains(packed);
     }
 
     public static void clearAll() {
         CHUNK_TO_POSITIONS.clear();
+        dirtyVersion++;
     }
 
     private WormGrassRenderCache() {}
