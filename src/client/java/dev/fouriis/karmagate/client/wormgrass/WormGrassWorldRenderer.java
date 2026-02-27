@@ -66,24 +66,19 @@ public final class WormGrassWorldRenderer {
     @SuppressWarnings("unused")
     private static final RainWorldFrameIndex.Frame TINY_STAR_FRAME = FRAME_INDEX.get("tinyStar");
 
-    private static final int VIEW_DISTANCE_CHUNKS = 10;
-
     // -------------------------------------------------------------------------
     // LOD / culling
     // -------------------------------------------------------------------------
     /** Full square-tube geometry + full physics. lodLevel 0..1 */
     private static final float LOD_HIGH_DIST   = 16.0f;
     /** Flat crossing quads per segment, no physics (procedural sway only). lodLevel 1..2 */
-    private static final float LOD_MEDIUM_DIST = 32.0f;
+    private static final float LOD_MEDIUM_DIST = 22.0f;
     /** Single flat crossing quad base-to-tip + cap, no physics. lodLevel 2..3 */
-    private static final float LOD_LOW_DIST    = 64.0f;
-    /** Single Y-axis billboard per strand, no curve, no cap. lodLevel 3..4 */
-    private static final float LOD_POTATO_DIST = 128.0f;
+    private static final float LOD_LOW_DIST    = 36.0f;
 
     private static final float LOD_HIGH_DIST_SQ = LOD_HIGH_DIST * LOD_HIGH_DIST;
     private static final float LOD_MEDIUM_DIST_SQ = LOD_MEDIUM_DIST * LOD_MEDIUM_DIST;
     private static final float LOD_LOW_DIST_SQ = LOD_LOW_DIST * LOD_LOW_DIST;
-    private static final float LOD_POTATO_DIST_SQ = LOD_POTATO_DIST * LOD_POTATO_DIST;
 
     /** Prevent runaway strand state creation. */
     private static final int MAX_STRAND_STATES = 25_000;
@@ -169,6 +164,23 @@ public final class WormGrassWorldRenderer {
     private static List<LivingEntity> cachedEntities = new ArrayList<>();
     private static final java.util.Set<Long> AWAKE_STRAND_KEYS = new HashSet<>();
 
+    // -------------------------------------------------------------------------
+    // Cached patch data — only recomputed when chunks change or on a timer.
+    // -------------------------------------------------------------------------
+    private static Map<Long, PatchCell> cachedPatchCells = new HashMap<>();
+    private static Map<Long, Float> cachedDepthField = new HashMap<>();
+    private static int cachedPatchVersion = -1;
+    private static long cachedPatchTick = -100;
+    private static final int PATCH_RECOMPUTE_INTERVAL = 20; // ticks
+
+    // -------------------------------------------------------------------------
+    // Reusable per-frame collections (avoid re-allocation every frame).
+    // -------------------------------------------------------------------------
+    private static final ArrayList<Long> frameDetailedPositions = new ArrayList<>(2048);
+    private static final HashSet<Long> frameAnalysisSet = new HashSet<>(4096);
+    private static final ArrayList<PendingEye> framePendingEyes = new ArrayList<>();
+    private static final ArrayList<Long> physicsSnapshot = new ArrayList<>();
+
     public static void render(WorldRenderContext context) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.world == null || client.player == null) return;
@@ -208,32 +220,34 @@ public final class WormGrassWorldRenderer {
 
         VertexConsumer vc = consumers.getBuffer(RenderLayer.getEntityCutoutNoCull(WHITE));
 
-        ArrayList<PendingEye> pendingEyes = new ArrayList<>();
+        // Reuse per-frame collections instead of allocating new ones every frame.
+        framePendingEyes.clear();
+        frameDetailedPositions.clear();
+        frameAnalysisSet.clear();
 
         int camChunkX = MathHelper.floor(camX / 16.0);
         int camChunkZ = MathHelper.floor(camZ / 16.0);
 
-        double maxDistBlocks = VIEW_DISTANCE_CHUNKS * 16.0;
+        // Use the client's actual render distance so the potato LOD extends to the horizon.
+        int viewDistChunks = client.options.getViewDistance().getValue();
+        double maxDistBlocks = viewDistChunks * 16.0;
         double maxDistSq = maxDistBlocks * maxDistBlocks;
+        double potatoDistSq = maxDistSq; // potato LOD reaches full render distance
 
         // -------------------------
         // PASS 1: Collect visible wormgrass positions.
         // -------------------------
-        // Positions that will use the expensive "carpet" sampling.
-        ArrayList<Long> detailedPositions = new ArrayList<>(2048);
-
         // IMPORTANT:
         //  - Frustum culling must ONLY decide what to draw.
         //  - Patch/depth/height must be computed from a camera-independent set, otherwise
         //    turning the camera makes the patch "shrink" and heights pop.
         //
         // So we collect TWO sets:
-        //  (1) analysisSet: all wormgrass blocks within the analysis radius (independent of frustum)
-        //  (2) detailedPositions: the actually visible blocks we will draw
-        HashSet<Long> analysisSet = new HashSet<>(4096);
+        //  (1) frameAnalysisSet: all wormgrass blocks within the analysis radius (independent of frustum)
+        //  (2) frameDetailedPositions: the actually visible blocks we will draw
 
-        for (int dz = -VIEW_DISTANCE_CHUNKS; dz <= VIEW_DISTANCE_CHUNKS; dz++) {
-            for (int dx = -VIEW_DISTANCE_CHUNKS; dx <= VIEW_DISTANCE_CHUNKS; dx++) {
+        for (int dz = -viewDistChunks; dz <= viewDistChunks; dz++) {
+            for (int dx = -viewDistChunks; dx <= viewDistChunks; dx++) {
                 int cx = camChunkX + dx;
                 int cz = camChunkZ + dz;
 
@@ -244,70 +258,93 @@ public final class WormGrassWorldRenderer {
                 if (positions.isEmpty()) continue;
 
                 for (long packed : positions) {
-                    BlockPos pos = BlockPos.fromLong(packed);
+                    // Avoid BlockPos.fromLong() allocation — extract x/z directly.
+                    int px = BlockPos.unpackLongX(packed);
+                    int pz = BlockPos.unpackLongZ(packed);
 
-                    double ddx = (pos.getX() + 0.5) - camX;
-                    double ddz = (pos.getZ() + 0.5) - camZ;
+                    double ddx = (px + 0.5) - camX;
+                    double ddz = (pz + 0.5) - camZ;
                     double distSq = ddx * ddx + ddz * ddz;
                     if (distSq > maxDistSq) continue;
 
                     // Camera-independent analysis set used for patch/depth computation.
-                    // Include everything up to the potato LOD radius so patch size doesn't depend on frustum.
-                    if (distSq <= LOD_POTATO_DIST_SQ) {
-                        analysisSet.add(packed);
-                    }
+                    frameAnalysisSet.add(packed);
 
                     // From here on: culling is ONLY for rendering.
                     if (frustum != null) {
-                        // Conservative vertical bounds to avoid popping.
-                        Box box = new Box(pos).stretch(1, CENTER_HEIGHT_BIG_PATCH + 1.0, 1);
+                        int py = BlockPos.unpackLongY(packed);
+                        // Construct Box directly to avoid BlockPos allocation.
+                        Box box = new Box(px, py, pz, px + 1, py + CENTER_HEIGHT_BIG_PATCH + 1.0, pz + 1);
                         if (!frustum.isVisible(box)) continue;
                     }
 
-                    if (distSq <= LOD_POTATO_DIST_SQ) {
-                        detailedPositions.add(packed);
-                    }
+                    frameDetailedPositions.add(packed);
                 }
             }
         }
 
 
-        if (detailedPositions.isEmpty()) {
+        if (frameDetailedPositions.isEmpty()) {
             matrices.pop();
             return;
         }
 
         // -------------------------
-        // PASS 2: Build patch info (size + distance-to-edge field).
+        // PASS 2: Build patch info — CACHED, only recompute when dirty or on timer.
         // -------------------------
-        // Compute patch/depth from the camera-independent set.
-        Map<Long, PatchCell> patchCellByPos = computePatchCellsXZ(analysisSet);
-
-        // Precompute a normalized depth field for smooth sampling across the patch.
-        Map<Long, Float> depthField = new HashMap<>(patchCellByPos.size() * 2);
-        for (var e : patchCellByPos.entrySet()) {
-            PatchCell c = e.getValue();
-            float d;
-            if (c.maxDist <= 0) d = 0f;
-            else d = MathHelper.clamp(c.distToEdge / (float)(c.maxDist + DEPTH_PAD), 0f, 1f);
-
-            // Keep the same easing you already use
-            d = smoothstep(d);
-
-            depthField.put(e.getKey(), d);
+        int currentVersion = WormGrassRenderCache.getDirtyVersion();
+        if (currentVersion != cachedPatchVersion || (now - cachedPatchTick) > PATCH_RECOMPUTE_INTERVAL) {
+            cachedPatchCells = computePatchCellsXZ(frameAnalysisSet);
+            cachedDepthField = new HashMap<>(cachedPatchCells.size() * 2);
+            for (var e : cachedPatchCells.entrySet()) {
+                PatchCell c = e.getValue();
+                float d;
+                if (c.maxDist <= 0) d = 0f;
+                else d = MathHelper.clamp(c.distToEdge / (float)(c.maxDist + DEPTH_PAD), 0f, 1f);
+                d = smoothstep(d);
+                cachedDepthField.put(e.getKey(), d);
+            }
+            cachedPatchVersion = currentVersion;
+            cachedPatchTick = now;
         }
+        Map<Long, PatchCell> patchCellByPos = cachedPatchCells;
+        Map<Long, Float> depthField = cachedDepthField;
 
         // -------------------------
         // PASS 3: Render (continuous height field)
         // -------------------------
-        for (long packed : detailedPositions) {
-            BlockPos pos = BlockPos.fromLong(packed);
+        // Pre-compute time values once (not per-strand).
+        float swayTime = (world.getTime() + tickDelta) * 0.15f;
+
+        for (int blockIdx = 0; blockIdx < frameDetailedPositions.size(); blockIdx++) {
+            long packed = frameDetailedPositions.get(blockIdx);
+            // Avoid BlockPos.fromLong() allocation — extract coords directly.
+            int posX = BlockPos.unpackLongX(packed);
+            int posY = BlockPos.unpackLongY(packed);
+            int posZ = BlockPos.unpackLongZ(packed);
             PatchCell cell = patchCellByPos.get(packed);
             if (cell == null) continue;
 
-            double bdx = (pos.getX() + 0.5) - camX;
-            double bdz = (pos.getZ() + 0.5) - camZ;
+            double bdx = (posX + 0.5) - camX;
+            double bdz = (posZ + 0.5) - camZ;
             double blockDistSq = bdx * bdx + bdz * bdz;
+
+            // ---- Block-level thinning at far distance ----
+            // Block-level thinning at distance — gentler thresholds to keep
+            // coverage visually uniform.  Far LODs use cheap billboards so the
+            // extra blocks are affordable.
+            if (blockDistSq > LOD_LOW_DIST_SQ) {
+                long blockHash = packed * 0x9E3779B97F4A7C15L;
+                float skipThreshold;
+                if (blockDistSq > 80.0 * 80.0) {
+                    skipThreshold = 0.60f;      // ultra-far: keep ~40% of blocks
+                } else if (blockDistSq > 56.0 * 56.0) {
+                    skipThreshold = 0.45f;      // far: keep ~55% of blocks
+                } else {
+                    skipThreshold = 0.25f;      // near-low: keep ~75% of blocks
+                }
+                if (rand01(blockHash) < skipThreshold) continue;
+            }
 
             // Patch-scale maturity (constant over the component)
             float patchScale = MathHelper.clamp(cell.size / (float) PATCH_SIZE_SATURATION, 0f, 1f);
@@ -317,18 +354,30 @@ public final class WormGrassWorldRenderer {
             float typicalBias = smoothstep(MathHelper.clamp((patchScale - 0.40f) / 0.60f, 0f, 1f));
             centerHeight = MathHelper.lerp(typicalBias * 0.65f, centerHeight, CENTER_HEIGHT_TYPICAL);
 
-            int y = pos.getY();
-            int light = WorldRenderer.getLightmapCoordinates(world, pos);
+            int y = posY;
+            int light = WorldRenderer.getLightmapCoordinates(world, new BlockPos(posX, posY, posZ));
 
-            // Dynamic density: farther blocks get sparser sampling.
+            // ---- Multi-tier density — tuned for visually uniform coverage ----
+            // Close LOD reduced 30%; each farther tier uses progressively
+            // sparser sampling, but gently enough that the carpet looks even.
             float spacing = GRID_SPACING;
-            if (blockDistSq > LOD_HIGH_DIST_SQ) spacing *= 1.55f;
+            if (blockDistSq > 56.0 * 56.0) {
+                spacing *= 4.0f;        // ultra-far: billboard quads are cheap
+            } else if (blockDistSq > LOD_LOW_DIST_SQ) {
+                spacing *= 3.0f;        // potato tier
+            } else if (blockDistSq > LOD_MEDIUM_DIST_SQ) {
+                spacing *= 2.0f;        // low tier
+            } else if (blockDistSq > LOD_HIGH_DIST_SQ) {
+                spacing *= 1.60f;       // medium tier
+            } else {
+                spacing *= 1.20f;       // close LOD: ~30% fewer strands
+            }
 
             // Block bounds (+bleed) in world space
-            float blockMinX = pos.getX() - BLEED;
-            float blockMaxX = (pos.getX() + 1f) + BLEED;
-            float blockMinZ = pos.getZ() - BLEED;
-            float blockMaxZ = (pos.getZ() + 1f) + BLEED;
+            float blockMinX = posX - BLEED;
+            float blockMaxX = (posX + 1f) + BLEED;
+            float blockMinZ = posZ - BLEED;
+            float blockMaxZ = (posZ + 1f) + BLEED;
 
             int gx0 = MathHelper.floor(blockMinX / spacing);
             int gx1 = MathHelper.floor(blockMaxX / spacing);
@@ -354,8 +403,14 @@ public final class WormGrassWorldRenderer {
 
                     // -------------------------
                     // CONTINUOUS DEPTH SAMPLING
+                    // Skip expensive bilinear at distance — use block's precomputed depth.
                     // -------------------------
-                    float depthScale = sampleDepthBilinear(depthField, y, x, z);
+                    float depthScale;
+                    if (blockDistSq > LOD_MEDIUM_DIST_SQ) {
+                        depthScale = depthAt(depthField, posX, y, posZ);
+                    } else {
+                        depthScale = sampleDepthBilinear(depthField, y, x, z);
+                    }
 
                     // Recompute height/thickness/density per strand from continuous depth
                     float height = MathHelper.lerp(depthScale, EDGE_HEIGHT, centerHeight);
@@ -385,6 +440,14 @@ public final class WormGrassWorldRenderer {
                     float r = MathHelper.lerp(hN, edgeR, cenR);
                     float g = MathHelper.lerp(hN, edgeG, cenG);
                     float b = MathHelper.lerp(hN, edgeB, cenB);
+
+                    // Per-strand color jitter — breaks up the uniform "blob" that appears
+                    // when shaders apply consistent directional lighting across all strands.
+                    float brightnessJitter = MathHelper.lerp(rand01(h ^ 0xDEADBEEF12345678L), 0.68f, 1.32f);
+                    float hueShift = (rand01(h ^ 0xFACECAFE01234567L) - 0.5f) * 0.07f;
+                    r = MathHelper.clamp(r * brightnessJitter + hueShift, 0f, 1f);
+                    g = MathHelper.clamp(g * brightnessJitter, 0f, 1f);
+                    b = MathHelper.clamp(b * brightnessJitter - hueShift * 0.5f, 0f, 1f);
 
                     float baseWidth = MathHelper.lerp(thickT, EDGE_THICK_BLOCKS, CENTER_THICK_BLOCKS);
 
@@ -437,26 +500,36 @@ public final class WormGrassWorldRenderer {
                         strandState = getOrCreateStrandState(h, x, y, z, baseStrandHeight);
                     }
 
-                    float t = (world.getTime() + tickDelta) * 0.15f;
-                    float phase = ((h >>> 16) & 0xFFFF) * 0.01f;
-                    float sway = MathHelper.sin(t + phase) * 0.06f * depthScale;
-                    float sway2 = MathHelper.cos(t * 0.9f + phase * 1.3f) * 0.04f * depthScale;
-                    float sway3 = MathHelper.sin(t * 0.7f + phase) * 0.03f * depthScale;
+                    if (strandLodLevel <= 1f) {
+                        // High LOD: full physics + sway with trig
+                        float phase = ((h >>> 16) & 0xFFFF) * 0.01f;
+                        float sway = MathHelper.sin(swayTime + phase) * 0.06f * depthScale;
+                        float sway2 = MathHelper.cos(swayTime * 0.9f + phase * 1.3f) * 0.04f * depthScale;
 
-                    if (strandState != null) {
-                        lashX = strandState.getLerpTipOffsetX(tickDelta) + sway;
-                        lashY = strandState.getLerpTipOffsetY(tickDelta) + sway2;
-                        lashZ = strandState.getLerpTipOffsetZ(tickDelta);
-                        strandExcitement = strandState.excitement;
+                        if (strandState != null) {
+                            lashX = strandState.getLerpTipOffsetX(tickDelta) + sway;
+                            lashY = strandState.getLerpTipOffsetY(tickDelta) + sway2;
+                            lashZ = strandState.getLerpTipOffsetZ(tickDelta);
+                            strandExcitement = strandState.excitement;
+                        } else {
+                            lashX = sway;
+                            lashZ = sway2;
+                            lashY = 0f;
+                            strandExcitement = 0f;
+                        }
                     } else if (strandLodLevel <= 2f) {
+                        // Medium LOD: minimal sway with trig (only 1 sin call)
+                        float phase = ((h >>> 16) & 0xFFFF) * 0.01f;
+                        float sway = MathHelper.sin(swayTime + phase) * 0.05f * depthScale;
                         lashX = sway;
-                        lashZ = sway2;
-                        lashY = sway3;
+                        lashZ = sway * 0.6f;
+                        lashY = 0f;
                         strandExcitement = 0f;
                     } else {
-                        lashX = sway;
-                        lashZ = sway2;
-                        lashY = sway3;
+                        // Low + Potato LOD: no sway at all (saves trig calls)
+                        lashX = 0f;
+                        lashZ = 0f;
+                        lashY = 0f;
                         strandExcitement = 0f;
                     }
 
@@ -486,7 +559,8 @@ public final class WormGrassWorldRenderer {
                             r, g, b,
                             strandLodLevel,
                             strandSegments,
-                            (float) camX, (float) camZ
+                            (float) camX, (float) camZ,
+                            strandExcitement, swayTime
                     );
 
                     //eyeOpen = 1;
@@ -532,7 +606,7 @@ public final class WormGrassWorldRenderer {
 
                         float eyeWidthAtTip = width * MathHelper.lerp(smoothstep(1f), 1.0f, 0.45f);
 
-                        pendingEyes.add(new PendingEye(
+                        framePendingEyes.add(new PendingEye(
                                 strandTipX, strandTipY, strandTipZ,
                                 eyeRightX, eyeRightY, eyeRightZ,
                                 eyeUpX, eyeUpY, eyeUpZ,
@@ -546,13 +620,13 @@ public final class WormGrassWorldRenderer {
 
         matrices.pop();
 
-        if(!pendingEyes.isEmpty()) {
+        if(!framePendingEyes.isEmpty()) {
             matrices.push();
             matrices.translate(-camX, -camY, -camZ);
             Matrix4f eyePosMat = matrices.peek().getPositionMatrix();
             VertexConsumer evc = consumers.getBuffer(RenderLayer.getEntityCutoutNoCull(WHITE));
 
-            for(PendingEye eye : pendingEyes) {
+            for(PendingEye eye : framePendingEyes) {
                 float openAmount = MathHelper.clamp(eye.eyeOpen, 0f, 1f);
                 float eyeSize = eye.tipW * MathHelper.lerp(openAmount, 0.0f, 0.70f);
 
@@ -804,8 +878,11 @@ public final class WormGrassWorldRenderer {
             }
         }
         float loopTimeSeconds = (System.nanoTime() % 100_000_000_000L) * 1e-9f;
-        Long[] awakeSnapshot = AWAKE_STRAND_KEYS.toArray(new Long[0]);
-        for (Long key : awakeSnapshot) {
+        // Use reusable list instead of allocating new Long[] every tick.
+        physicsSnapshot.clear();
+        physicsSnapshot.addAll(AWAKE_STRAND_KEYS);
+        for (int pi = 0; pi < physicsSnapshot.size(); pi++) {
+            long key = physicsSnapshot.get(pi);
             StrandAnimState strand = STRAND_ANIM_STATES.get(key);
             if (strand == null) continue;
             if (strand.isAtRest && strand.excitement <= DORMANT_BEGIN_T && !strand.awake) continue;
@@ -1075,16 +1152,17 @@ public final class WormGrassWorldRenderer {
             q.add(start);
             component.add(start);
 
-            int y = BlockPos.fromLong(start).getY();
+            int y = BlockPos.unpackLongY(start);
 
             while (!q.isEmpty()) {
                 long cur = q.removeFirst();
-                BlockPos p = BlockPos.fromLong(cur);
+                int cpx = BlockPos.unpackLongX(cur);
+                int cpz = BlockPos.unpackLongZ(cur);
 
-                tryNeighbor(unvisited, set, q, component, p.getX() + 1, y, p.getZ());
-                tryNeighbor(unvisited, set, q, component, p.getX() - 1, y, p.getZ());
-                tryNeighbor(unvisited, set, q, component, p.getX(), y, p.getZ() + 1);
-                tryNeighbor(unvisited, set, q, component, p.getX(), y, p.getZ() - 1);
+                tryNeighbor(unvisited, set, q, component, cpx + 1, y, cpz);
+                tryNeighbor(unvisited, set, q, component, cpx - 1, y, cpz);
+                tryNeighbor(unvisited, set, q, component, cpx, y, cpz + 1);
+                tryNeighbor(unvisited, set, q, component, cpx, y, cpz - 1);
             }
 
             int size = component.size();
@@ -1097,16 +1175,24 @@ public final class WormGrassWorldRenderer {
             HashMap<Long, Integer> dist = new HashMap<>(size * 2);
 
             for (long lp : component) {
-                BlockPos p = BlockPos.fromLong(lp);
-                if (isBoundary(compSet, p.getX(), y, p.getZ())) {
+                int lpx = BlockPos.unpackLongX(lp);
+                int lpz = BlockPos.unpackLongZ(lp);
+                if (isBoundary(compSet, lpx, y, lpz)) {
                     bfs.add(lp);
                     dist.put(lp, 0);
                 }
             }
 
             if (bfs.isEmpty()) {
-                bfs.add(component.get(0));
-                dist.put(component.get(0), 0);
+                // No real boundary found — wormgrass extends beyond loaded area
+                // on all sides (e.g. superflat world). Give all blocks maximum depth
+                // so they appear at full height.
+                int fakeMaxDist = 100;
+                int fakeDistToEdge = fakeMaxDist + DEPTH_PAD; // ensures depthScale = 1.0
+                for (long lp : component) {
+                    out.put(lp, new PatchCell(size, fakeDistToEdge, fakeMaxDist));
+                }
+                continue;
             }
 
             int maxDist = 0;
@@ -1116,12 +1202,13 @@ public final class WormGrassWorldRenderer {
                 int d = dist.get(cur);
                 if (d > maxDist) maxDist = d;
 
-                BlockPos p = BlockPos.fromLong(cur);
+                int bpx = BlockPos.unpackLongX(cur);
+                int bpz = BlockPos.unpackLongZ(cur);
 
-                maxDist = bfsNeighbor(compSet, dist, bfs, p.getX() + 1, y, p.getZ(), d, maxDist);
-                maxDist = bfsNeighbor(compSet, dist, bfs, p.getX() - 1, y, p.getZ(), d, maxDist);
-                maxDist = bfsNeighbor(compSet, dist, bfs, p.getX(), y, p.getZ() + 1, d, maxDist);
-                maxDist = bfsNeighbor(compSet, dist, bfs, p.getX(), y, p.getZ() - 1, d, maxDist);
+                maxDist = bfsNeighbor(compSet, dist, bfs, bpx + 1, y, bpz, d, maxDist);
+                maxDist = bfsNeighbor(compSet, dist, bfs, bpx - 1, y, bpz, d, maxDist);
+                maxDist = bfsNeighbor(compSet, dist, bfs, bpx, y, bpz + 1, d, maxDist);
+                maxDist = bfsNeighbor(compSet, dist, bfs, bpx, y, bpz - 1, d, maxDist);
             }
 
             for (long lp : component) {
@@ -1133,11 +1220,21 @@ public final class WormGrassWorldRenderer {
         return out;
     }
 
+    /**
+     * A block is a real boundary only if at least one neighbor is truly absent
+     * from the world (not just outside the analysis set). This prevents false
+     * boundaries at the edge of the view distance on large / infinite patches.
+     */
     private static boolean isBoundary(HashSet<Long> compSet, int x, int y, int z) {
-        return !compSet.contains(BlockPos.asLong(x + 1, y, z))
-                || !compSet.contains(BlockPos.asLong(x - 1, y, z))
-                || !compSet.contains(BlockPos.asLong(x, y, z + 1))
-                || !compSet.contains(BlockPos.asLong(x, y, z - 1));
+        if (!compSet.contains(BlockPos.asLong(x + 1, y, z))
+                && !WormGrassRenderCache.hasPosition(x + 1, y, z)) return true;
+        if (!compSet.contains(BlockPos.asLong(x - 1, y, z))
+                && !WormGrassRenderCache.hasPosition(x - 1, y, z)) return true;
+        if (!compSet.contains(BlockPos.asLong(x, y, z + 1))
+                && !WormGrassRenderCache.hasPosition(x, y, z + 1)) return true;
+        if (!compSet.contains(BlockPos.asLong(x, y, z - 1))
+                && !WormGrassRenderCache.hasPosition(x, y, z - 1)) return true;
+        return false;
     }
 
     private static int bfsNeighbor(
