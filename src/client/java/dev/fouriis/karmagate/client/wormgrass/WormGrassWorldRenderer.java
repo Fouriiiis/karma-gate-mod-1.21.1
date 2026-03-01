@@ -1,7 +1,5 @@
 package dev.fouriis.karmagate.client.wormgrass;
 
-import com.mojang.blaze3d.systems.RenderSystem;
-import dev.fouriis.karmagate.block.ModBlocks;
 import dev.fouriis.karmagate.hologram.RainWorldFrameIndex;
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
@@ -17,7 +15,6 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 
-import net.minecraft.util.math.ChunkPos;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;

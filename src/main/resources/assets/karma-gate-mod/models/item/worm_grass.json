@@ -1,6 +1,7 @@
 {
   "parent": "minecraft:item/generated",
   "textures": {
-    "layer0": "karma-gate-mod:item/graffiti_can"
+    "layer0": "karma-gate-mod:item/worm_grass"
   }
 }
+

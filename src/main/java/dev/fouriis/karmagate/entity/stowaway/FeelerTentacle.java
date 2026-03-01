@@ -80,7 +80,7 @@ public class FeelerTentacle {
             float t = (float) i / (float) (segments.length - 1);
             
             if (i == 0) {
-                // First segment pinned to attachment point
+                seg.lastPos = basePos;
                 seg.pos = basePos;
                 seg.vel = Vec3d.ZERO;
                 continue;
@@ -192,7 +192,11 @@ public class FeelerTentacle {
         for (int i = 1; i < segments.length; i++) {
             segments[i].pushOutOfBlock(world);
         }
-        
+
+        for (int i = 1; i < segments.length; i++) {
+            segments[i].lastPos = segments[i].pos;
+        }
+
         // Update visual width based on withdrawal state
         float targetW = MathHelper.lerp(withdrawnScale, 1.0f, 0.4f);
         this.width = MathHelper.lerp(0.1f, width, targetW);

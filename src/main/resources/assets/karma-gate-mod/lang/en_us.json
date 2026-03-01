@@ -1,3 +1,5 @@
 {
-  "block.karma-gate-mod.rot_block": "Rot Block"
+  "block.karma-gate-mod.rot_block": "Rot Block",
+  "entity.karma-gate-mod.stowaway_bug": "Stowaway",
+  "item.karma-gate-mod.stowaway_bug_spawn_egg": "Stowaway Spawn Egg"
 }

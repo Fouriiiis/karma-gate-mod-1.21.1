@@ -13,6 +13,7 @@ import dev.fouriis.karmagate.sound.ModSounds;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
+import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
 import net.minecraft.entity.EntityDimensions;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.SpawnGroup;
@@ -51,8 +52,8 @@ public class KarmaGateMod implements ModInitializer {
     public static final EntityType<StowawayBugEntity> STOWAWAY_BUG_ENTITY_TYPE = Registry.register(
             Registries.ENTITY_TYPE,
             Identifier.of(MOD_ID, "stowaway_bug"),
-            FabricEntityTypeBuilder.<StowawayBugEntity>create(SpawnGroup.MONSTER, StowawayBugEntity::new)
-                    .dimensions(EntityDimensions.fixed(1.5f, 2.0f))
+            FabricEntityTypeBuilder.<StowawayBugEntity>create(SpawnGroup.MONSTER, (type, world) -> new StowawayBugEntity(type, world))
+                    .dimensions(EntityDimensions.fixed(1.0f, 2.0f))
                     .trackRangeBlocks(128)
                     .trackedUpdateRate(3)
                     .build()
@@ -68,6 +69,9 @@ public class KarmaGateMod implements ModInitializer {
         ModParticles.register();
         ModSounds.registerModSounds();
         
+        // Register entity attributes
+        FabricDefaultAttributeRegistry.register(STOWAWAY_BUG_ENTITY_TYPE, StowawayBugEntity.createAttributes());
+
         // Register networking
         ModNetworking.register();
         

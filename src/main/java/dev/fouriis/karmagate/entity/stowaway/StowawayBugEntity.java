@@ -1,21 +1,30 @@
 package dev.fouriis.karmagate.entity.stowaway;
 
+import net.minecraft.block.BlockState;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.attribute.DefaultAttributeContainer;
+import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.data.DataTracker;
 import net.minecraft.entity.data.TrackedData;
 import net.minecraft.entity.data.TrackedDataHandlerRegistry;
+import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.entity.damage.DamageSource;
-import net.minecraft.entity.damage.DamageTypes;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.World;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.bernie.geckolib.animatable.GeoAnimatable;
+import software.bernie.geckolib.animatable.instance.AnimatableInstanceCache;
+import software.bernie.geckolib.animation.AnimatableManager;
+import software.bernie.geckolib.animation.AnimationController;
+import software.bernie.geckolib.animation.PlayState;
+import software.bernie.geckolib.animation.RawAnimation;
+import software.bernie.geckolib.util.GeckoLibUtil;
 
 import java.util.List;
 import java.util.Random;
@@ -30,9 +39,14 @@ import java.util.Random;
  * - AI behavior with state-based actions (Idle, Attacking, Hidden, Sleeping)
  * - Procedural rope physics (client-side only)
  */
-public class StowawayBugEntity extends Entity {
+public class StowawayBugEntity extends MobEntity implements GeoAnimatable {
     private static final Logger LOGGER = LoggerFactory.getLogger(StowawayBugEntity.class);
-    
+
+    // GeckoLib animation cache
+    private final AnimatableInstanceCache geoCache = GeckoLibUtil.createInstanceCache(this);
+
+    private static final RawAnimation IDLE_ANIM = RawAnimation.begin().thenLoop("idle");
+
     // Tracked data for synchronization
     private static final TrackedData<Float> HOME_POS_X = DataTracker.registerData(StowawayBugEntity.class, TrackedDataHandlerRegistry.FLOAT);
     private static final TrackedData<Float> HOME_POS_Y = DataTracker.registerData(StowawayBugEntity.class, TrackedDataHandlerRegistry.FLOAT);
@@ -87,15 +101,30 @@ public class StowawayBugEntity extends Entity {
     private int numFeeelers = 8;  // Number of feeler tentacles
     private int numHeads = 3;  // 3 grabbing heads
     private boolean tentaclesInitialized = false;  // Track initialization
-    
+
     // Constants (20 pixels in C# = 1 Minecraft block; C# runs at 40 FPS, MC at 20 TPS)
     // C#: num7 = Mathf.Lerp(10f, 1f, tentaclesWithdrawn) - so ~10 pixels = 0.5 blocks normally
     private static final float FEELER_LENGTH = 0.5f;  // Distance between segments (C#: 10 pixels)
     private static final int FEELER_SEGMENTS = 12;  // Segments per feeler (C# uses variable 5-20)
     private static final int GRABBER_SEGMENTS = 40;  // Segments per grabber head
     private static final float GRABBER_LENGTH = 0.5f;  // Distance between segments in grabber
-    
-    public StowawayBugEntity(EntityType<?> type, World world, Vec3d homePos) {
+
+    /** Whether this entity has already performed its initial ceiling-latch teleport. */
+    private boolean hasLatched = false;
+
+    /**
+     * Register base attributes so MobEntity is happy (health, movement speed, etc.)
+     */
+    public static DefaultAttributeContainer.Builder createAttributes() {
+        return MobEntity.createMobAttributes()
+                .add(EntityAttributes.GENERIC_MAX_HEALTH, 40.0)
+                .add(EntityAttributes.GENERIC_MOVEMENT_SPEED, 0.0)   // Sessile — doesn't walk
+                .add(EntityAttributes.GENERIC_FOLLOW_RANGE, 32.0)
+                .add(EntityAttributes.GENERIC_ARMOR, 4.0);
+    }
+
+
+    public StowawayBugEntity(EntityType<? extends StowawayBugEntity> type, World world, Vec3d homePos) {
         super(type, world);
         this.homePos = homePos;
         this.placedDirection = new Vec3d(0, 1, 0);  // Default direction
@@ -114,17 +143,21 @@ public class StowawayBugEntity extends Entity {
         
         // Initialize AI
         this.ai = new StowawayBugAI(this);
-        
+
+        // Disable all collision so no entity is ever pushed by this one
+        this.noClip = true;
+
         // Client-side initialization will happen on first tick when entity position is synced
         this.tentaclesInitialized = false;
     }
     
-    public StowawayBugEntity(EntityType<?> type, World world) {
+    public StowawayBugEntity(EntityType<? extends StowawayBugEntity> type, World world) {
         this(type, world, Vec3d.ZERO);
     }
     
     @Override
     protected void initDataTracker(DataTracker.Builder builder) {
+        super.initDataTracker(builder);
         builder.add(HOME_POS_X, 0.0f);
         builder.add(HOME_POS_Y, 0.0f);
         builder.add(HOME_POS_Z, 0.0f);
@@ -155,9 +188,24 @@ public class StowawayBugEntity extends Entity {
     
     @Override
     public void tick() {
+        // Keep noClip always true so no entity is ever pushed by this one
+        this.noClip = true;
         super.tick();
         
         if (!this.getWorld().isClient) {
+            // On the very first server tick, latch to the ceiling above spawn point
+            if (!hasLatched) {
+                hasLatched = true;
+                latchToCeiling();
+            }
+
+            // Lock position and rotation to the latched ceiling point every tick
+            if (hasLatched && homePos != null && homePos.lengthSquared() > 0) {
+                this.refreshPositionAndAngles(homePos.x, homePos.y, homePos.z, 0f, 0f);
+                this.setVelocity(Vec3d.ZERO);
+                this.velocityModified = true;
+            }
+
             // Server-side logic
             huntDelay--;
             spitCooldown--;
@@ -187,7 +235,7 @@ public class StowawayBugEntity extends Entity {
                 initializeTentacles();
                 tentaclesInitialized = true;
             }
-            
+
             // Update rope physics with proper world reference for collision
             World world = this.getWorld();
             
@@ -195,7 +243,7 @@ public class StowawayBugEntity extends Entity {
                 // Calculate individual attach positions for each feeler (radial spread)
                 for (int i = 0; i < feelerTentacles.length; i++) {
                     float angle = feelerTentacles[i].getInitialAngle();
-                    float radius = 0.6f;
+                    float radius = 0.4f;
                     float offsetX = radius * (float) Math.cos(angle);
                     float offsetZ = radius * (float) Math.sin(angle);
                     Vec3d attachPos = getAttachmentPos().add(offsetX, 0, offsetZ);
@@ -206,13 +254,17 @@ public class StowawayBugEntity extends Entity {
             if (grabbingTentacles != null) {
                 // Body direction for coiled tentacle positioning (matches C# placedDirection)
                 Vec3d bodyDir = placedDirection.normalize();
-                
+                // Use stable homePos-based eye position to avoid interpolation jitter
+                Vec3d stableEyePos = (homePos != null && homePos.lengthSquared() > 0)
+                        ? homePos.add(0, this.getStandingEyeHeight(), 0)
+                        : this.getEyePos();
+
                 for (int i = 0; i < grabbingTentacles.length; i++) {
                     float angle = (float) (i * 2.0 * Math.PI / numHeads);
                     float radius = 0.2f;
                     float offsetX = radius * (float) Math.cos(angle);
                     float offsetZ = radius * (float) Math.sin(angle);
-                    Vec3d headBasePos = this.getEyePos().add(offsetX, 0, offsetZ);
+                    Vec3d headBasePos = stableEyePos.add(offsetX, 0, offsetZ);
                     grabbingTentacles[i].update(headBasePos, bodyDir, world);
                 }
             }
@@ -227,7 +279,7 @@ public class StowawayBugEntity extends Entity {
         for (int i = 0; i < numFeeelers; i++) {
             // Radial offset around entity (spread for natural hanging)
             float angle = (float) (i * 2.0 * Math.PI / numFeeelers);
-            float radius = 0.6f; // Larger offset so tentacles spread around entity
+            float radius = 0.4f; // Larger offset so tentacles spread around entity
             float offsetX = radius * (float) Math.cos(angle);
             float offsetZ = radius * (float) Math.sin(angle);
             
@@ -249,7 +301,37 @@ public class StowawayBugEntity extends Entity {
         
         LOGGER.info("Tentacles initialized successfully");
     }
-    
+
+    /**
+     * Teleports the entity upward until it finds a solid ceiling block to latch onto.
+     * Like a shulker, it snaps to the underside of the block directly above it.
+     * Searches up to 32 blocks above the current position.
+     */
+    private void latchToCeiling() {
+        World world = this.getWorld();
+        BlockPos startPos = this.getBlockPos();
+        int maxSearch = 8;
+
+        for (int dy = 1; dy <= maxSearch; dy++) {
+            BlockPos checkPos = startPos.up(dy);
+            BlockState state = world.getBlockState(checkPos);
+            if (state.isSolidBlock(world, checkPos)) {
+                // Place the entity on the underside of this block
+                // The entity's bounding box height is 2.0, so position it so its top touches checkPos
+                double newY = checkPos.getY() - this.getHeight();
+                this.refreshPositionAndAngles(this.getX(), newY, this.getZ(), this.getYaw(), this.getPitch());
+                this.setVelocity(Vec3d.ZERO);
+                this.setOnGround(false);
+                homePos = this.getPos();
+                LOGGER.info("Stowaway latched to ceiling at {}", this.getPos());
+                return;
+            }
+        }
+        // No ceiling found – use current position as home
+        homePos = this.getPos();
+        LOGGER.info("Stowaway: no ceiling found within {} blocks, using current pos {} as home", maxSearch, homePos);
+    }
+
     private void updateBehavior() {
         // Update body state based on AI behavior
         if (ai.getBehavior() == StowawayBugAI.Behavior.SLEEPING || ai.getBehavior() == StowawayBugAI.Behavior.HIDDEN) {
@@ -279,12 +361,16 @@ public class StowawayBugEntity extends Entity {
         double detectionRange = 15.0;
         Box searchBox = this.getBoundingBox().expand(detectionRange);
         
-        // Find nearby living entities (excluding self, spectators, and non-survival players)
+        // Find nearby living entities (excluding self, other stowaways, spectators, and non-survival players)
         List<LivingEntity> nearbyEntities = this.getWorld().getEntitiesByClass(
             LivingEntity.class, 
             searchBox, 
             entity -> {
                 if (entity.equals(this) || !entity.isAlive() || entity.isSpectator()) {
+                    return false;
+                }
+                // Don't target other stowaway bugs
+                if (entity instanceof StowawayBugEntity) {
                     return false;
                 }
                 // Ignore players not in survival mode
@@ -490,6 +576,7 @@ public class StowawayBugEntity extends Entity {
     
     @Override
     public void readCustomDataFromNbt(NbtCompound nbt) {
+        super.readCustomDataFromNbt(nbt);
         if (nbt.contains("HomePos")) {
             NbtCompound homeTag = nbt.getCompound("HomePos");
             homePos = new Vec3d(homeTag.getDouble("X"), homeTag.getDouble("Y"), homeTag.getDouble("Z"));
@@ -498,10 +585,12 @@ public class StowawayBugEntity extends Entity {
             NbtCompound dirTag = nbt.getCompound("PlacedDir");
             placedDirection = new Vec3d(dirTag.getDouble("X"), dirTag.getDouble("Y"), dirTag.getDouble("Z"));
         }
+        hasLatched = nbt.getBoolean("HasLatched");
     }
     
     @Override
     public void writeCustomDataToNbt(NbtCompound nbt) {
+        super.writeCustomDataToNbt(nbt);
         NbtCompound homeTag = new NbtCompound();
         homeTag.putDouble("X", homePos.x);
         homeTag.putDouble("Y", homePos.y);
@@ -513,6 +602,7 @@ public class StowawayBugEntity extends Entity {
         dirTag.putDouble("Y", placedDirection.y);
         dirTag.putDouble("Z", placedDirection.z);
         nbt.put("PlacedDir", dirTag);
+        nbt.putBoolean("HasLatched", hasLatched);
     }
     
     // ============ Rendering helpers ============
@@ -579,28 +669,67 @@ public class StowawayBugEntity extends Entity {
     public GrabbingTentacle[] getGrabbingTentacles() {
         return grabbingTentacles;
     }
-    
-    // Attachment point for feelers (derived from body + placedDirection like in C# version)
+
     private Vec3d getAttachmentPos() {
-        return this.getPos().add(placedDirection.multiply(1.5f));
+        Vec3d base = (homePos != null && homePos.lengthSquared() > 0) ? homePos : this.getPos();
+        return base.add(placedDirection.multiply(1.5f));
     }
     
     @Override
     public boolean canStartRiding(Entity entity) {
         return false;
     }
-    
+
+    /** Other entities do not collide with this one — the hitbox is passable. */
     @Override
-    public boolean isAttackable() {
-        return true;
+    public boolean isPushable() {
+        return false;
     }
-    
+
+    /** Stops this entity from being pushed by other entities. */
+    @Override
+    public boolean isCollidable() {
+        return false;
+    }
+
+    /** Stops this entity from colliding with other entities. */
+    @Override
+    public boolean collidesWith(Entity other) {
+        return false;
+    }
+
+    /** Prevent this entity from ever pushing other entities away. */
+    @Override
+    public void pushAwayFrom(Entity entity) {
+
+    }
+
     @Override
     public boolean damage(net.minecraft.entity.damage.DamageSource source, float amount) {
-        // Can be damaged
+        // Notify AI when hurt
         if (ai != null) {
             ai.onDamaged();
         }
         return super.damage(source, amount);
+    }
+
+    // ============ GeoAnimatable ============
+
+    @Override
+    public double getTick(Object object) {
+        return this.age;
+    }
+
+    @Override
+    public void registerControllers(AnimatableManager.ControllerRegistrar controllers) {
+        controllers.add(new AnimationController<>(this, "controller", 0, state -> {
+            state.getController().setAnimation(IDLE_ANIM);
+            return PlayState.CONTINUE;
+        }));
+    }
+
+    @Override
+    public AnimatableInstanceCache getAnimatableInstanceCache() {
+        return geoCache;
     }
 }

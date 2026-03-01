@@ -35,7 +35,12 @@ public class ModNetworking {
             UpdateGraffitiPayload.ID,
             UpdateGraffitiPayload.CODEC
         );
-        
+
+        PayloadTypeRegistry.playC2S().register(
+            DeleteGraffitiPayload.ID,
+            DeleteGraffitiPayload.CODEC
+        );
+
         // Handle graffiti spawn requests from clients
         ServerPlayNetworking.registerGlobalReceiver(SpawnGraffitiPayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
@@ -80,6 +85,22 @@ public class ModNetworking {
         // Sync zones to players when they join
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             syncToPlayer(handler.getPlayer());
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(DeleteGraffitiPayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            context.server().execute(() -> {
+                var entity = player.getWorld().getEntityById(payload.entityId());
+                if (!(entity instanceof GraffitiEntity graffiti)) return;
+                if (!graffiti.isAlive()) return;
+
+                double distSq = player.squaredDistanceTo(graffiti.getPos());
+                if (distSq > 100.0) return;
+
+                graffiti.discard();
+                KarmaGateMod.LOGGER.info("Deleted graffiti entity {} for player {}",
+                    payload.entityId(), player.getName().getString());
+            });
         });
     }
     

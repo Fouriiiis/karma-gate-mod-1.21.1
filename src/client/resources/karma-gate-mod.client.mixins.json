@@ -5,7 +5,8 @@
 	"client": [
 		"ExampleClientMixin",
 		"GameRendererMixin",
-		"GameRendererAccessor"
+		"GameRendererAccessor",
+		"GraffitiBlockBreakMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1
