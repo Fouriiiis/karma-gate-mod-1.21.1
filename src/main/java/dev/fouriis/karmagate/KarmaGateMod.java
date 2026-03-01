@@ -5,6 +5,10 @@ import dev.fouriis.karmagate.command.CoralNeuronCommands;
 import dev.fouriis.karmagate.command.ProjectionZoneCommands;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
+import dev.fouriis.karmagate.entity.centipede.CentipedeBodyEntity;
+import dev.fouriis.karmagate.entity.centipede.CentipedeHeadEntity;
+import dev.fouriis.karmagate.entity.centipede.CentipedeSegmentEntity;
+import dev.fouriis.karmagate.entity.centipede.RedCentipedeEntity;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugEntity;
 import dev.fouriis.karmagate.item.ModItems;
 import dev.fouriis.karmagate.network.ModNetworking;
@@ -59,6 +63,37 @@ public class KarmaGateMod implements ModInitializer {
                     .build()
     );
 
+    // --- Centipede entity types ---
+    public static final EntityType<CentipedeHeadEntity> CENTIPEDE_HEAD_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "centipede_head"),
+            FabricEntityTypeBuilder.<CentipedeHeadEntity>create(SpawnGroup.MONSTER, (type, world) -> new CentipedeHeadEntity(type, world))
+                    .dimensions(EntityDimensions.fixed(0.5f, 0.5f))
+                    .trackRangeBlocks(128)
+                    .trackedUpdateRate(3)
+                    .build()
+    );
+
+    public static final EntityType<CentipedeBodyEntity> CENTIPEDE_BODY_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "centipede_body"),
+            FabricEntityTypeBuilder.<CentipedeBodyEntity>create(SpawnGroup.MONSTER, (type, world) -> new CentipedeBodyEntity(type, world))
+                    .dimensions(EntityDimensions.fixed(0.45f, 0.45f))
+                    .trackRangeBlocks(128)
+                    .trackedUpdateRate(3)
+                    .build()
+    );
+
+    public static final EntityType<RedCentipedeEntity> RED_CENTIPEDE_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "red_centipede"),
+            FabricEntityTypeBuilder.<RedCentipedeEntity>create(SpawnGroup.MONSTER, (type, world) -> new RedCentipedeEntity(type, world))
+                    .dimensions(EntityDimensions.fixed(0.5f, 0.5f))
+                    .trackRangeBlocks(128)
+                    .trackedUpdateRate(3)
+                    .build()
+    );
+
 
     @Override
     public void onInitialize() {
@@ -71,6 +106,9 @@ public class KarmaGateMod implements ModInitializer {
         
         // Register entity attributes
         FabricDefaultAttributeRegistry.register(STOWAWAY_BUG_ENTITY_TYPE, StowawayBugEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(CENTIPEDE_HEAD_ENTITY_TYPE, CentipedeSegmentEntity.createSegmentAttributes());
+        FabricDefaultAttributeRegistry.register(CENTIPEDE_BODY_ENTITY_TYPE, CentipedeSegmentEntity.createSegmentAttributes());
+        FabricDefaultAttributeRegistry.register(RED_CENTIPEDE_ENTITY_TYPE, RedCentipedeEntity.createAttributes());
 
         // Register networking
         ModNetworking.register();
