@@ -20,6 +20,11 @@ public final class ProjectionZone {
     private final BlockPos max;
     private final Box bounds;
     
+    // Zone parameters
+    private final int swarmerCount;
+    private final boolean drawCircles;
+    private final boolean drawGrid;
+    
     // Pre-computed values for rendering (avoid per-frame calculation)
     private final double centerX;
     private final double centerZ;
@@ -46,10 +51,14 @@ public final class ProjectionZone {
     private static final List<ProjectionZone> ZONES = new ArrayList<>();
 
     /**
-     * Creates a named projection zone.
+     * Creates a named projection zone with all parameters.
      */
-    public ProjectionZone(String name, BlockPos corner1, BlockPos corner2) {
+    public ProjectionZone(String name, BlockPos corner1, BlockPos corner2,
+                          int swarmerCount, boolean drawCircles, boolean drawGrid) {
         this.name = name;
+        this.swarmerCount = swarmerCount;
+        this.drawCircles = drawCircles;
+        this.drawGrid = drawGrid;
         // Normalize to ensure min < max
         this.minX = Math.min(corner1.getX(), corner2.getX());
         this.minY = Math.min(corner1.getY(), corner2.getY());
@@ -147,6 +156,18 @@ public final class ProjectionZone {
     
     public String getName() {
         return name;
+    }
+    
+    public int getSwarmerCount() {
+        return swarmerCount;
+    }
+    
+    public boolean isDrawCircles() {
+        return drawCircles;
+    }
+    
+    public boolean isDrawGrid() {
+        return drawGrid;
     }
     
     public int[][] getShellSlabs() {

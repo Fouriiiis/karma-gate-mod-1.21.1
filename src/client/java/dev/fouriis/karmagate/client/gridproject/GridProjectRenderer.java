@@ -320,6 +320,10 @@ public final class GridProjectRenderer {
                 setUniform1f(program, "uZoneMinZ", (float) zone.getMinZ());
                 setUniform1f(program, "uZoneMaxZ", (float) (zone.getMaxZ() + 1));
                 
+                // Upload draw flags as floats (0.0 or 1.0)
+                setUniform1f(program, "uDrawCircles", zone.isDrawCircles() ? 1.0f : 0.0f);
+                setUniform1f(program, "uDrawGrid", zone.isDrawGrid() ? 1.0f : 0.0f);
+                
                 // Upload circle data for this zone (now that shader is bound)
                 uploadCircleUniforms(program, zone.getName());
 

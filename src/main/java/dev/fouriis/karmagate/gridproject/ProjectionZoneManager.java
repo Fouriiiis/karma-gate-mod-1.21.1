@@ -100,6 +100,9 @@ public class ProjectionZoneManager extends PersistentState {
             zoneNbt.putInt("x2", zone.corner2().getX());
             zoneNbt.putInt("y2", zone.corner2().getY());
             zoneNbt.putInt("z2", zone.corner2().getZ());
+            zoneNbt.putInt("swarmerCount", zone.swarmerCount());
+            zoneNbt.putBoolean("drawCircles", zone.drawCircles());
+            zoneNbt.putBoolean("drawGrid", zone.drawGrid());
             zoneList.add(zoneNbt);
         }
         nbt.put("zones", zoneList);
@@ -118,7 +121,10 @@ public class ProjectionZoneManager extends PersistentState {
             int x2 = zoneNbt.getInt("x2");
             int y2 = zoneNbt.getInt("y2");
             int z2 = zoneNbt.getInt("z2");
-            manager.zones.put(name, ProjectionZoneData.of(name, x1, y1, z1, x2, y2, z2));
+            int swarmerCount = zoneNbt.contains("swarmerCount") ? zoneNbt.getInt("swarmerCount") : ProjectionZoneData.DEFAULT_SWARMER_COUNT;
+            boolean drawCircles = !zoneNbt.contains("drawCircles") || zoneNbt.getBoolean("drawCircles");
+            boolean drawGrid = !zoneNbt.contains("drawGrid") || zoneNbt.getBoolean("drawGrid");
+            manager.zones.put(name, ProjectionZoneData.of(name, x1, y1, z1, x2, y2, z2, swarmerCount, drawCircles, drawGrid));
         }
         return manager;
     }

@@ -31,7 +31,6 @@ public class NeuronSwarmerManager {
     private final Map<String, List<NeuronSwarmer>> swarmersByZone = new HashMap<>();
     
     // Configuration
-    private static final int SWARMERS_PER_ZONE = 600;
     private static final int SPAWN_BATCH_SIZE = 90;
     private static final double PLAYER_CHECK_RANGE = 200.0; // Player must be within this range for swarmers to be active
     
@@ -79,12 +78,18 @@ public class NeuronSwarmerManager {
             );
             
             if (playerInRange) {
-                // Spawn swarmers if needed
-                if (swarmers.size() < SWARMERS_PER_ZONE) {
-                    int toSpawn = Math.min(SPAWN_BATCH_SIZE, SWARMERS_PER_ZONE - swarmers.size());
+                // Spawn swarmers if needed (use zone's swarmerCount)
+                int targetCount = zone.getSwarmerCount();
+                if (swarmers.size() < targetCount) {
+                    int toSpawn = Math.min(SPAWN_BATCH_SIZE, targetCount - swarmers.size());
                     for (int i = 0; i < toSpawn; i++) {
                         Vec3d spawnPos = getRandomPositionInZone(zone, client.world);
                         swarmers.add(new NeuronSwarmer(zone.getName(), spawnPos));
+                    }
+                } else if (swarmers.size() > targetCount) {
+                    // Trim excess swarmers if count was reduced
+                    while (swarmers.size() > targetCount) {
+                        swarmers.remove(swarmers.size() - 1);
                     }
                 }
                 

@@ -31,6 +31,10 @@ uniform int uCircleCount;
 uniform vec4 uCircles[MAX_CIRCLES];      // [u, y, radius, blink] per circle
 uniform vec4 uCircleExtras[MAX_CIRCLES]; // [rotationDeg, spokes, reserved, alphaScale] per circle
 
+// Draw toggle uniforms (0.0 = off, 1.0 = on)
+uniform float uDrawCircles;
+uniform float uDrawGrid;
+
 out vec4 fragColor;
 
 // ---------- Hash helpers ----------
@@ -647,13 +651,26 @@ void main() {
     vec3 redTint  = vec3(1.00, 0.25, 0.35);
     vec3 glyphCol = mix(baseCyan, redTint, selected);
 
-    // BRIGHTER scan lines contribution
-    float scanBandsFinal = scanBandsA * baseOpacity * (0.20 + 0.55 * effect);
-    float scanLinesFinal = scanLinesA * baseOpacity * (0.55 + 1.05 * effect);
+    // Apply draw toggles: zero out disabled layers
+    float gridOn    = step(0.5, uDrawGrid);
+    float circlesOn = step(0.5, uDrawCircles);
 
-    float boxFillA       = boxFillMax    * baseOpacity * (0.16 + 0.45 * effect);
-    float boxOutlineA    = boxOutlineMax * baseOpacity * (0.28 + 0.68 * effect);
-    float crossFinalA    = crossMax      * baseOpacity * (0.14 + 0.34 * effect);
+    // BRIGHTER scan lines contribution (grid layer)
+    float scanBandsFinal = scanBandsA * baseOpacity * (0.20 + 0.55 * effect) * gridOn;
+    float scanLinesFinal = scanLinesA * baseOpacity * (0.55 + 1.05 * effect) * gridOn;
+
+    float boxFillA       = boxFillMax    * baseOpacity * (0.16 + 0.45 * effect) * gridOn;
+    float boxOutlineA    = boxOutlineMax * baseOpacity * (0.28 + 0.68 * effect) * gridOn;
+    float crossFinalA    = crossMax      * baseOpacity * (0.14 + 0.34 * effect) * gridOn;
+
+    // Zero out glyph and cursor-related effects when grid is off
+    glyphA_outside *= gridOn;
+    hole           *= gridOn;
+
+    // Zero out circle layers when circles are off
+    circlesA         *= circlesOn;
+    circleLinesA     *= circlesOn;
+    circlesHoleMask  *= circlesOn;
 
     float outA = 0.0;
     vec3 outRGB = vec3(0.0);

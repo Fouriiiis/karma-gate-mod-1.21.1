@@ -202,6 +202,22 @@
       "values": [
         0
       ]
+    },
+    {
+      "name": "uDrawCircles",
+      "type": "float",
+      "count": 1,
+      "values": [
+        1.0
+      ]
+    },
+    {
+      "name": "uDrawGrid",
+      "type": "float",
+      "count": 1,
+      "values": [
+        1.0
+      ]
     }
   ]
 }

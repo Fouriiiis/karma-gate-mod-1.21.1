@@ -38,7 +38,8 @@ public class ClientNetworking {
         for (ProjectionZoneSyncPayload.ZoneEntry entry : payload.zones()) {
             BlockPos corner1 = new BlockPos(entry.x1(), entry.y1(), entry.z1());
             BlockPos corner2 = new BlockPos(entry.x2(), entry.y2(), entry.z2());
-            ProjectionZone zone = new ProjectionZone(entry.name(), corner1, corner2);
+            ProjectionZone zone = new ProjectionZone(entry.name(), corner1, corner2,
+                entry.swarmerCount(), entry.drawCircles(), entry.drawGrid());
             ProjectionZone.addZone(zone);
         }
         

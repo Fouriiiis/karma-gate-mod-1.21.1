@@ -39,7 +39,8 @@ public record ProjectionZoneSyncPayload(List<ZoneEntry> zones) implements Custom
             entries.add(new ZoneEntry(
                 zone.name(),
                 zone.corner1().getX(), zone.corner1().getY(), zone.corner1().getZ(),
-                zone.corner2().getX(), zone.corner2().getY(), zone.corner2().getZ()
+                zone.corner2().getX(), zone.corner2().getY(), zone.corner2().getZ(),
+                zone.swarmerCount(), zone.drawCircles(), zone.drawGrid()
             ));
         }
         return new ProjectionZoneSyncPayload(entries);
@@ -48,7 +49,8 @@ public record ProjectionZoneSyncPayload(List<ZoneEntry> zones) implements Custom
     /**
      * A single zone entry for network transmission.
      */
-    public record ZoneEntry(String name, int x1, int y1, int z1, int x2, int y2, int z2) {
+    public record ZoneEntry(String name, int x1, int y1, int z1, int x2, int y2, int z2,
+                              int swarmerCount, boolean drawCircles, boolean drawGrid) {
         
         // Custom codec for ZoneEntry since tuple() only supports up to 6 fields
         public static final PacketCodec<RegistryByteBuf, ZoneEntry> CODEC = new PacketCodec<>() {
@@ -61,7 +63,10 @@ public record ProjectionZoneSyncPayload(List<ZoneEntry> zones) implements Custom
                 int x2 = buf.readInt();
                 int y2 = buf.readInt();
                 int z2 = buf.readInt();
-                return new ZoneEntry(name, x1, y1, z1, x2, y2, z2);
+                int swarmerCount = buf.readInt();
+                boolean drawCircles = buf.readBoolean();
+                boolean drawGrid = buf.readBoolean();
+                return new ZoneEntry(name, x1, y1, z1, x2, y2, z2, swarmerCount, drawCircles, drawGrid);
             }
             
             @Override
@@ -73,6 +78,9 @@ public record ProjectionZoneSyncPayload(List<ZoneEntry> zones) implements Custom
                 buf.writeInt(entry.x2());
                 buf.writeInt(entry.y2());
                 buf.writeInt(entry.z2());
+                buf.writeInt(entry.swarmerCount());
+                buf.writeBoolean(entry.drawCircles());
+                buf.writeBoolean(entry.drawGrid());
             }
         };
         
