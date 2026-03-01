@@ -1,14 +1,17 @@
 package dev.fouriis.karmagate.entity.centipede;
 
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.EnumSet;
 
 /**
  * AI goal: Wander / idle behavior.
- * The centipede picks random nearby positions and crawls to them.
- * Mirrors C# CentipedeAI Behavior.Idle with idle position scoring.
+ * The centipede picks random accessible positions near surfaces and uses
+ * the CentipedePathfinder to find a valid surface-connected path.
+ * Mirrors C# CentipedeAI Behavior.Idle with idle position scoring
+ * and StandardPather.FollowPath() for path following.
  */
 public class CentipedeWanderGoal extends Goal {
 
@@ -16,6 +19,7 @@ public class CentipedeWanderGoal extends Goal {
     private Vec3d wanderTarget;
     private int idleCounter = 0;
     private int retargetCooldown = 0;
+    private int failedAttempts = 0;
 
     public CentipedeWanderGoal(RedCentipedeEntity centipede) {
         this.centipede = centipede;
@@ -64,19 +68,64 @@ public class CentipedeWanderGoal extends Goal {
                     idleCounter = 0;
                 }
             } else {
+                // Check if we need a path recalc
+                if (centipede.needsPathRecalc(wanderTarget) && retargetCooldown < 80) {
+                    centipede.requestPathTo(wanderTarget);
+                }
+
                 centipede.setMoveTarget(wanderTarget);
-                centipede.driveTowardTarget();
+                // Use pathfinding-based movement
+                centipede.followCurrentPath();
             }
         }
     }
 
+    /**
+     * Pick a random accessible position near a surface.
+     * Mirrors C# CentipedeAI.IdleScore — prefers positions
+     * adjacent to solid blocks (walls, ceiling, floor).
+     */
     private void pickNewTarget() {
-        // Pick a random position within 10 blocks, preferring near surfaces (C# IdleScore)
         Vec3d pos = centipede.getPos();
-        double dx = (centipede.getRandom().nextDouble() - 0.5) * 20;
-        double dy = (centipede.getRandom().nextDouble() - 0.5) * 6;
-        double dz = (centipede.getRandom().nextDouble() - 0.5) * 20;
-        wanderTarget = new Vec3d(pos.x + dx, pos.y + dy, pos.z + dz);
+
+        // Try multiple random positions and pick the best one
+        // (mirrors C# IdleScore which evaluates candidate positions)
+        BlockPos bestTarget = null;
+        int bestProximity = Integer.MAX_VALUE;
+
+        for (int attempt = 0; attempt < 8; attempt++) {
+            double dx = (centipede.getRandom().nextDouble() - 0.5) * 20;
+            double dy = (centipede.getRandom().nextDouble() - 0.5) * 6;
+            double dz = (centipede.getRandom().nextDouble() - 0.5) * 20;
+
+            BlockPos candidate = BlockPos.ofFloored(pos.x + dx, pos.y + dy, pos.z + dz);
+
+            // Check if the candidate is accessible (near a surface)
+            if (CentipedePathfinder.isAccessible(centipede.getWorld(), candidate)) {
+                int proximity = CentipedePathfinder.getTerrainProximity(
+                        centipede.getWorld(), candidate);
+                // Prefer positions directly touching surfaces (proximity == 1)
+                if (proximity < bestProximity) {
+                    bestProximity = proximity;
+                    bestTarget = candidate;
+                }
+            }
+        }
+
+        if (bestTarget != null) {
+            wanderTarget = new Vec3d(
+                    bestTarget.getX() + 0.5,
+                    bestTarget.getY() + 0.5,
+                    bestTarget.getZ() + 0.5);
+            // Request a path to the chosen target
+            centipede.requestPathTo(wanderTarget);
+            failedAttempts = 0;
+        } else {
+            // No accessible target found — try a shorter range next time
+            failedAttempts++;
+            wanderTarget = null;
+        }
+
         retargetCooldown = 100 + centipede.getRandom().nextInt(200);
     }
 }

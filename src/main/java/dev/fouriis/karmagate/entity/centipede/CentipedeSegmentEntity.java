@@ -6,10 +6,12 @@ import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.attribute.DefaultAttributeContainer;
 import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.damage.DamageSource;
+import net.minecraft.entity.damage.DamageTypes;
 import net.minecraft.entity.data.DataTracker;
 import net.minecraft.entity.data.TrackedData;
 import net.minecraft.entity.data.TrackedDataHandlerRegistry;
 import net.minecraft.entity.mob.MobEntity;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
@@ -60,6 +62,16 @@ public abstract class CentipedeSegmentEntity extends MobEntity implements GeoAni
     public boolean[] legGripped = new boolean[] { false, false }; // true = foot planted at gripTarget
     public boolean legsInitialized = false;
     public int legUpdateAge = -1;
+
+    // Surface normal for roll computation (set by parent controller's physics)
+    // Mirrors C# CentipedeGraphics.bodyRotations / BestBodyRotatAtChunk
+    public float surfaceNormalX = 0f;
+    public float surfaceNormalY = 1f; // default: standing on floor
+    public float surfaceNormalZ = 0f;
+    // Previous tick values for smooth interpolation
+    public float prevSurfaceNormalX = 0f;
+    public float prevSurfaceNormalY = 1f;
+    public float prevSurfaceNormalZ = 0f;
 
     public CentipedeSegmentEntity(EntityType<? extends MobEntity> type, World world) {
         super(type, world);
@@ -130,6 +142,11 @@ public abstract class CentipedeSegmentEntity extends MobEntity implements GeoAni
 
     @Override
     public boolean damage(DamageSource source, float amount) {
+        // Immune to suffocation and fall damage
+        if (source.isOf(DamageTypes.IN_WALL) || source.isOf(DamageTypes.FALL)) {
+            return false;
+        }
+
         // If shell is intact, reduce damage (like C# centipede armor)
         if (hasShell()) {
             // Shell absorbs most damage; small chance to break
@@ -165,6 +182,12 @@ public abstract class CentipedeSegmentEntity extends MobEntity implements GeoAni
         return true;
     }
 
+    @Override
+    public boolean handleFallDamage(float fallDistance, float damageMultiplier, DamageSource damageSource) {
+        // Centipede segments are immune to fall damage (wall/ceiling crawlers)
+        return false;
+    }
+
     // --- Prevent built-in movement/gravity from interfering with chain physics ---
 
     @Override
@@ -178,6 +201,10 @@ public abstract class CentipedeSegmentEntity extends MobEntity implements GeoAni
     @Override
     public void tick() {
         this.noClip = true;
+        // Save previous surface normal for smooth interpolation
+        this.prevSurfaceNormalX = this.surfaceNormalX;
+        this.prevSurfaceNormalY = this.surfaceNormalY;
+        this.prevSurfaceNormalZ = this.surfaceNormalZ;
         this.prevTickPos = this.getPos();
         super.tick();
 

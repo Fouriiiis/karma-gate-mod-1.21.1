@@ -9,6 +9,7 @@ import net.minecraft.entity.ai.goal.*;
 import net.minecraft.entity.attribute.DefaultAttributeContainer;
 import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.damage.DamageSource;
+import net.minecraft.entity.damage.DamageTypes;
 import net.minecraft.entity.data.DataTracker;
 import net.minecraft.entity.data.TrackedData;
 import net.minecraft.entity.data.TrackedDataHandlerRegistry;
@@ -21,8 +22,10 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.GameMode;
 import net.minecraft.world.World;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -99,6 +102,21 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
     // --- AI behavior ---
     private LivingEntity huntTarget = null;
 
+    // --- Pathfinding (from C# PathFinder → StandardPather → CentipedePather) ---
+    private CentipedePathfinder.IncrementalSearch currentSearch = null;
+    private List<BlockPos> currentPath = null;
+    private int pathIndex = 0;
+    private int pathRecalcTimer = 0;
+    private BlockPos lastPathGoal = null;
+    /** How many A* nodes to process per tick (C# stepsPerFrame) */
+    private static final int PATH_STEPS_PER_TICK = 80;
+    /** Ticks between path recalculations */
+    private static final int PATH_RECALC_INTERVAL = 30;
+    /** Look-ahead distance for path following (smoother movement) */
+    private static final int PATH_LOOK_AHEAD = 3;
+    /** Waypoints within this distance are considered "reached" */
+    private static final double WAYPOINT_REACH_DIST = 1.5;
+
     // --- Run/excitement (from C# AI) ---
     private float excitement = 0f;
     private float run = 500f; // Red centipedes always run
@@ -139,10 +157,18 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
         this.goalSelector.add(3, new CentipedeWanderGoal(this));
         this.goalSelector.add(4, new LookAroundGoal(this));
 
-        this.targetSelector.add(1, new ActiveTargetGoal<>(this, PlayerEntity.class, true));
+        // Only target players in survival mode
+        this.targetSelector.add(1, new ActiveTargetGoal<>(this, PlayerEntity.class, 10, true, false,
+                entity -> {
+                    if (entity instanceof PlayerEntity player) {
+                        if (player.isCreative() || player.isSpectator()) return false;
+                    }
+                    return true;
+                }));
         this.targetSelector.add(2, new ActiveTargetGoal<>(this, LivingEntity.class, 10, true, false,
                 entity -> !(entity instanceof RedCentipedeEntity)
                         && !(entity instanceof CentipedeSegmentEntity)
+                        && !(entity instanceof PlayerEntity p && (p.isCreative() || p.isSpectator()))
                         && entity.getType().getSpawnGroup().isPeaceful()));
     }
 
@@ -289,6 +315,7 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
             }
 
             resolveSegments();
+            updatePathfinding();
             updateChainPhysics();
             updateSegmentRotations();
             updateGrabs();
@@ -315,6 +342,21 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
         return true;
     }
 
+    @Override
+    public boolean handleFallDamage(float fallDistance, float damageMultiplier, DamageSource damageSource) {
+        // Centipedes are immune to fall damage (wall/ceiling crawlers)
+        return false;
+    }
+
+    @Override
+    public boolean damage(DamageSource source, float amount) {
+        // Immune to suffocation and fall damage
+        if (source.isOf(DamageTypes.IN_WALL) || source.isOf(DamageTypes.FALL)) {
+            return false;
+        }
+        return super.damage(source, amount);
+    }
+
     private void syncTrackedData() {
         this.dataTracker.set(BODY_DIRECTION, bodyDirection);
         this.dataTracker.set(SHOCK_CHARGE, shockCharge);
@@ -325,8 +367,9 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
     /**
      * Chain physics: keep segments spaced, apply crawl propulsion.
      * Follows C# Centipede.Update() for rope/chain constraints
-     * and Centipede.Crawl() for movement (NOT Fly() — no body wave).
+     * and Centipede.Crawl() for movement.
      * Uses Entity.move() for proper Minecraft block collision.
+     * Supports wall and ceiling crawling like C# AccessibleTile().
      */
     private void updateChainPhysics() {
         // Move controller entity to the leading head position
@@ -345,23 +388,24 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
         if (moving) {
             for (int i = 1; i < TOTAL_SEGMENTS - 1; i++) {
                 if (segments[i] == null || segments[i].isRemoved()) continue;
-                if (!isOnGround(segments[i]) && !isNearWall(segments[i])) continue;
+                if (!isNearSurface(segments[i])) continue;
 
                 // Push toward the segment ahead (toward head)
                 int ahead = bodyDirection ? (i + 1) : (i - 1);
                 int behind = bodyDirection ? (i - 1) : (i + 1);
 
                 if (ahead >= 0 && ahead < TOTAL_SEGMENTS && segments[ahead] != null && !segments[ahead].isRemoved()) {
-                    if (isOnGround(segments[ahead]) || isNearWall(segments[ahead])) {
+                    if (isNearSurface(segments[ahead])) {
                         Vec3d toAhead = segments[ahead].getPos().subtract(segments[i].getPos()).normalize();
-                        segments[i].segmentVelocity = segments[i].segmentVelocity.add(toAhead.multiply(0.075));
+                        // C#: vel += DirVec(...) * 1.5 * Lerp(0.5,1.5,size) * 1.25 for Red
+                        segments[i].segmentVelocity = segments[i].segmentVelocity.add(toAhead.multiply(0.085));
                     }
                 }
 
-                // Pull away from the segment behind
+                // Pull away from the segment behind (C#: vel -= DirVec * 0.8 * Lerp(...))
                 if (behind >= 0 && behind < TOTAL_SEGMENTS && segments[behind] != null && !segments[behind].isRemoved()) {
                     Vec3d toBehind = segments[behind].getPos().subtract(segments[i].getPos()).normalize();
-                    segments[i].segmentVelocity = segments[i].segmentVelocity.subtract(toBehind.multiply(0.04));
+                    segments[i].segmentVelocity = segments[i].segmentVelocity.subtract(toBehind.multiply(0.05));
                 }
             }
         }
@@ -382,26 +426,37 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
             }
         }
 
-        // --- Apply velocity, gravity, damping to each segment using Minecraft collision ---
+        // --- Apply velocity, gravity, surface adhesion to each segment ---
         for (int i = 0; i < TOTAL_SEGMENTS; i++) {
             if (segments[i] == null || segments[i].isRemoved()) continue;
 
             Vec3d vel = segments[i].segmentVelocity;
-            boolean grounded = isOnGround(segments[i]);
-            boolean walled = isNearWall(segments[i]);
 
-            // Gravity
-            vel = vel.add(0, -0.04, 0);
+            // Compute surface normal for this segment (for wall/ceiling crawling)
+            Vec3d surfaceNormal = computeSurfaceNormal(segments[i]);
+            boolean onSurface = surfaceNormal.lengthSquared() > 0.01;
 
-            // C# Crawl: on accessible tile, vel *= 0.7 and cancel gravity
-            if (grounded || walled) {
+            if (onSurface) {
+                // C# Crawl: on accessible tile, vel *= 0.7 and cancel gravity entirely
                 vel = vel.multiply(0.7);
-                vel = new Vec3d(vel.x, Math.max(vel.y, 0), vel.z);
-                if (walled && !grounded) {
-                    vel = new Vec3d(vel.x, vel.y + 0.04, vel.z);
-                }
+
+                // Adhere to surface: push segment toward surface (cancel gravity + stick)
+                // This allows ceiling and wall crawling
+                vel = vel.subtract(surfaceNormal.multiply(0.06));
+
+                // Store surface normal on segment for renderer roll computation
+                segments[i].surfaceNormalX = (float) surfaceNormal.x;
+                segments[i].surfaceNormalY = (float) surfaceNormal.y;
+                segments[i].surfaceNormalZ = (float) surfaceNormal.z;
             } else {
+                // In air: apply gravity, less friction
+                vel = vel.add(0, -0.06, 0);
                 vel = vel.multiply(0.92);
+
+                // Decay surface normal
+                segments[i].surfaceNormalX *= 0.9f;
+                segments[i].surfaceNormalY *= 0.9f;
+                segments[i].surfaceNormalZ *= 0.9f;
             }
 
             // Use Minecraft's collision system via Entity.move()
@@ -425,17 +480,12 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
                 enforceSpacing(i, i + 1);
             }
         }
-
-        // --- Update leg positions for each segment ---
-        // Leg positions are tracked client-side in CentipedeLegRenderer for smooth rendering
     }
 
     /**
-     * Prevent segments from clipping through solid blocks.
-     * If the new position is inside a solid block, push the segment to the nearest face.
-    /**
-     * Compute and set the yaw and pitch for each segment based on chain direction.
-     * This is used by the client-side renderers via bodyYaw.
+     * Compute and set the yaw, pitch, and surface normal for each segment.
+     * Used by client-side renderers for full pitch/yaw/roll orientation.
+     * Mirrors C# CentipedeGraphics.bodyRotations / RotatAtChunk().
      */
     private void updateSegmentRotations() {
         for (int i = 0; i < TOTAL_SEGMENTS; i++) {
@@ -451,11 +501,15 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
                 yaw += 180f;
             }
 
+            // Compute pitch from vertical component of chain direction
+            float pitch = (float) (Math.asin(MathHelper.clamp(dir.y, -1, 1)) * (180.0 / Math.PI));
+
             // Set entity yaw/bodyYaw so GeckoLib picks it up
             segments[i].prevBodyYaw = segments[i].bodyYaw;
             segments[i].bodyYaw = yaw;
             segments[i].prevYaw = segments[i].getYaw();
             segments[i].setYaw(yaw);
+            segments[i].setPitch(pitch);
         }
     }
 
@@ -506,19 +560,62 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
         return new Vec3d(1, 0, 0);
     }
 
-    private boolean isOnGround(Entity entity) {
-        BlockPos below = entity.getBlockPos().down();
-        BlockState state = entity.getWorld().getBlockState(below);
-        return state.isSolidBlock(entity.getWorld(), below);
-    }
-
-    private boolean isNearWall(Entity entity) {
+    /**
+     * Check if a segment is near any surface (floor, wall, or ceiling).
+     * Mirrors C# AccessibleTile / ClimbableTile — centipedes can use any adjacent surface.
+     */
+    private boolean isNearSurface(Entity entity) {
         BlockPos pos = entity.getBlockPos();
         World world = entity.getWorld();
-        return world.getBlockState(pos.north()).isSolidBlock(world, pos.north())
-                || world.getBlockState(pos.south()).isSolidBlock(world, pos.south())
-                || world.getBlockState(pos.east()).isSolidBlock(world, pos.east())
-                || world.getBlockState(pos.west()).isSolidBlock(world, pos.west());
+        for (Direction dir : Direction.values()) {
+            BlockPos neighbor = pos.offset(dir);
+            if (world.getBlockState(neighbor).isSolidBlock(world, neighbor)) {
+                return true;
+            }
+        }
+        // Also check one block below with a slightly larger range
+        BlockPos below = entity.getBlockPos().down();
+        if (world.getBlockState(below).isSolidBlock(world, below)) return true;
+        return false;
+    }
+
+    /**
+     * Compute the surface normal for a segment based on nearby solid blocks.
+     * This is a weighted average of directions pointing AWAY from nearby solid surfaces.
+     * Mirrors C# CentipedeGraphics.BestBodyRotatAtChunk() which checks perpendicular
+     * directions for solids and orients the body accordingly.
+     * Returns Vec3d.ZERO if not near any surface.
+     */
+    private Vec3d computeSurfaceNormal(Entity entity) {
+        BlockPos pos = entity.getBlockPos();
+        World world = entity.getWorld();
+        Vec3d normal = Vec3d.ZERO;
+        int count = 0;
+
+        for (Direction dir : Direction.values()) {
+            BlockPos neighbor = pos.offset(dir);
+            if (world.getBlockState(neighbor).isSolidBlock(world, neighbor)) {
+                // Surface detected: normal points AWAY from the solid block
+                normal = normal.add(
+                    -dir.getOffsetX(),
+                    -dir.getOffsetY(),
+                    -dir.getOffsetZ()
+                );
+                count++;
+            }
+        }
+
+        // Also check below for ground (common case)
+        BlockPos below = entity.getBlockPos().down();
+        if (world.getBlockState(below).isSolidBlock(world, below)) {
+            normal = normal.add(0, 1, 0);
+            count++;
+        }
+
+        if (count > 0 && normal.lengthSquared() > 0.001) {
+            return normal.normalize();
+        }
+        return Vec3d.ZERO;
     }
 
     // =========================================================================
@@ -536,10 +633,176 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
 
     public void stopMoving() {
         this.moving = false;
+        this.currentPath = null;
+        this.currentSearch = null;
     }
 
     public boolean isMoving() {
         return moving;
+    }
+
+    // =========================================================================
+    // Pathfinding API (from C# PathFinder → StandardPather → CentipedePather)
+    // =========================================================================
+
+    /**
+     * Request a new path to the given goal position.
+     * Uses the incremental pathfinder that spreads computation across ticks.
+     * Mirrors C# PathFinder.Update() with stepsPerFrame.
+     */
+    public void requestPath(BlockPos goal) {
+        if (goal == null) return;
+
+        CentipedeHeadEntity head = getLeadingHead();
+        if (head == null || head.isRemoved()) return;
+
+        BlockPos start = head.getBlockPos();
+        currentSearch = new CentipedePathfinder.IncrementalSearch(
+                this.getWorld(), start, goal, (int) this.getAttributeValue(EntityAttributes.GENERIC_FOLLOW_RANGE));
+        lastPathGoal = goal;
+        pathRecalcTimer = PATH_RECALC_INTERVAL;
+    }
+
+    /**
+     * Request a path to a Vec3d target (converts to BlockPos).
+     */
+    public void requestPathTo(Vec3d target) {
+        requestPath(BlockPos.ofFloored(target.x, target.y, target.z));
+    }
+
+    /**
+     * Update the incremental pathfinder search each tick.
+     * Mirrors C# PathFinder.Update() main loop.
+     */
+    private void updatePathfinding() {
+        // Process incremental search steps
+        if (currentSearch != null && !currentSearch.isFinished()) {
+            currentSearch.step(PATH_STEPS_PER_TICK);
+
+            if (currentSearch.isFinished()) {
+                currentPath = currentSearch.getPath();
+                pathIndex = 0;
+                currentSearch = null;
+            }
+        }
+
+        // Periodic path recalculation
+        if (pathRecalcTimer > 0) {
+            pathRecalcTimer--;
+        }
+    }
+
+    /**
+     * Check if the current path needs recalculation.
+     * Returns true if:
+     * - No path exists
+     * - Goal has moved significantly
+     * - Path has become invalid (blocked by world changes)
+     * - Recalc timer has expired
+     */
+    public boolean needsPathRecalc(Vec3d goalPos) {
+        if (currentPath == null || currentPath.isEmpty()) return true;
+        if (pathRecalcTimer > 0) return false;
+
+        // Check if goal moved significantly
+        if (lastPathGoal != null) {
+            BlockPos newGoal = BlockPos.ofFloored(goalPos.x, goalPos.y, goalPos.z);
+            if (newGoal.getManhattanDistance(lastPathGoal) > 3) return true;
+        }
+
+        // Check if path is still valid (sample a few waypoints)
+        if (!CentipedePathfinder.isPathValid(this.getWorld(), currentPath)) return true;
+
+        return false;
+    }
+
+    /**
+     * Get the current path (may be null if no path computed yet).
+     */
+    public List<BlockPos> getCurrentPath() {
+        return currentPath;
+    }
+
+    /**
+     * Check if a search is currently in progress.
+     */
+    public boolean isSearching() {
+        return currentSearch != null && !currentSearch.isFinished();
+    }
+
+    /**
+     * Follow the current path, driving segment velocity toward the next waypoint.
+     * Mirrors C# StandardPather.FollowPath() + Centipede.Crawl().
+     *
+     * Called by AI goals instead of the old direct driveTowardTarget().
+     */
+    public void followCurrentPath() {
+        if (currentPath == null || currentPath.isEmpty()) {
+            // No path available — fall back to direct movement
+            driveTowardTarget();
+            return;
+        }
+
+        CentipedeHeadEntity head = getLeadingHead();
+        if (head == null || head.isRemoved()) return;
+
+        Vec3d headPos = head.getPos();
+
+        // Find the next waypoint to move toward using path following
+        // (mirrors C# StandardPather.FollowPath finding best connection)
+        BlockPos nextWaypoint = CentipedePathfinder.followPath(
+                currentPath, headPos, PATH_LOOK_AHEAD);
+
+        if (nextWaypoint == null) {
+            // Path exhausted
+            currentPath = null;
+            moving = false;
+            return;
+        }
+
+        // Check if we've reached the end of the path
+        BlockPos lastWaypoint = currentPath.get(currentPath.size() - 1);
+        double distToEnd = headPos.squaredDistanceTo(
+                lastWaypoint.getX() + 0.5, lastWaypoint.getY() + 0.5, lastWaypoint.getZ() + 0.5);
+        if (distToEnd < WAYPOINT_REACH_DIST * WAYPOINT_REACH_DIST) {
+            currentPath = null;
+            moving = false;
+            return;
+        }
+
+        // Drive toward the waypoint
+        Vec3d waypointCenter = new Vec3d(
+                nextWaypoint.getX() + 0.5,
+                nextWaypoint.getY() + 0.5,
+                nextWaypoint.getZ() + 0.5);
+
+        Vec3d dir = waypointCenter.subtract(headPos);
+        double dist = dir.length();
+
+        if (dist < 0.1) return;
+        dir = dir.normalize();
+
+        // C# Crawl: HeadChunk.vel += DirVec(HeadChunk.pos, moveToPos) * speed
+        double speed = 0.18 * SIZE * 1.25;
+
+        if (isNearSurface(head)) {
+            head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed));
+        } else {
+            head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed * 0.3));
+        }
+
+        // Body propulsion: middle segments push along path direction
+        for (int i = 1; i < TOTAL_SEGMENTS - 1; i++) {
+            if (segments[i] == null || segments[i].isRemoved()) continue;
+            if (!isNearSurface(segments[i])) continue;
+
+            int inFront = bodyDirection ? (i + 1) : (i - 1);
+            if (inFront < 0 || inFront >= TOTAL_SEGMENTS) continue;
+            if (segments[inFront] == null) continue;
+
+            Vec3d towardFront = segments[inFront].getPos().subtract(segments[i].getPos()).normalize();
+            segments[i].segmentVelocity = segments[i].segmentVelocity.add(towardFront.multiply(0.06));
+        }
     }
 
     /**
@@ -567,8 +830,8 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
         // Convert to MC: 3.9 * (1/20) pixels ≈ 0.195 blocks/tick
         double speed = 0.18 * SIZE * 1.25; // Red centipede speed boost
 
-        // Check if head is on accessible ground
-        if (isOnGround(head) || isNearWall(head)) {
+        // Check if head is on any accessible surface (floor, wall, or ceiling)
+        if (isNearSurface(head)) {
             head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed));
         } else {
             // In air, less control
@@ -579,7 +842,7 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
         int leadIdx = getHeadIndex();
         for (int i = 1; i < TOTAL_SEGMENTS - 1; i++) {
             if (segments[i] == null || segments[i].isRemoved()) continue;
-            if (!isOnGround(segments[i]) && !isNearWall(segments[i])) continue;
+            if (!isNearSurface(segments[i])) continue;
 
             // Determine direction toward the segment in front (toward head)
             int inFront = bodyDirection ? (i + 1) : (i - 1);
@@ -594,7 +857,8 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
 
     /**
      * Handle body direction changes (C# Act() directionChange logic).
-     * If the rear head is closer to the target, swap direction.
+     * Uses CentipedePather.TileClosestToGoal() to determine which head
+     * is closer to the goal along accessible surfaces.
      */
     public void updateDirectionChange() {
         if (directionChangeBlock > 0) {
@@ -603,21 +867,27 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
         }
 
         if (huntTarget == null) return;
-        Vec3d targetPos = huntTarget.getPos();
+        BlockPos targetBlock = huntTarget.getBlockPos();
 
         CentipedeHeadEntity front = getFrontHead();
         CentipedeHeadEntity rear = getRearHead();
         if (front == null || rear == null) return;
 
-        double frontDist = front.getPos().squaredDistanceTo(targetPos);
-        double rearDist = rear.getPos().squaredDistanceTo(targetPos);
+        // Use CentipedePather.TileClosestToGoal: compare the two head positions
+        // to determine which is better positioned to reach the goal
+        boolean rearIsCloser = CentipedePathfinder.tileClosestToGoal(
+                this.getWorld(), rear.getBlockPos(), front.getBlockPos(), targetBlock);
 
-        if (rearDist < frontDist) {
+        if (rearIsCloser) {
             changeDirCounter++;
             if (changeDirCounter > 5) {
                 bodyDirection = !bodyDirection;
                 directionChangeBlock = 40;
                 changeDirCounter = 0;
+                // Re-request path from the new leading head
+                if (currentPath != null) {
+                    requestPath(targetBlock);
+                }
             }
         } else {
             changeDirCounter = 0;
@@ -642,52 +912,76 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
 
         // If one head has grabbed, drive the other head toward the grabbed entity
         // (C# UpdateGrasp: when grasps[1-g] == null, move other head toward grabbed)
-        CentipedeHeadEntity leadingH = getLeadingHead();
-        CentipedeHeadEntity rearH = getRearHead();
+        if (head0 != null && head1 != null) {
+            // Determine which head is grabbing and which is free
+            CentipedeHeadEntity grabbingHead = null;
+            CentipedeHeadEntity freeHead = null;
+            int grabbingIdx = -1;
 
-        if (leadingH != null && rearH != null) {
-            if (leadingH.isGrabbing() && !rearH.isGrabbing()) {
-                // Drive rear head toward the grabbed entity
-                LivingEntity grabbed = leadingH.getGrabbedEntity();
+            if (head0.isGrabbing() && !head1.isGrabbing()) {
+                grabbingHead = head0; freeHead = head1; grabbingIdx = 0;
+            } else if (head1.isGrabbing() && !head0.isGrabbing()) {
+                grabbingHead = head1; freeHead = head0; grabbingIdx = TOTAL_SEGMENTS - 1;
+            }
+
+            if (grabbingHead != null && freeHead != null) {
+                LivingEntity grabbed = grabbingHead.getGrabbedEntity();
                 if (grabbed != null) {
-                    moveTarget = grabbed.getPos();
+                    Vec3d grabPos = grabbed.getPos();
+                    moveTarget = grabPos;
                     moving = true;
-                    // Swap direction so the non-grabbing head leads toward the target
-                    if (directionChangeBlock <= 0) {
+
+                    // Ensure direction points the FREE head as the leader
+                    // so crawl drives the free head toward the prey
+                    boolean freeHeadIsAt0 = (freeHead == head0);
+                    boolean needsDirection = freeHeadIsAt0 ? bodyDirection : !bodyDirection;
+                    if (needsDirection && directionChangeBlock <= 0) {
                         bodyDirection = !bodyDirection;
                         directionChangeBlock = 60;
                     }
-                    // Also directly push rear head toward target  
-                    Vec3d dir = grabbed.getPos().subtract(rearH.getPos()).normalize();
-                    rearH.segmentVelocity = rearH.segmentVelocity.add(dir.multiply(0.2 * Math.pow(doubleGrabCharge, 2)));
-                    doubleGrabCharge = Math.min(1.0f, doubleGrabCharge + 0.0125f);
-                }
-            } else if (rearH.isGrabbing() && !leadingH.isGrabbing()) {
-                LivingEntity grabbed = rearH.getGrabbedEntity();
-                if (grabbed != null) {
-                    moveTarget = grabbed.getPos();
-                    moving = true;
-                    if (directionChangeBlock <= 0) {
-                        bodyDirection = !bodyDirection;
-                        directionChangeBlock = 60;
+
+                    doubleGrabCharge = Math.min(1.0f, doubleGrabCharge + 0.02f);
+
+                    // Strong constant force pulling free head toward target
+                    // (C# UpdateGrasp: aggressive velocity toward grabbed creature)
+                    Vec3d toTarget = grabPos.subtract(freeHead.getPos());
+                    double distToTarget = toTarget.length();
+                    if (distToTarget > 0.3) {
+                        Vec3d dir = toTarget.normalize();
+                        // Base force + ramping force as charge builds
+                        double force = 0.15 + 0.2 * doubleGrabCharge;
+                        freeHead.segmentVelocity = freeHead.segmentVelocity.add(dir.multiply(force));
                     }
-                    Vec3d dir = grabbed.getPos().subtract(leadingH.getPos()).normalize();
-                    leadingH.segmentVelocity = leadingH.segmentVelocity.add(dir.multiply(0.2 * Math.pow(doubleGrabCharge, 2)));
-                    doubleGrabCharge = Math.min(1.0f, doubleGrabCharge + 0.0125f);
+
+                    // Body curl: segments actively pull toward the grabbed entity
+                    // This makes the centipede wrap its body around the prey
+                    for (int i = 1; i < TOTAL_SEGMENTS - 1; i++) {
+                        if (segments[i] == null || segments[i].isRemoved()) continue;
+                        Vec3d segToTarget = grabPos.subtract(segments[i].getPos());
+                        double segDist = segToTarget.length();
+                        if (segDist > 1.0) {
+                            // Curl force is stronger for segments closer to the free head
+                            int distFromFree = freeHeadIsAt0 ? i : (TOTAL_SEGMENTS - 1 - i);
+                            double curlWeight = 1.0 - (double) distFromFree / TOTAL_SEGMENTS;
+                            double curlForce = 0.04 * curlWeight * doubleGrabCharge;
+                            segments[i].segmentVelocity = segments[i].segmentVelocity.add(
+                                    segToTarget.normalize().multiply(curlForce));
+                        }
+                    }
                 }
-            } else if (!leadingH.isGrabbing() && !rearH.isGrabbing()) {
+            } else if (!head0.isGrabbing() && !head1.isGrabbing()) {
                 doubleGrabCharge = Math.max(0, doubleGrabCharge - 0.025f);
                 shockGiveUpCounter = Math.max(0, shockGiveUpCounter - 2);
             }
         }
 
-        // Shock give-up: if both heads fail to grab for too long, release
-        if (doubleGrabCharge > 0.9f) {
+        // Shock give-up: if wrapping takes too long, release and retry
+        if (doubleGrabCharge > 0.85f) {
             shockGiveUpCounter++;
-            if (shockGiveUpCounter >= 110) {
+            if (shockGiveUpCounter >= 160) {
                 if (head0 != null) head0.releaseGrab();
                 if (head1 != null) head1.releaseGrab();
-                shockGiveUpCounter = 30;
+                shockGiveUpCounter = 0;
                 doubleGrabCharge = 0;
             }
         }
@@ -718,6 +1012,7 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
 
     /**
      * Check if an entity is valid prey for the centipede.
+     * Ignores players not in survival mode.
      */
     private boolean isValidPrey(LivingEntity entity) {
         if (entity == this) return false;
@@ -725,6 +1020,10 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
         if (entity instanceof RedCentipedeEntity) return false;
         if (entity.isRemoved() || entity.isDead()) return false;
         if (entity.isInvulnerable()) return false;
+        // Ignore players not in survival mode
+        if (entity instanceof PlayerEntity player) {
+            if (player.isCreative() || player.isSpectator()) return false;
+        }
         return true;
     }
 
@@ -755,17 +1054,17 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
             if (!sameTarget && target0 != null) {
                 // Check if head1 is close to target0's body
                 headsCloseToTarget = head1.getPos().distanceTo(target0.getPos())
-                        < target0.getWidth() + 1.5;
+                        < target0.getWidth() + 3.0;
             }
             if (!sameTarget && target1 != null && !headsCloseToTarget) {
                 headsCloseToTarget = head0.getPos().distanceTo(target1.getPos())
-                        < target1.getWidth() + 1.5;
+                        < target1.getWidth() + 3.0;
             }
 
             if (sameTarget || headsCloseToTarget) {
                 // C#: shockCharge += 1 / Lerp(100, 5, size) → for Red (size=1): 0.2/tick
-                // Slow it down for Minecraft: charge over ~2 seconds (40 ticks)
-                shockCharge += 0.025f;
+                // Charge over ~1.5 seconds (30 ticks); both heads are in position
+                shockCharge += 0.033f;
 
                 if (shockCharge >= 1.0f) {
                     // SHOCK — instakill!
@@ -784,10 +1083,10 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable {
 
             if (grabbed != null) {
                 double dist = free.getPos().distanceTo(grabbed.getPos());
-                if (dist < grabbed.getWidth() + 1.0) {
-                    // Free head is touching the grabbed entity — build charge!
+                if (dist < grabbed.getWidth() + 2.5) {
+                    // Free head is close to the grabbed entity — build charge!
                     // C# UpdateGrasp: shockCharge += 1/Lerp(100,5,size)
-                    shockCharge += 0.025f;
+                    shockCharge += 0.033f;
                     if (shockCharge >= 1.0f) {
                         shock(grabbed);
                         shockCharge = 0;

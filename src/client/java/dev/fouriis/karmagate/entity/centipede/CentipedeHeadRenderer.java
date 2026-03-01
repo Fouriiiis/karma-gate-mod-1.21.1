@@ -7,11 +7,15 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.RotationAxis;
 import net.minecraft.util.math.Vec3d;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 import software.bernie.geckolib.renderer.GeoEntityRenderer;
 
 /**
  * Renderer for centipede head segments.
- * Uses applyRotations() to orient the head model along the chain direction.
+ * Uses applyRotations() to orient the head model along the chain direction,
+ * including full pitch/yaw/roll for wall and ceiling crawling.
+ * Mirrors C# CentipedeGraphics.RotatAtChunk() + bodyRotations for surface alignment.
  */
 public class CentipedeHeadRenderer extends GeoEntityRenderer<CentipedeHeadEntity> {
 
@@ -38,21 +42,79 @@ public class CentipedeHeadRenderer extends GeoEntityRenderer<CentipedeHeadEntity
         // Compute chain direction for this head segment
         Vec3d dir = getChainDirection(entity, partialTick);
 
-        // Compute yaw from horizontal direction
-        float yaw = (float) (Math.atan2(-dir.x, dir.z) * (180.0 / Math.PI));
-
         // Rear head should face the other way
         if (!entity.isFrontHead()) {
-            yaw += 180f;
+            dir = dir.negate();
         }
 
-        // Apply yaw (GeckoLib convention: 180 - yaw)
-        poseStack.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(180f - yaw));
+        // Compute the interpolated surface normal for roll
+        float snX = MathHelper.lerp(partialTick, entity.prevSurfaceNormalX, entity.surfaceNormalX);
+        float snY = MathHelper.lerp(partialTick, entity.prevSurfaceNormalY, entity.surfaceNormalY);
+        float snZ = MathHelper.lerp(partialTick, entity.prevSurfaceNormalZ, entity.surfaceNormalZ);
+        Vector3f surfaceUp = new Vector3f(snX, snY, snZ);
+        if (surfaceUp.lengthSquared() < 0.001f) surfaceUp.set(0, 1, 0);
+        surfaceUp.normalize();
 
-        // Apply pitch from vertical component
-        float pitch = (float) (Math.asin(MathHelper.clamp(dir.y, -1, 1)) * (180.0 / Math.PI));
-        if (!entity.isFrontHead()) pitch = -pitch;
-        poseStack.multiply(RotationAxis.POSITIVE_X.rotationDegrees(-pitch));
+        // Build a full orientation from chain forward direction + surface normal (up)
+        Vector3f forward = new Vector3f((float) dir.x, (float) dir.y, (float) dir.z);
+        if (forward.lengthSquared() < 0.001f) forward.set(0, 0, 1);
+        forward.normalize();
+
+        // Orthogonalize: right = forward x surfaceUp, then recompute up = right x forward
+        Vector3f right = new Vector3f();
+        forward.cross(surfaceUp, right);
+        if (right.lengthSquared() < 0.001f) {
+            Vector3f arbitrary = Math.abs(forward.y) < 0.9f ? new Vector3f(0, 1, 0) : new Vector3f(1, 0, 0);
+            forward.cross(arbitrary, right);
+        }
+        right.normalize();
+
+        Vector3f up = new Vector3f();
+        right.cross(forward, up);
+        up.normalize();
+
+        // Build rotation quaternion from the orthonormal basis [right, up, -forward]
+        // GeckoLib convention: model faces -Z, so we use -forward
+        Quaternionf rotation = quatFromAxes(right, up, new Vector3f(-forward.x, -forward.y, -forward.z));
+        poseStack.multiply(rotation);
+    }
+
+    /**
+     * Build a quaternion from three orthonormal axes (right=X, up=Y, forward=Z).
+     */
+    private Quaternionf quatFromAxes(Vector3f right, Vector3f up, Vector3f forward) {
+        float m00 = right.x, m01 = up.x, m02 = forward.x;
+        float m10 = right.y, m11 = up.y, m12 = forward.y;
+        float m20 = right.z, m21 = up.z, m22 = forward.z;
+
+        float trace = m00 + m11 + m22;
+        float w, x, y, z;
+        if (trace > 0) {
+            float s = (float) Math.sqrt(trace + 1.0f) * 2f;
+            w = 0.25f * s;
+            x = (m21 - m12) / s;
+            y = (m02 - m20) / s;
+            z = (m10 - m01) / s;
+        } else if (m00 > m11 && m00 > m22) {
+            float s = (float) Math.sqrt(1.0f + m00 - m11 - m22) * 2f;
+            w = (m21 - m12) / s;
+            x = 0.25f * s;
+            y = (m01 + m10) / s;
+            z = (m02 + m20) / s;
+        } else if (m11 > m22) {
+            float s = (float) Math.sqrt(1.0f + m11 - m00 - m22) * 2f;
+            w = (m02 - m20) / s;
+            x = (m01 + m10) / s;
+            y = 0.25f * s;
+            z = (m12 + m21) / s;
+        } else {
+            float s = (float) Math.sqrt(1.0f + m22 - m00 - m11) * 2f;
+            w = (m10 - m01) / s;
+            x = (m02 + m20) / s;
+            y = (m12 + m21) / s;
+            z = 0.25f * s;
+        }
+        return new Quaternionf(x, y, z, w).normalize();
     }
 
     /**

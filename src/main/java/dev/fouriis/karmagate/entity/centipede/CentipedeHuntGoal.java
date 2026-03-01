@@ -2,20 +2,22 @@ package dev.fouriis.karmagate.entity.centipede;
 
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.EnumSet;
 
 /**
  * AI goal: Hunt a target.
- * The centipede crawls toward its target and attempts to grab it with its leading head.
- * Mirrors C# CentipedeAI Behavior.Hunt + Centipede.Act()/Crawl().
+ * The centipede uses the CentipedePathfinder to find a surface-connected
+ * path to its target, then follows the path waypoints.
+ * Mirrors C# CentipedeAI Behavior.Hunt + StandardPather.FollowPath().
  */
 public class CentipedeHuntGoal extends Goal {
 
     private final RedCentipedeEntity centipede;
     private LivingEntity target;
-    private int cooldown = 0;
+    private int pathRecalcCooldown = 0;
 
     public CentipedeHuntGoal(RedCentipedeEntity centipede) {
         this.centipede = centipede;
@@ -26,6 +28,10 @@ public class CentipedeHuntGoal extends Goal {
     public boolean canStart() {
         LivingEntity t = centipede.getTarget();
         if (t == null || !t.isAlive()) return false;
+        // Ignore players not in survival mode
+        if (t instanceof PlayerEntity player) {
+            if (player.isCreative() || player.isSpectator()) return false;
+        }
         target = t;
         return true;
     }
@@ -40,6 +46,8 @@ public class CentipedeHuntGoal extends Goal {
     @Override
     public void start() {
         centipede.setHuntTarget(target);
+        // Request initial path to target
+        centipede.requestPathTo(target.getPos());
     }
 
     @Override
@@ -56,9 +64,19 @@ public class CentipedeHuntGoal extends Goal {
         centipede.setHuntTarget(target);
         centipede.updateDirectionChange();
 
-        // Set move target to the prey's position
+        // Check if we need to recalculate the path
+        // (target moved, path invalidated, or no path yet)
+        pathRecalcCooldown--;
+        if (centipede.needsPathRecalc(target.getPos()) && pathRecalcCooldown <= 0) {
+            centipede.requestPathTo(target.getPos());
+            pathRecalcCooldown = 10; // Don't spam path requests
+        }
+
+        // Set the final move target for direct fallback
         centipede.setMoveTarget(target.getPos());
-        centipede.driveTowardTarget();
+
+        // Follow the computed path (falls back to direct if no path)
+        centipede.followCurrentPath();
 
         // Look at target
         centipede.getLookControl().lookAt(target, 30.0f, 30.0f);

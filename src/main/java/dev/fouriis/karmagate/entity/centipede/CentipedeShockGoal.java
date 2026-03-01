@@ -2,6 +2,7 @@ package dev.fouriis.karmagate.entity.centipede;
 
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.EnumSet;
 
@@ -22,6 +23,7 @@ import java.util.EnumSet;
 public class CentipedeShockGoal extends Goal {
 
     private final RedCentipedeEntity centipede;
+    private boolean pathRequested = false;
 
     public CentipedeShockGoal(RedCentipedeEntity centipede) {
         this.centipede = centipede;
@@ -49,6 +51,16 @@ public class CentipedeShockGoal extends Goal {
     }
 
     @Override
+    public void start() {
+        pathRequested = false;
+    }
+
+    @Override
+    public void stop() {
+        pathRequested = false;
+    }
+
+    @Override
     public void tick() {
         CentipedeHeadEntity front = centipede.getFrontHead();
         CentipedeHeadEntity rear = centipede.getRearHead();
@@ -67,10 +79,27 @@ public class CentipedeShockGoal extends Goal {
 
         // If the free head is not yet grabbing, drive the centipede to wrap it around
         if (!free.isGrabbing()) {
-            // The free head needs to reach the target
-            // Drive the entire body so the free head approaches the target
-            centipede.setMoveTarget(target.getPos());
-            centipede.driveTowardTarget();
+            Vec3d targetPos = target.getPos();
+
+            // Request a path to the target if needed
+            if (!pathRequested || centipede.needsPathRecalc(targetPos)) {
+                centipede.requestPathTo(targetPos);
+                pathRequested = true;
+            }
+
+            // Set move target and follow the path
+            centipede.setMoveTarget(targetPos);
+            centipede.followCurrentPath();
+
+            // Additional direct force on the free head toward the target
+            // This supplements the path-following to make wrapping more aggressive
+            Vec3d toTarget = targetPos.subtract(free.getPos());
+            double dist = toTarget.length();
+            if (dist > 0.5) {
+                Vec3d dir = toTarget.normalize();
+                // Strong direct pull — this is the key wrapping force
+                free.segmentVelocity = free.segmentVelocity.add(dir.multiply(0.12));
+            }
         }
         // If both heads are grabbing, the shock charge is handled by
         // RedCentipedeEntity.updateShockCharge() — we just keep the goal active

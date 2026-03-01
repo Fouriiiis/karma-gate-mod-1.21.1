@@ -39,10 +39,15 @@ public final class CentipedeLegRenderer {
     // Body radius for attach point offset (C#: bodyChunks[j].rad ≈ 5-6 px)
     private static final float BODY_RADIUS = 5f * PX;
 
-    // Quad half-width for billboard rendering
-    private static final float LEG_HALF_WIDTH = 0.025f;
     // Red centipede leg scale (C#: scaleX *= 1.3f for Red)
     private static final float RED_LEG_SCALE = 1.3f;
+
+    // Sprite pixel aspect ratio (width / nativeHeight).
+    // C#: CentipedeLegA native height = 27px, width ≈ 6px  → 6/27 ≈ 0.22
+    //     CentipedeLegB native height = 25px, width ≈ 6px  → 6/25 ≈ 0.24
+    // halfWidth = (boneLength * ASPECT_A * RED_LEG_SCALE) / 2
+    private static final float ASPECT_A = 0.22f;   // upper bone (LegA)
+    private static final float ASPECT_B = 0.24f;   // lower bone (LegB)
 
     // Colors
     private static final int UPPER_R = 30, UPPER_G = 25, UPPER_B = 22;
@@ -85,7 +90,7 @@ public final class CentipedeLegRenderer {
         // --- Rendering ---
         Vec3d segPos = lerpPos(entity, tickDelta);
         Vec3d chainDir = computeChainDirection(segs, idx, tickDelta);
-        Vec3d perp = horizontalPerp(chainDir);
+        Vec3d perp = surfacePerp(chainDir, entity);
         float legLength = computeLegLength(segRatio);
 
         MinecraftClient client = MinecraftClient.getInstance();
@@ -120,13 +125,21 @@ public final class CentipedeLegRenderer {
             Vec3d kneeLocal = inverseKinematics3D(attachLocal, footLocal,
                     legLength * 0.5f, legLength * 0.5f, f, perp);
 
+            // Dynamic half-widths: scale with actual bone length so the sprite
+            // maintains a physically consistent aspect ratio regardless of legLength.
+            // C#: scaleY = distance/27 (LegA) or /25 (LegB); scaleX = ±1.3 (fixed pixels)
+            double upperLen = kneeLocal.subtract(attachLocal).length();
+            double lowerLen = footLocal.subtract(kneeLocal).length();
+            float halfWidthA = (float)(upperLen * ASPECT_A * 0.5f) * RED_LEG_SCALE;
+            float halfWidthB = (float)(lowerLen * ASPECT_B * 0.5f) * RED_LEG_SCALE;
+
             renderLegSprite(matrices, vcProvider, light,
-                    attachLocal, kneeLocal, LEG_HALF_WIDTH * RED_LEG_SCALE, legASprite,
+                    attachLocal, kneeLocal, halfWidthA, legASprite,
                     billRight, billUp, billNorm,
                     UPPER_R, UPPER_G, UPPER_B, UPPER_R, UPPER_G, UPPER_B);
 
             renderLegSprite(matrices, vcProvider, light,
-                    kneeLocal, footLocal, LEG_HALF_WIDTH * RED_LEG_SCALE * 0.85f, legBSprite,
+                    kneeLocal, footLocal, halfWidthB, legBSprite,
                     billRight, billUp, billNorm,
                     LOWER_TOP_R, LOWER_TOP_G, LOWER_TOP_B,
                     LOWER_BOT_R, LOWER_BOT_G, LOWER_BOT_B);
@@ -138,38 +151,52 @@ public final class CentipedeLegRenderer {
     // =========================================================================
 
     /**
-     * Update all limbs for one segment. Mirrors C# CentipedeGraphics.Update() leg loop:
-     * 1. Limb.Update() — apply velocity
-     * 2. ConnectToPoint — constrain to attach, transfer body vel
-     * 3. FindGrip — search for terrain surface if not gripped
-     * 4. Grip/Dangle logic — stay planted or push toward ideal position
+     * Update all limbs for one segment using a metachronal wave gait.
+     *
+     * Each leg has a personal phase:
+     *   phase = frac(walkCycle * bodyDirSign + segIdx * SEG_OFFSET + sideOffset)
+     * where left=0.0 offset, right=0.5 offset → left and right never swing together.
+     * SEG_OFFSET = 1.0/numSegs creates one full wave across the whole body.
+     *
+     * SWING phase (0 .. SWING_FRAC): foot lifts, arcs forward, finds new grip at landing.
+     * STANCE phase (SWING_FRAC .. 1.0): foot stays planted; only releases if extremely
+     * overstretched (body moved way past it).
      */
     private static void updateLimbs(CentipedeSegmentEntity entity,
                                      CentipedeSegmentEntity[] segs, int idx, int totalSegs,
                                      float segRatio, RedCentipedeEntity parent) {
         Vec3d segPos = entity.getPos();
         Vec3d chainDir = computeChainDirectionTick(segs, idx);
-        Vec3d perp = horizontalPerp(chainDir);
+        Vec3d perp = surfacePerp(chainDir, entity);
         float legLength = computeLegLength(segRatio);
         float walkCycle = parent.getWalkCycle();
         float bodyDirSign = parent.isBodyDirection() ? -1f : 1f;
         World world = entity.getWorld();
 
-        // C# walkPhase: num3 = 0.5 + 0.5 * sin((walkCycle + j/10) * PI * 2)
-        float walkPhase = 0.5f + 0.5f * (float) Math.sin((walkCycle + idx * 0.1f) * Math.PI * 2.0);
+        // Is the body actually moving? Wave stepping is only useful when moving.
+        boolean isMoving = entity.segmentVelocity.horizontalLength() > 0.008;
 
-        // C# ideal leg direction factor:
-        // a = Lerp(-1, 1, segRatio)
-        // a = Lerp(a, bodyDirSign, abs(walkPhase - 0.5))
+        // Fraction of cycle spent in swing (lifting/arcing). The rest is stance.
+        final float SWING_FRAC = 0.32f;
+        // Segment phase spacing: spread one full wave across all segments.
+        float segOffset = (totalSegs > 1) ? (float) idx / (float) totalSegs : 0f;
+
+        // Ideal leg direction parameters (same C# formulas, use neutral walkPhase=0.5)
         float a = MathHelper.lerp(segRatio, -1f, 1f);
-        a = MathHelper.lerp(Math.abs(walkPhase - 0.5f), a, bodyDirSign);
-
-        // C# blend factor: Lerp(0.5+0.5*sin(segRatio*PI), 0, abs(walkPhase-0.5)*2)
-        float outerFac = MathHelper.lerp(Math.abs(walkPhase - 0.5f) * 2f,
-                0.5f + 0.5f * (float) Math.sin(segRatio * Math.PI), 0f);
+        float outerFac = 0.5f + 0.5f * (float) Math.sin(segRatio * Math.PI);
 
         for (int side = 0; side < 2; side++) {
             float sideSign = (side == 0) ? -1f : 1f;
+            // Right leg is half a cycle out of phase → legs alternate left/right
+            float sideOffset = (side == 0) ? 0f : 0.5f;
+
+            // Personal phase in [0, 1)
+            float rawPhase = walkCycle * bodyDirSign + segOffset + sideOffset;
+            float phase = rawPhase - (float) Math.floor(rawPhase);
+
+            boolean inSwing = isMoving && (phase < SWING_FRAC);
+            // Normalised progress through swing arc: 0 = lift-off, 1 = plant
+            float swingT = inSwing ? (phase / SWING_FRAC) : 0f;
 
             // 1. Save previous position for render interpolation
             entity.legLastPos[side] = entity.legPos[side];
@@ -177,30 +204,33 @@ public final class CentipedeLegRenderer {
             // 2. Limb.Update(): apply velocity
             entity.legPos[side] = entity.legPos[side].add(entity.legVel[side]);
 
-            // 3. Compute attach point (C#: bodyChunks[j].pos + perp * sideSign * bodyRotat.y * rad)
-            // In 3D ground-crawling: bodyRotat.y ≈ -1 (shell on top), simplify to just sideSign
+            // 3. Attach point (body surface where this leg connects)
             Vec3d attachPt = segPos.add(perp.multiply(sideSign * BODY_RADIUS));
 
-            // 4. ConnectToPoint: constrain leg to be within legLength of attach
+            // 4. ConnectToPoint: keep leg within legLength of attach
             Vec3d toFoot = entity.legPos[side].subtract(attachPt);
             double dist = toFoot.length();
             if (dist > legLength) {
                 entity.legPos[side] = attachPt.add(toFoot.normalize().multiply(legLength));
             }
-            // Transfer some body velocity (C#: hostVel * 0.1)
-            entity.legVel[side] = entity.legVel[side].add(entity.segmentVelocity.multiply(0.1));
-            // Air friction (C#: Limb uses airFriction param, typically 0.9)
-            entity.legVel[side] = entity.legVel[side].multiply(0.85);
+            // Transfer body momentum and apply friction
+            entity.legVel[side] = entity.legVel[side].add(entity.segmentVelocity.multiply(0.08));
+            entity.legVel[side] = entity.legVel[side].multiply(0.8);
 
-            // 5. Compute ideal leg direction and ideal foot position
-            // C#: legDir = Slerp(chainDir*a, perp*sideSign, outerFac).normalized
+            // 5. Compute ideal foot direction + position (neutral, no walkPhase modulation)
+            // Mix chain direction with perpendicular, then bias toward the surface
             Vec3d idealDir = slerp3D(chainDir.multiply(a), perp.multiply(sideSign), outerFac);
+            // Add a bias toward the surface the segment is crawling on (opposite of surface normal)
+            Vec3d surfNorm = new Vec3d(entity.surfaceNormalX, entity.surfaceNormalY, entity.surfaceNormalZ);
+            if (surfNorm.lengthSquared() > 0.01) {
+                idealDir = idealDir.add(surfNorm.negate().multiply(0.5));
+            }
             if (idealDir.lengthSquared() > 0.001) idealDir = idealDir.normalize();
             else idealDir = perp.multiply(sideSign);
             Vec3d idealFoot = attachPt.add(idealDir.multiply(legLength));
 
+            // --- First-tick snap ---
             if (!entity.legsInitialized) {
-                // First tick: snap to surface immediately
                 Vec3d grip = findGrip(world, attachPt, idealFoot, legLength * 1.5);
                 entity.legPos[side] = (grip != null) ? grip : idealFoot;
                 entity.legLastPos[side] = entity.legPos[side];
@@ -210,53 +240,80 @@ public final class CentipedeLegRenderer {
                 continue;
             }
 
-            // 6. Grip logic (mirrors C# reachedSnapPosition + Dangle)
-
-            if (entity.legGripped[side] && entity.legGripTarget[side] != null) {
-                // C#: if (!DistLess(pos, absoluteHuntPos, legLength * 1.5)) → release
-                double attachToGrip = attachPt.distanceTo(entity.legGripTarget[side]);
-                if (attachToGrip > legLength * 1.4) {
-                    // Body moved too far from grip — release (enter Dangle)
+            // -------------------------------------------------------
+            // SWING phase: lift the foot and arc it forward to new grip
+            // -------------------------------------------------------
+            if (inSwing) {
+                if (entity.legGripped[side]) {
+                    // Lift off — release current grip
                     entity.legGripped[side] = false;
                     entity.legGripTarget[side] = null;
-                    // C# Dangle: vel += legDir * 13; vel = Lerp(vel, idealFoot-pos, 0.5)
-                    entity.legVel[side] = entity.legVel[side].add(idealDir.multiply(13f * PX));
-                    Vec3d toIdeal = idealFoot.subtract(entity.legPos[side]);
-                    entity.legVel[side] = lerpVec(entity.legVel[side], toIdeal, 0.5);
-                } else {
-                    // Stay planted at grip (C# reachedSnapPosition = true)
-                    entity.legPos[side] = entity.legGripTarget[side];
-                    entity.legVel[side] = Vec3d.ZERO;
-                    // C#: vel += legDir * 5 (small push, but constrained, so minimal effect)
+                    // Small upward kick at lift-off
+                    entity.legVel[side] = entity.legVel[side].add(new Vec3d(0, 8f * PX, 0));
                 }
-            } else {
-                // Not gripped — search for new grip (C#: FindGrip when !reachedSnapPosition)
-                Vec3d grip = findGrip(world, attachPt, idealFoot, legLength * 1.5);
 
-                if (grip != null) {
-                    entity.legGripTarget[side] = grip;
-                    // Move toward grip target
-                    Vec3d toGrip = grip.subtract(entity.legPos[side]);
-                    double toGripDist = toGrip.length();
-                    if (toGripDist < 0.04) {
-                        // Reached grip — plant foot (C#: reachedSnapPosition = true)
+                // During the first 60% of swing: push toward ideal foot + small lift
+                // During last 40%: pull down to land and search for grip
+                if (swingT < 0.6f) {
+                    Vec3d toIdeal = idealFoot.subtract(entity.legPos[side]);
+                    entity.legVel[side] = entity.legVel[side].add(toIdeal.multiply(0.25));
+                    // Arc upward at the apex (swingT ≈ 0.3)
+                    float arcY = (float) Math.sin(swingT / 0.6f * Math.PI) * 6f * PX;
+                    entity.legVel[side] = entity.legVel[side].add(new Vec3d(0, arcY, 0));
+                } else {
+                    // Descending — hunt for grip near ideal foot
+                    Vec3d grip = findGrip(world, attachPt, idealFoot, legLength * 1.5);
+                    if (grip != null) {
+                        entity.legGripTarget[side] = grip;
+                        Vec3d toGrip = grip.subtract(entity.legPos[side]);
+                        double toGripDist = toGrip.length();
+                        if (toGripDist < 0.04) {
+                            // Plant foot early if we've arrived
+                            entity.legGripped[side] = true;
+                            entity.legPos[side] = grip;
+                            entity.legVel[side] = Vec3d.ZERO;
+                        } else {
+                            entity.legVel[side] = entity.legVel[side].add(
+                                    toGrip.normalize().multiply(Math.min(toGripDist * 0.5, 0.18)));
+                        }
+                    } else {
+                        // No grip found: fall toward ideal foot position
+                        Vec3d toIdeal = idealFoot.subtract(entity.legPos[side]);
+                        entity.legVel[side] = entity.legVel[side].add(toIdeal.multiply(0.3));
+                    }
+                }
+
+            // -------------------------------------------------------
+            // STANCE phase: keep foot planted; only release if body
+            // has moved so far that the leg is extremely overstretched.
+            // -------------------------------------------------------
+            } else {
+                if (entity.legGripped[side] && entity.legGripTarget[side] != null) {
+                    double attachToGrip = attachPt.distanceTo(entity.legGripTarget[side]);
+                    if (attachToGrip > legLength * 1.7) {
+                        // Emergency release — overstretched during stance
+                        entity.legGripped[side] = false;
+                        entity.legGripTarget[side] = null;
+                        entity.legVel[side] = entity.legVel[side].add(idealDir.multiply(10f * PX));
+                    } else {
+                        // Planted: lock position, zero velocity
+                        entity.legPos[side] = entity.legGripTarget[side];
+                        entity.legVel[side] = Vec3d.ZERO;
+                    }
+                } else {
+                    // Ungripped during stance — immediately find and plant
+                    Vec3d grip = findGrip(world, attachPt, idealFoot, legLength * 1.5);
+                    if (grip != null) {
                         entity.legGripped[side] = true;
+                        entity.legGripTarget[side] = grip;
                         entity.legPos[side] = grip;
                         entity.legVel[side] = Vec3d.ZERO;
                     } else {
-                        // Hunting toward grip (C#: HuntRelativePosition mode)
-                        // Blend velocity toward grip target
-                        entity.legVel[side] = entity.legVel[side].add(
-                                toGrip.normalize().multiply(Math.min(toGripDist, 0.15)));
-                        // Also add ideal direction push (C#: vel += legDir * 5)
-                        entity.legVel[side] = entity.legVel[side].add(idealDir.multiply(5f * PX));
+                        // No surface: dangle toward ideal
+                        entity.legVel[side] = entity.legVel[side].add(idealDir.multiply(10f * PX));
+                        Vec3d toIdeal = idealFoot.subtract(entity.legPos[side]);
+                        entity.legVel[side] = lerpVec(entity.legVel[side], toIdeal, 0.45);
                     }
-                } else {
-                    // No surface found — pure Dangle mode
-                    // C#: vel += legDir * 13; vel = Lerp(vel, idealFoot - pos, 0.5)
-                    entity.legVel[side] = entity.legVel[side].add(idealDir.multiply(13f * PX));
-                    Vec3d toIdeal = idealFoot.subtract(entity.legPos[side]);
-                    entity.legVel[side] = lerpVec(entity.legVel[side], toIdeal, 0.5);
                 }
             }
         }
@@ -378,7 +435,35 @@ public final class CentipedeLegRenderer {
     // Utility
     // =========================================================================
 
-    /** Horizontal perpendicular to chain direction (cross with up). */
+    /** Perpendicular to chain direction, oriented toward the surface the segment is crawling on.
+     *  Uses the segment's surface normal to determine which way legs should extend.
+     *  On floors this gives horizontal perpendicular; on walls/ceilings it correctly
+     *  orients legs toward the surface. */
+    private static Vec3d surfacePerp(Vec3d chainDir, CentipedeSegmentEntity entity) {
+        // Get interpolated surface normal
+        float snX = entity.surfaceNormalX;
+        float snY = entity.surfaceNormalY;
+        float snZ = entity.surfaceNormalZ;
+        Vec3d surfaceNormal = new Vec3d(snX, snY, snZ);
+        if (surfaceNormal.lengthSquared() < 0.01) {
+            surfaceNormal = new Vec3d(0, 1, 0); // default to floor
+        } else {
+            surfaceNormal = surfaceNormal.normalize();
+        }
+
+        // Perpendicular = chainDir x surfaceNormal (gives the sideways direction)
+        Vec3d perp = chainDir.crossProduct(surfaceNormal);
+        if (perp.lengthSquared() < 0.001) {
+            // Fallback: try crossing with world up
+            perp = chainDir.crossProduct(new Vec3d(0, 1, 0));
+            if (perp.lengthSquared() < 0.001) {
+                perp = chainDir.crossProduct(new Vec3d(1, 0, 0));
+            }
+        }
+        return perp.normalize();
+    }
+
+    /** Horizontal perpendicular to chain direction (cross with up). Fallback method. */
     private static Vec3d horizontalPerp(Vec3d chainDir) {
         Vec3d up = new Vec3d(0, 1, 0);
         Vec3d perp = chainDir.crossProduct(up);

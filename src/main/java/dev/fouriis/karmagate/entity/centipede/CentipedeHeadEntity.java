@@ -106,7 +106,9 @@ public class CentipedeHeadEntity extends CentipedeSegmentEntity {
                     releaseGrab();
                 } else {
                     double dist = this.getPos().distanceTo(grabbedEntity.getPos());
-                    if (dist > 4.0) {
+                    // Release distance matches ~body length so the grab holds
+                    // while the other head wraps around
+                    if (dist > 12.0) {
                         // Too far — release
                         releaseGrab();
                     } else {
@@ -115,25 +117,25 @@ public class CentipedeHeadEntity extends CentipedeSegmentEntity {
 
                         // Dampen grabbed entity's velocity (resist its movement)
                         Vec3d targetVel = grabbedEntity.getVelocity();
-                        grabbedEntity.setVelocity(targetVel.multiply(0.4));
+                        grabbedEntity.setVelocity(targetVel.multiply(0.3));
 
                         if (dist > 0.3) {
                             // Strong pull toward head position
                             Vec3d pullDir = this.getPos().subtract(grabbedEntity.getPos()).normalize();
-                            double pullStrength = 0.35;
+                            double pullStrength = 0.4;
                             // Scale pull up when farther away
-                            if (dist > 1.5) pullStrength = 0.5;
+                            if (dist > 2.0) pullStrength = 0.55;
+                            if (dist > 4.0) pullStrength = 0.7;
                             grabbedEntity.setVelocity(grabbedEntity.getVelocity().add(pullDir.multiply(pullStrength)));
                         } else {
                             // Very close: lock position to head
                             grabbedEntity.setPosition(this.getPos());
                         }
 
-                        // Head pulls slightly toward grabbed entity (wrapping behavior)
-                        // This makes the centipede curl around its prey
+                        // Head pulls toward grabbed entity (anchors head at prey)
                         if (dist > 0.5) {
                             Vec3d headPull = grabbedEntity.getPos().subtract(this.getPos()).normalize();
-                            this.segmentVelocity = this.segmentVelocity.add(headPull.multiply(0.05));
+                            this.segmentVelocity = this.segmentVelocity.add(headPull.multiply(0.08));
                         }
 
                         // Velocity limit on grabbed entity
