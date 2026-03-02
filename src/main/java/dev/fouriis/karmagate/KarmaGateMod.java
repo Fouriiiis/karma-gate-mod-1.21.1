@@ -9,6 +9,7 @@ import dev.fouriis.karmagate.entity.centipede.CentipedeBodyEntity;
 import dev.fouriis.karmagate.entity.centipede.CentipedeHeadEntity;
 import dev.fouriis.karmagate.entity.centipede.CentipedeSegmentEntity;
 import dev.fouriis.karmagate.entity.centipede.RedCentipedeEntity;
+import dev.fouriis.karmagate.entity.spider.SpiderEntity;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugEntity;
 import dev.fouriis.karmagate.item.ModItems;
 import dev.fouriis.karmagate.network.ModNetworking;
@@ -94,6 +95,17 @@ public class KarmaGateMod implements ModInitializer {
                     .build()
     );
 
+    // --- Spider entity type ---
+    public static final EntityType<SpiderEntity> SPIDER_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "coalmine_spider"),
+            FabricEntityTypeBuilder.<SpiderEntity>create(SpawnGroup.MONSTER, (type, world) -> new SpiderEntity(type, world))
+                    .dimensions(EntityDimensions.fixed(0.3f, 0.15f))
+                    .trackRangeBlocks(64)
+                    .trackedUpdateRate(3)
+                    .build()
+    );
+
 
     @Override
     public void onInitialize() {
@@ -109,6 +121,7 @@ public class KarmaGateMod implements ModInitializer {
         FabricDefaultAttributeRegistry.register(CENTIPEDE_HEAD_ENTITY_TYPE, CentipedeSegmentEntity.createSegmentAttributes());
         FabricDefaultAttributeRegistry.register(CENTIPEDE_BODY_ENTITY_TYPE, CentipedeSegmentEntity.createSegmentAttributes());
         FabricDefaultAttributeRegistry.register(RED_CENTIPEDE_ENTITY_TYPE, RedCentipedeEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(SPIDER_ENTITY_TYPE, SpiderEntity.createAttributes());
 
         // Register networking
         ModNetworking.register();

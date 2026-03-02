@@ -1,6 +1,7 @@
 package dev.fouriis.karmagate.item;
 
 import dev.fouriis.karmagate.KarmaGateMod;
+import dev.fouriis.karmagate.entity.spider.SpiderSpawnEggItem;
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
 import net.minecraft.item.Item;
 import net.minecraft.item.SpawnEggItem;
@@ -25,6 +26,17 @@ public class ModItems {
         )
     );
 
+    // Spider spawn egg — spawns a whole flock of spiders
+    public static final SpiderSpawnEggItem SPIDER_SPAWN_EGG = (SpiderSpawnEggItem) registerItem(
+        "spider_spawn_egg",
+        new SpiderSpawnEggItem(
+            KarmaGateMod.SPIDER_ENTITY_TYPE,
+            0x1A1510,  // dark brownish-black (body color)
+            0x0F0D0A,  // very dark (leg color)
+            new Item.Settings().maxCount(64)
+        )
+    );
+
     private static Item registerItem(String name, Item item) {
         return Registry.register(Registries.ITEM, Identifier.of(KarmaGateMod.MOD_ID, name), item);
     }
@@ -38,6 +50,7 @@ public class ModItems {
 
         ItemGroupEvents.modifyEntriesEvent(RegistryKey.of(RegistryKeys.ITEM_GROUP, Identifier.of("minecraft", "spawn_eggs"))).register(entries -> {
             entries.add(STOWAWAY_BUG_SPAWN_EGG);
+            entries.add(SPIDER_SPAWN_EGG);
         });
     }
 }

@@ -16,6 +16,7 @@ import dev.fouriis.karmagate.entity.stowaway.StowawayBugRenderer;
 import dev.fouriis.karmagate.entity.centipede.CentipedeHeadRenderer;
 import dev.fouriis.karmagate.entity.centipede.CentipedeBodyRenderer;
 import dev.fouriis.karmagate.entity.centipede.RedCentipedeRenderer;
+import dev.fouriis.karmagate.entity.spider.SpiderEntityRenderer;
 import dev.fouriis.karmagate.item.KarmaGateItemGeoRenderer;
 import dev.fouriis.karmagate.entity.client.HeatCoilItemModel;
 import dev.fouriis.karmagate.entity.client.GateLightItemModel;
@@ -91,6 +92,9 @@ public class KarmaGateModClient implements ClientModInitializer {
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.CENTIPEDE_HEAD_ENTITY_TYPE, CentipedeHeadRenderer::new);
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.CENTIPEDE_BODY_ENTITY_TYPE, CentipedeBodyRenderer::new);
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.RED_CENTIPEDE_ENTITY_TYPE, RedCentipedeRenderer::new);
+
+		// Register spider entity renderer
+		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.SPIDER_ENTITY_TYPE, SpiderEntityRenderer::new);
 
 		// Register Karma Gate item renderer with custom transforms
 		var gateItemRenderer = new KarmaGateItemGeoRenderer();
