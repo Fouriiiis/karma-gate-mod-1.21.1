@@ -1,61 +1,65 @@
 package dev.fouriis.karmagate.client.swarmer;
 
-import com.mojang.blaze3d.platform.GlStateManager;
-import com.mojang.blaze3d.systems.RenderSystem;
-import dev.fouriis.karmagate.KarmaGateMod;
+import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
+import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
+import net.brickcraftdream.librainworldmc.client.atlas.FAtlasManager;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.*;
 import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.util.Identifier;
+import net.minecraft.client.world.ClientWorld;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Matrix4f;
 
 import java.util.List;
 
-/**
- * Renders neuron swarmers as glowing billboard particles.
- *
- * This version uses Rain World's SSOracleSwarmer.DrawSprites color mapping:
- *  - Body color matches RW main sprite mapping (HSL2RGB with specific hue/lightness curves).
- *  - Glow layer uses RW "sprite[4]" mapping (different saturation/lightness curve).
- */
 public class NeuronSwarmerRenderer {
-    private static final Identifier NEURON_TEXTURE = Identifier.of(KarmaGateMod.MOD_ID, "textures/particle/neuron.png");
 
-    // Size of the swarmer sprite in blocks
-    private static final float SPRITE_SIZE = 0.25f;
+    private static final float BODY_MAX_DIM_BLOCKS = 0.4f;
 
-    // Glow effect intensity
-    private static final float GLOW_INTENSITY = 1.0f;
+    private static final float RW_WING_OFFSET_PX = 4.0f;
+    private static final float RW_EYE_OFFSET_PX  = 2.0f;
 
-    // Glow radius multiplier for the outer glow layer
-    private static final float GLOW_SCALE = 1.2f;
+    private static final float DEBUG_LINE_LEN_MULT = 1.2f;
 
+    // Tiny push to avoid Z-fighting (in world units/blocks)
+    private static final float Z_EPSILON = 0.0015f;
+
+    // Force identical shading across both X planes (prevents “one side gray”)
+    private static final float SHADE_NX = 0f, SHADE_NY = 1f, SHADE_NZ = 0f;
     // If you later add RW-style "dark" logic, flip this (or compute per-swarmer).
     private static final boolean DARK_MODE = false;
-
     private static boolean initialized = false;
 
-    /**
-     * Registers the renderer with Fabric's world render events.
-     */
+    private static FAtlasManager atlasManager;
+    private static FAtlasElement JETFISH_EYE_A;
+    private static FAtlasElement DEER_EYE_A2;
+    private static FAtlasElement JETFISH_EYE_B;
+
     public static void register() {
         if (initialized) return;
         initialized = true;
-
-        // Render after translucent blocks for proper blending
         WorldRenderEvents.AFTER_TRANSLUCENT.register(NeuronSwarmerRenderer::render);
     }
 
-    /**
-     * Main render method called each frame.
-     */
     private static void render(WorldRenderContext context) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.world == null || client.player == null) return;
+
+        VertexConsumerProvider consumers = context.consumers();
+        if (consumers == null) return;
+
+        if (atlasManager == null) {
+            atlasManager = LibrainworldmcClient.getAtlasManager();
+            JETFISH_EYE_A = atlasManager.getElementWithName("JetFishEyeA");
+            DEER_EYE_A2   = atlasManager.getElementWithName("deerEyeA2");
+            JETFISH_EYE_B = atlasManager.getElementWithName("JetFishEyeB");
+        }
+
+        if (JETFISH_EYE_A == null || DEER_EYE_A2 == null || JETFISH_EYE_B == null) return;
 
         List<NeuronSwarmer> swarmers = NeuronSwarmerManager.getInstance().getAllSwarmers();
         if (swarmers.isEmpty()) return;
@@ -63,231 +67,565 @@ public class NeuronSwarmerRenderer {
         MatrixStack matrices = context.matrixStack();
         Camera camera = context.camera();
         float tickDelta = context.tickCounter().getTickDelta(true);
-
         Vec3d cameraPos = camera.getPos();
-
-        // Set up rendering state for additive glow blending
-        RenderSystem.enableBlend();
-        RenderSystem.blendFunc(GlStateManager.SrcFactor.SRC_ALPHA, GlStateManager.DstFactor.ONE);
-
-        // Enable depth writing so swarmers write to depth buffer
-        RenderSystem.depthMask(true);
-        RenderSystem.enableDepthTest();
-        RenderSystem.disableCull(); // particles visible from both sides
-
-        RenderSystem.setShader(GameRenderer::getPositionTexColorProgram);
-        RenderSystem.setShaderTexture(0, NEURON_TEXTURE);
-
-        BufferBuilder buffer = Tessellator.getInstance().begin(
-                VertexFormat.DrawMode.QUADS,
-                VertexFormats.POSITION_TEXTURE_COLOR
-        );
-
-        // Get camera rotation for fallback orientation
-        float cameraYaw = camera.getYaw();
-        float cameraPitch = camera.getPitch();
+        ClientWorld world = client.world;
 
         matrices.push();
-
-        // Translate to camera-relative origin
         matrices.translate(-cameraPos.x, -cameraPos.y, -cameraPos.z);
 
         Matrix4f matrix = matrices.peek().getPositionMatrix();
 
-        for (NeuronSwarmer swarmer : swarmers) {
-            // Outer glow layer first (larger, more transparent)
-            renderSwarmerGlow(buffer, matrix, swarmer, cameraPos, cameraYaw, cameraPitch, tickDelta);
-            // Core (smaller, brighter)
-            renderSwarmer(buffer, matrix, swarmer, cameraPos, cameraYaw, cameraPitch, tickDelta);
+        VertexConsumer bodyVc = consumers.getBuffer(RenderLayer.getEntityTranslucent(JETFISH_EYE_A.textureIdentifier));
+        VertexConsumer wingVc = consumers.getBuffer(RenderLayer.getEntityTranslucent(DEER_EYE_A2.textureIdentifier));
+        VertexConsumer eyeVc  = consumers.getBuffer(RenderLayer.getEntityTranslucent(JETFISH_EYE_B.textureIdentifier));
+        VertexConsumer lineVc = consumers.getBuffer(RenderLayer.getLines());
+
+        for (NeuronSwarmer sw : swarmers) {
+            renderSwarmerSinglePlane(bodyVc, wingVc, eyeVc, lineVc, matrix, world, sw, tickDelta);
         }
 
         matrices.pop();
-
-        // Draw the buffer
-        BuiltBuffer builtBuffer = buffer.endNullable();
-        if (builtBuffer != null) {
-            BufferRenderer.drawWithGlobalProgram(builtBuffer);
-        }
-
-        // Restore render state
-        RenderSystem.depthMask(true);
-        RenderSystem.disableBlend();
-        RenderSystem.enableCull();
     }
 
-    /**
-     * Renders a single swarmer core as two crossed quads oriented to direction of travel.
-     */
-    private static void renderSwarmer(
-            BufferBuilder buffer,
+    private static void renderSwarmerSinglePlane(
+            VertexConsumer bodyVc,
+            VertexConsumer wingVc,
+            VertexConsumer eyeVc,
+            VertexConsumer lineVc,
             Matrix4f matrix,
-            NeuronSwarmer swarmer,
-            Vec3d cameraPos,
-            float cameraYaw,
-            float cameraPitch,
-            float tickDelta) {
+            ClientWorld world,
+            NeuronSwarmer sw,
+            float t
+    ) {
+        Vec3d pos = lerp(sw.lastPosition, sw.position, t);
 
-        // Interpolate position
-        double x = MathHelper.lerp(tickDelta, swarmer.lastPosition.x, swarmer.position.x);
-        double y = MathHelper.lerp(tickDelta, swarmer.lastPosition.y, swarmer.position.y);
-        double z = MathHelper.lerp(tickDelta, swarmer.lastPosition.z, swarmer.position.z);
-
-        // Interpolate rotation for visual effect
-        float rotation = MathHelper.lerp(tickDelta, swarmer.lastRotation, swarmer.rotation);
+        // FULL EMISSIVE (fullbright) for all sprites
+        int light = LightmapTextureManager.MAX_LIGHT_COORDINATE;
 
         // === Rain World accurate BODY color ===
-        float[] rgb = calculateColorRW_Body(swarmer.colorX, swarmer.colorY, DARK_MODE);
-        int r = (int) (rgb[0] * 255);
-        int g = (int) (rgb[1] * 255);
-        int b = (int) (rgb[2] * 255);
-        int a = (int) (GLOW_INTENSITY * 255);
+        float[] bodyRgb = calculateColorRW_Body(sw.colorX, sw.colorY, DARK_MODE);
+        int bodyR = (int) (bodyRgb[0] * 255);
+        int bodyG = (int) (bodyRgb[1] * 255);
+        int bodyB = (int) (bodyRgb[2] * 255);
+        int bodyA = 255;
 
-        // --- ORIENT TO DIRECTION OF TRAVEL (NO BILLBOARDING) ---
+        // === Rain World accurate "sprite[4]" glow/eye color ===
+        float[] glowRgb = calculateColorRW_Sprite4(sw.colorX, sw.colorY, DARK_MODE);
+        int glowR = (int) (glowRgb[0] * 255);
+        int glowG = (int) (glowRgb[1] * 255);
+        int glowB = (int) (glowRgb[2] * 255);
+        int glowA = 255;
 
-        Vec3d forward = swarmer.direction;
-        if (forward.lengthSquared() < 1e-8) {
-            double yawRad = Math.toRadians(-cameraYaw);
-            forward = new Vec3d(Math.cos(yawRad), 0.0, Math.sin(yawRad));
+        Vec3d dir = slerpUnitSafe(sw.lastDirection, sw.direction, t);
+        if (dir.lengthSquared() < 1e-10) {
+            Vec3d vel = sw.position.subtract(sw.lastPosition);
+            dir = (vel.lengthSquared() > 1e-10) ? vel.normalize() : new Vec3d(1, 0, 0);
         }
-        forward = forward.normalize();
+        dir = dir.normalize();
 
-        // Choose a reference up that's not parallel to forward
-        Vec3d refUp = new Vec3d(0.0, 1.0, 0.0);
-        if (Math.abs(forward.dotProduct(refUp)) > 0.95) {
-            refUp = new Vec3d(1.0, 0.0, 0.0);
-        }
+        Vec3d lazy = slerpUnitSafe(sw.lastLazyDirection, sw.lazyDirection, t);
+        if (lazy.lengthSquared() < 1e-10) lazy = dir;
+        lazy = lazy.normalize();
 
-        // A base perpendicular vector we can rotate around forward to make the "X"
-        Vec3d side = forward.crossProduct(refUp).normalize();
+        float rot = MathHelper.lerp(t, sw.lastRotation, sw.rotation);
+        float phase = rot * (float) (Math.PI * 2.0);
+        float num  = MathHelper.sin(phase);
 
-        float size = SPRITE_SIZE * (1.0f + 0.1f * (float) Math.sin(rotation * Math.PI * 2));
+        float pxToWorld = computePxToWorld(JETFISH_EYE_A, BODY_MAX_DIM_BLOCKS);
 
-        // Two crossed planes: rotate the perpendicular vector 0° and 90° around forward.
-        double[] angles = new double[]{0.0, Math.PI / 2.0};
+        // Stable frame + roll around forward (true 3D spin)
+        Vec3d forward = dir;
 
-        for (double ang : angles) {
-            Vec3d sideRot = rotateAroundAxis(side, forward, ang).normalize();
+        Vec3d worldUp = new Vec3d(0, 1, 0);
+        Vec3d right0 = worldUp.crossProduct(forward);
+        if (right0.lengthSquared() < 1e-10) right0 = new Vec3d(1, 0, 0).crossProduct(forward);
+        right0 = right0.normalize();
+        Vec3d up0 = forward.crossProduct(right0).normalize();
 
-            // Quad axes (both scaled by size):
-            Vec3d uAxis = sideRot.multiply(size);
-            Vec3d vAxis = forward.multiply(size);
+        double rollRad = phase;
+        Vec3d right = rotateAroundAxis(right0, forward, rollRad).normalize();
+        Vec3d up    = rotateAroundAxis(up0, forward, rollRad).normalize();
 
-            float ux = (float) uAxis.x;
-            float uy = (float) uAxis.y;
-            float uz = (float) uAxis.z;
+        Vec3d normal1 = right;
+        Vec3d up2     = rotateAroundAxis(up, forward, Math.PI * 0.5).normalize();
+        Vec3d normal2 = rotateAroundAxis(normal1, forward, Math.PI * 0.5).normalize();
 
-            float vx = (float) vAxis.x;
-            float vy = (float) vAxis.y;
-            float vz = (float) vAxis.z;
+        Vec3d spriteV = forward.multiply(-1);
 
-            // Bottom-left
-            buffer.vertex(matrix,
-                            (float) (x - ux - vx), (float) (y - uy - vy), (float) (z - uz - vz))
-                    .texture(0, 1)
-                    .color(r, g, b, a);
+        Vec3d lazyInPlane0 = projectIntoPlane(lazy, right0);
+        if (lazyInPlane0.lengthSquared() < 1e-10) lazyInPlane0 = forward;
+        lazyInPlane0 = lazyInPlane0.normalize();
+        Vec3d lazyInPlane = rotateAroundAxis(lazyInPlane0, forward, rollRad).normalize();
 
-            // Bottom-right
-            buffer.vertex(matrix,
-                            (float) (x + ux - vx), (float) (y + uy - vy), (float) (z + uz - vz))
-                    .texture(1, 1)
-                    .color(r, g, b, a);
+        // BODY as an X
+        float bodyW = JETFISH_EYE_A.sourcePixelSize.x * pxToWorld * 0.75f;
+        float bodyH = JETFISH_EYE_A.sourcePixelSize.y * pxToWorld * 1.2f;
 
-            // Top-right
-            buffer.vertex(matrix,
-                            (float) (x + ux + vx), (float) (y + uy + vy), (float) (z + uz + vz))
-                    .texture(1, 0)
-                    .color(r, g, b, a);
+        emitCenteredQuad(bodyVc, matrix, pos, up,  spriteV, normal1, bodyW * 0.5f, bodyH * 0.5f, bodyR, bodyG, bodyB, bodyA, light);
+        emitCenteredQuad(bodyVc, matrix, pos, up2, spriteV, normal2, bodyW * 0.5f, bodyH * 0.5f, bodyR, bodyG, bodyB, bodyA, light);
 
-            // Top-left
-            buffer.vertex(matrix,
-                            (float) (x - ux + vx), (float) (y - uy + vy), (float) (z - uz + vz))
-                    .texture(0, 0)
-                    .color(r, g, b, a);
-        }
+        // DEBUG line
+        // float halfLen = (Math.max(bodyW, bodyH) * 0.5f) * DEBUG_LINE_LEN_MULT;
+        // Vec3d p0 = pos.subtract(forward.multiply(halfLen));
+        // Vec3d p1 = pos.add(forward.multiply(halfLen));
+        // emitDebugLine(lineVc, matrix, p0, p1);
+
+        // =========================================================
+// EYE (debug RED): two hinged halves along the BLUE LINE (forward axis),
+// folded 90° (uses up and up2 planes), BOTH pushed into the same corner quadrant.
+// =========================================================
+
+float eyeW = JETFISH_EYE_B.sourcePixelSize.x * pxToWorld;
+float eyeH = JETFISH_EYE_B.sourcePixelSize.y * pxToWorld;
+
+// Hinge edge midpoint lies ON the debug line through the body center
+Vec3d hingeMid = pos;
+
+// Hinge axis direction is along the line
+Vec3d eyeV = spriteV; // == -forward (same as your sprites)
+
+// Pick WHICH corner quadrant you want.
+// If it ends up in the "wrong" corner, swap to one of the other three below.
+//Vec3d cornerDir = up.add(up2);
+Vec3d cornerDir = up.add(up2).multiply(-1);
+// Vec3d cornerDir = up2.subtract(up);
+// Vec3d cornerDir = up.add(up2).multiply(-1);
+
+if (cornerDir.lengthSquared() < 1e-10) cornerDir = up;
+cornerDir = cornerDir.normalize();
+
+// Start with the two fold directions (each half lies in its own plane)
+Vec3d outwardA = up.normalize().multiply(-1);
+Vec3d outwardB = up2.normalize().multiply(-1);
+
+// FORCE both halves to extend into the SAME corner quadrant
+if (outwardA.dotProduct(cornerDir) < 0) outwardA = outwardA.multiply(-1);
+if (outwardB.dotProduct(cornerDir) < 0) outwardB = outwardB.multiply(-1);
+
+// Normals for tiny Z push (your shading normal is forced elsewhere)
+Vec3d eyeNormalA = outwardA.crossProduct(eyeV).normalize();
+if (eyeNormalA.lengthSquared() < 1e-10) eyeNormalA = normal1;
+
+Vec3d eyeNormalB = outwardB.crossProduct(eyeV).normalize();
+if (eyeNormalB.lengthSquared() < 1e-10) eyeNormalB = normal2;
+
+// Each half is half the texture width, full height
+float halfWidth = eyeW * 0.5f;
+float halfH     = eyeH * 0.5f;
+
+// Eye uses glow/sprite4 color
+int eyeR = glowR, eyeG = glowG, eyeB = glowB, eyeA = glowA;
+
+// Half A: u=[0..0.5], hinged on the line, extends into corner along outwardA
+emitPivotLeftQuadUV(
+    eyeVc, matrix,
+    hingeMid.add(eyeNormalA.multiply(+Z_EPSILON)), // was +Z_EPSILON
+    outwardA, eyeV, eyeNormalA,
+    halfWidth, halfH,
+    0.5f, 0.0f, // FLIP V to mirror the texture half (your RW eye halves are mirrored)
+    false,
+    eyeR, eyeG, eyeB, eyeA,
+    light
+);
+
+emitPivotLeftQuadUV(
+    eyeVc, matrix,
+    hingeMid.add(eyeNormalB.multiply(-Z_EPSILON)), // was +Z_EPSILON
+    outwardB, eyeV, eyeNormalB,
+    halfWidth, halfH,
+    0.5f, 1.0f,
+    false,
+    eyeR, eyeG, eyeB, eyeA,
+    light
+);
+
+
+        // =========================================================
+        // WINGS
+        // - still flap
+        // - texture V flipped
+        // - PIVOT FIX: pivot at the *attachment point* on the body edge,
+        //   not at the middle of the wing sprite.
+        //
+        // We compute a per-wing attach point using the body's half-width
+        // along the wing's "outward" direction (wingSpriteU).
+        // =========================================================
+        // =========================================================
+// =========================================================
+// WINGS (top-left pivot)
+// - pivot at TOP-LEFT corner (attachment point)
+// - remove 1px gap by moving spine attach forward and slight overlap into body
+// - one wing red for debugging
+// - flap in UNROLLED frame then apply roll
+// =========================================================
+// =========================================================
+// WINGS (top-left pivot at attachment corner)
+// =========================================================
+float wingW = DEER_EYE_A2.sourcePixelSize.x * pxToWorld;
+float wingH = DEER_EYE_A2.sourcePixelSize.y * pxToWorld;
+
+// seam fixes
+final float WING_GAP_FIX_PX = 1.0f;   // pull hinge 1px closer along forward
+final float WING_INSET_PX   = 0.75f;  // overlap into body along -wingSpriteU
+
+// hinge point on the body "spine" (moved 1px toward body)
+Vec3d hingeBase = pos.subtract(forward.multiply((RW_WING_OFFSET_PX - WING_GAP_FIX_PX) * pxToWorld));
+
+// flap amplitude (UNROLLED so roll doesn't distort)
+float diff0 = (float) forward.distanceTo(lazyInPlane0);
+float ampDeg = lerpMapPow(diff0, 0.06f, 0.7f, 10f, 45f, 2f) * num;
+double ampRad = Math.toRadians(ampDeg);
+
+// UNROLLED frame
+Vec3d planeNormal0 = right0;
+Vec3d baseWingDir0 = planeNormal0.crossProduct(lazyInPlane0).normalize();
+
+for (int j = 0; j < 2; j++) {
+    double side = (j == 0) ? -1.0 : 1.0;
+
+    // RW-style sign flip (keeps left/right wing “opposed”)
+    float scaleY = (j == 0) ? (-num) : (num);
+    if (Math.abs(scaleY) < 0.001f) continue;
+
+    // flap in UNROLLED
+    Vec3d wingU0 = rotateAroundAxis(baseWingDir0, planeNormal0, side * ampRad).normalize();
+    Vec3d wingV0 = planeNormal0.crossProduct(wingU0).normalize();
+
+    // apply roll rigidly
+    Vec3d wingU = rotateAroundAxis(wingU0, forward, rollRad).normalize();
+    Vec3d wingV = rotateAroundAxis(wingV0, forward, rollRad).normalize();
+    Vec3d planeNormal = rotateAroundAxis(planeNormal0, forward, rollRad).normalize();
+
+    // Sprite axes:
+    // width goes outward from body
+    Vec3d wingSpriteU = wingV.normalize();
+
+    // "down" direction for top-left pivot:
+    // start from your previous height axis and then apply sign from scaleY
+    Vec3d vDown = wingU.multiply(-1).normalize(); // base down
+    if (scaleY < 0) vDown = vDown.multiply(-1);   // flip down/up when scaleY negative
+
+    float height = wingH * Math.abs(scaleY);
+
+    // Top-left attachment point:
+    // overlap slightly into the body along -U to kill the 1px seam
+    Vec3d pivotTopLeft = hingeBase;
+
+    // Wings use body color
+    int wr = bodyR;
+    int wg = bodyG;
+    int wb = bodyB;
+
+    emitPivotTopLeftQuad(
+        wingVc, matrix,
+        pivotTopLeft,
+        wingSpriteU, vDown, planeNormal,
+        wingW,
+        height,
+        false,  // flipU (mirror)
+        false,  // flipV (your existing vertical flip)
+        wr, wg, wb, 255,
+        light
+);
+}
+    }
+/**
+ * Pivot at TOP-LEFT corner.
+ * Quad extends in +uDir for width and in -vDir for height (downwards).
+ *
+ * @param width full width (positive)
+ * @param height full height (positive)
+ */
+private static void emitPivotTopLeftQuad(
+        VertexConsumer vc,
+        Matrix4f matrix,
+        Vec3d pivotTopLeft,
+        Vec3d uDirUnit,     // width direction (+u)
+        Vec3d vDownUnit,    // DOWN direction (+vDown)
+        Vec3d normalUnit,
+        float width,
+        float height,
+        boolean flipU,
+        boolean flipV,
+        int r, int g, int b, int a,
+        int light
+) {
+    Vec3d uFull = uDirUnit.multiply(width);
+    Vec3d vFull = vDownUnit.multiply(height);
+
+    Vec3d tl = pivotTopLeft;
+    Vec3d tr = pivotTopLeft.add(uFull);
+    Vec3d bl = pivotTopLeft.add(vFull);
+    Vec3d br = pivotTopLeft.add(uFull).add(vFull);
+
+    float nx = SHADE_NX, ny = SHADE_NY, nz = SHADE_NZ;
+
+    float uLeft  = flipU ? 1f : 0f;
+    float uRight = flipU ? 0f : 1f;
+
+    float vTop    = flipV ? 1f : 0f;
+    float vBottom = flipV ? 0f : 1f;
+
+    putVertex(vc, matrix, bl, uLeft,  vBottom, r, g, b, a, light, nx, ny, nz);
+    putVertex(vc, matrix, br, uRight, vBottom, r, g, b, a, light, nx, ny, nz);
+    putVertex(vc, matrix, tr, uRight, vTop,    r, g, b, a, light, nx, ny, nz);
+    putVertex(vc, matrix, tl, uLeft,  vTop,    r, g, b, a, light, nx, ny, nz);
+}
+    // Add this NEW helper next to your other geometry emitters:
+
+/**
+ * Like emitPivotLeftQuad, but allows custom U range (u0..u1) so you can render texture halves.
+ * AnchorX=0 (hinge edge), AnchorY=0.5 (middle), so pivot is the edge midpoint.
+ *
+ * @param width full width (positive) extending in +uDirUnit from the hinge edge
+ * @param halfH half height (can be negative to mirror like RW scale)
+ * @param u0 left U in texture space
+ * @param u1 right U in texture space
+ */
+private static void emitPivotLeftQuadUV(
+        VertexConsumer vc,
+        Matrix4f matrix,
+        Vec3d pivotLeftMid,
+        Vec3d uDirUnit,
+        Vec3d vDirUnit,
+        Vec3d normalUnit,
+        float width,
+        float halfH,
+        float u0,
+        float u1,
+        boolean flipV,
+        int r, int g, int b, int a,
+        int light
+) {
+    Vec3d uFull = uDirUnit.multiply(width);
+    Vec3d v = vDirUnit.multiply(halfH);
+
+    Vec3d bl = pivotLeftMid.subtract(v);
+    Vec3d br = pivotLeftMid.add(uFull).subtract(v);
+    Vec3d tr = pivotLeftMid.add(uFull).add(v);
+    Vec3d tl = pivotLeftMid.add(v);
+
+    // Force identical shading across planes
+    float nx = SHADE_NX, ny = SHADE_NY, nz = SHADE_NZ;
+
+    float vBottom = flipV ? 0f : 1f;
+    float vTop    = flipV ? 1f : 0f;
+
+    putVertex(vc, matrix, bl, u0, vBottom, r, g, b, a, light, nx, ny, nz);
+    putVertex(vc, matrix, br, u1, vBottom, r, g, b, a, light, nx, ny, nz);
+    putVertex(vc, matrix, tr, u1, vTop,    r, g, b, a, light, nx, ny, nz);
+    putVertex(vc, matrix, tl, u0, vTop,    r, g, b, a, light, nx, ny, nz);
+}
+
+    // =========================================================
+    // Debug line emitter
+    // =========================================================
+    private static void emitDebugLine(VertexConsumer vc, Matrix4f matrix, Vec3d a, Vec3d b) {
+        float nx = 0f, ny = 1f, nz = 0f;
+
+        vc.vertex(matrix, (float) a.x, (float) a.y, (float) a.z)
+                .color(0, 0, 255, 255)
+                .normal(nx, ny, nz);
+
+        vc.vertex(matrix, (float) b.x, (float) b.y, (float) b.z)
+                .color(0, 0, 255, 255)
+                .normal(nx, ny, nz);
+    }
+
+    // =========================================================
+    // Geometry emitters
+    // =========================================================
+
+    private static void emitCenteredQuad(
+            VertexConsumer vc,
+            Matrix4f matrix,
+            Vec3d center,
+            Vec3d uDirUnit,
+            Vec3d vDirUnit,
+            Vec3d normalUnit,
+            float halfW,
+            float halfH,
+            int r, int g, int b, int a,
+            int light
+    ) {
+        emitCenteredQuadUV(vc, matrix, center, uDirUnit, vDirUnit, normalUnit,
+                halfW, halfH,
+                0f, 1f, 0f, 1f,
+                r, g, b, a, light);
     }
 
     /**
-     * Renders the outer glow layer of a swarmer (larger, more transparent).
-     * Uses RW's "sprite[4]" color curve for closer visual parity.
+     * Centered quad with custom UV bounds.
+     * u: [u0..u1], v: [v0..v1]
+     *
+     * Keep original “bl/br v=1, tr/tl v=0” convention.
      */
-    private static void renderSwarmerGlow(
-            BufferBuilder buffer,
+    private static void emitCenteredQuadUV(
+            VertexConsumer vc,
             Matrix4f matrix,
-            NeuronSwarmer swarmer,
-            Vec3d cameraPos,
-            float cameraYaw,
-            float cameraPitch,
-            float tickDelta) {
+            Vec3d center,
+            Vec3d uDirUnit,
+            Vec3d vDirUnit,
+            Vec3d normalUnit,
+            float halfW,
+            float halfH,
+            float u0, float u1,
+            float v0, float v1,
+            int r, int g, int b, int a,
+            int light
+    ) {
+        Vec3d u = uDirUnit.multiply(halfW);
+        Vec3d v = vDirUnit.multiply(halfH);
 
-        // Interpolate position
-        double x = MathHelper.lerp(tickDelta, swarmer.lastPosition.x, swarmer.position.x);
-        double y = MathHelper.lerp(tickDelta, swarmer.lastPosition.y, swarmer.position.y);
-        double z = MathHelper.lerp(tickDelta, swarmer.lastPosition.z, swarmer.position.z);
+        Vec3d bl = center.subtract(u).subtract(v);
+        Vec3d br = center.add(u).subtract(v);
+        Vec3d tr = center.add(u).add(v);
+        Vec3d tl = center.subtract(u).add(v);
 
-        // Interpolate rotation for visual effect
-        float rotation = MathHelper.lerp(tickDelta, swarmer.lastRotation, swarmer.rotation);
+        // Force identical shading across planes
+        float nx = SHADE_NX, ny = SHADE_NY, nz = SHADE_NZ;
 
-        // === Rain World accurate "sprite[4]" color ===
-        float[] rgb = calculateColorRW_Sprite4(swarmer.colorX, swarmer.colorY, DARK_MODE);
-        int r = (int) (rgb[0] * 255);
-        int g = (int) (rgb[1] * 255);
-        int b = (int) (rgb[2] * 255);
-        int a = (int) (0.3f * 255); // Lower alpha for glow
+        putVertex(vc, matrix, bl, u0, v1, r, g, b, a, light, nx, ny, nz);
+        putVertex(vc, matrix, br, u1, v1, r, g, b, a, light, nx, ny, nz);
+        putVertex(vc, matrix, tr, u1, v0, r, g, b, a, light, nx, ny, nz);
+        putVertex(vc, matrix, tl, u0, v0, r, g, b, a, light, nx, ny, nz);
+    }
 
-        // --- ORIENT TO DIRECTION OF TRAVEL (NO BILLBOARDING) ---
-        Vec3d forward = swarmer.direction;
-        if (forward.lengthSquared() < 1e-8) {
-            double yawRad = Math.toRadians(-cameraYaw);
-            forward = new Vec3d(Math.cos(yawRad), 0.0, Math.sin(yawRad));
+    private static void emitPivotLeftQuad(
+            VertexConsumer vc,
+            Matrix4f matrix,
+            Vec3d pivotLeftMid,
+            Vec3d uDirUnit,
+            Vec3d vDirUnit,
+            Vec3d normalUnit,
+            float width,
+            float halfH,
+            boolean flipV,
+            int r, int g, int b, int a,
+            int light
+    ) {
+        Vec3d uFull = uDirUnit.multiply(width);
+        Vec3d v = vDirUnit.multiply(halfH);
+
+        Vec3d bl = pivotLeftMid.subtract(v);
+        Vec3d br = pivotLeftMid.add(uFull).subtract(v);
+        Vec3d tr = pivotLeftMid.add(uFull).add(v);
+        Vec3d tl = pivotLeftMid.add(v);
+
+        float nx = SHADE_NX, ny = SHADE_NY, nz = SHADE_NZ;
+
+        float vBottom = flipV ? 0f : 1f;
+        float vTop    = flipV ? 1f : 0f;
+
+        putVertex(vc, matrix, bl, 0f, vBottom, r, g, b, a, light, nx, ny, nz);
+        putVertex(vc, matrix, br, 1f, vBottom, r, g, b, a, light, nx, ny, nz);
+        putVertex(vc, matrix, tr, 1f, vTop,    r, g, b, a, light, nx, ny, nz);
+        putVertex(vc, matrix, tl, 0f, vTop,    r, g, b, a, light, nx, ny, nz);
+    }
+
+    private static void putVertex(
+            VertexConsumer vc,
+            Matrix4f matrix,
+            Vec3d p,
+            float u,
+            float v,
+            int r,
+            int g,
+            int b,
+            int a,
+            int light,
+            float nx,
+            float ny,
+            float nz
+    ) {
+        vc.vertex(matrix, (float) p.x, (float) p.y, (float) p.z)
+                .color(r, g, b, a)
+                .texture(u, v)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
+    }
+
+    // =========================================================
+    // Math helpers
+    // =========================================================
+
+    private static Vec3d lerp(Vec3d a, Vec3d b, float t) {
+        return new Vec3d(
+                MathHelper.lerp(t, a.x, b.x),
+                MathHelper.lerp(t, a.y, b.y),
+                MathHelper.lerp(t, a.z, b.z)
+        );
+    }
+
+    private static Vec3d slerpUnitSafe(Vec3d a, Vec3d b, float t) {
+        if (a == null || b == null) return (a != null) ? a : (b != null ? b : Vec3d.ZERO);
+
+        double la = a.length();
+        double lb = b.length();
+        if (la < 1e-10 || lb < 1e-10) return (la > lb) ? a : b;
+
+        Vec3d v0 = a.multiply(1.0 / la);
+        Vec3d v1 = b.multiply(1.0 / lb);
+
+        double dot = MathHelper.clamp(v0.dotProduct(v1), -1.0, 1.0);
+
+        if (dot > 0.9995) {
+            Vec3d v = lerp(v0, v1, t);
+            double lv = v.length();
+            return (lv > 1e-10) ? v.multiply(1.0 / lv) : v0;
         }
-        forward = forward.normalize();
 
-        Vec3d refUp = new Vec3d(0.0, 1.0, 0.0);
-        if (Math.abs(forward.dotProduct(refUp)) > 0.95) {
-            refUp = new Vec3d(1.0, 0.0, 0.0);
+        if (dot < -0.9995) {
+            Vec3d ortho = Math.abs(v0.x) < 0.9 ? new Vec3d(1, 0, 0) : new Vec3d(0, 1, 0);
+            Vec3d axis = v0.crossProduct(ortho);
+            if (axis.lengthSquared() < 1e-10) axis = v0.crossProduct(new Vec3d(0, 0, 1));
+            axis = axis.normalize();
+            return rotateAroundAxis(v0, axis, Math.PI * t).normalize();
         }
 
-        Vec3d side = forward.crossProduct(refUp).normalize();
+        double omega = Math.acos(dot);
+        double sinOmega = Math.sin(omega);
 
-        // Larger size for glow
-        float size = SPRITE_SIZE * GLOW_SCALE;
+        double s0 = Math.sin((1.0 - t) * omega) / sinOmega;
+        double s1 = Math.sin(t * omega) / sinOmega;
 
-        // Pulsing effect
-        float pulse = 1.0f + 0.2f * (float) Math.sin(rotation * Math.PI * 2);
-        size *= pulse;
+        return v0.multiply(s0).add(v1.multiply(s1));
+    }
 
-        double[] angles = new double[]{0.0, Math.PI / 2.0};
+    private static Vec3d projectIntoPlane(Vec3d v, Vec3d planeNormalUnit) {
+        return v.subtract(planeNormalUnit.multiply(v.dotProduct(planeNormalUnit)));
+    }
 
-        for (double ang : angles) {
-            Vec3d sideRot = rotateAroundAxis(side, forward, ang).normalize();
+    private static float lerpMapPow(float v, float inMin, float inMax, float outMin, float outMax, float pow) {
+        float t = inverseLerp(inMin, inMax, v);
+        t = MathHelper.clamp(t, 0f, 1f);
+        if (pow != 1f) t = (float) Math.pow(t, pow);
+        return MathHelper.lerp(t, outMin, outMax);
+    }
 
-            Vec3d uAxis = sideRot.multiply(size);
-            Vec3d vAxis = forward.multiply(size);
+    private static float inverseLerp(float a, float b, float v) {
+        if (Math.abs(b - a) < 1e-8f) return 0f;
+        return (v - a) / (b - a);
+    }
 
-            float ux = (float) uAxis.x;
-            float uy = (float) uAxis.y;
-            float uz = (float) uAxis.z;
+    private static float computePxToWorld(FAtlasElement bodyElem, float targetMaxDimBlocks) {
+        float pxW = bodyElem.sourcePixelSize.x;
+        float pxH = bodyElem.sourcePixelSize.y;
+        float maxPx = Math.max(pxW, pxH);
+        if (maxPx < 1e-5f) return 0.01f;
+        return targetMaxDimBlocks / maxPx;
+    }
 
-            float vx = (float) vAxis.x;
-            float vy = (float) vAxis.y;
-            float vz = (float) vAxis.z;
+    private static Vec3d rotateAroundAxis(Vec3d v, Vec3d axisUnit, double angleRad) {
+        double cos = Math.cos(angleRad);
+        double sin = Math.sin(angleRad);
 
-            buffer.vertex(matrix, (float) (x - ux - vx), (float) (y - uy - vy), (float) (z - uz - vz))
-                    .texture(0, 1)
-                    .color(r, g, b, a);
+        Vec3d term1 = v.multiply(cos);
+        Vec3d term2 = axisUnit.crossProduct(v).multiply(sin);
+        Vec3d term3 = axisUnit.multiply(axisUnit.dotProduct(v) * (1.0 - cos));
 
-            buffer.vertex(matrix, (float) (x + ux - vx), (float) (y + uy - vy), (float) (z + uz - vz))
-                    .texture(1, 1)
-                    .color(r, g, b, a);
-
-            buffer.vertex(matrix, (float) (x + ux + vx), (float) (y + uy + vy), (float) (z + uz + vz))
-                    .texture(1, 0)
-                    .color(r, g, b, a);
-
-            buffer.vertex(matrix, (float) (x - ux + vx), (float) (y - uy + vy), (float) (z - uz + vz))
-                    .texture(0, 0)
-                    .color(r, g, b, a);
-        }
+        return term1.add(term2).add(term3);
     }
 
     // ======================================================================
@@ -309,7 +647,7 @@ public class NeuronSwarmerRenderer {
             l = 0.5f + 0.5f * colorY;
         } else {
             h = rwHueDark(colorX);
-            l = lerp(0.1f, 0.5f, colorY);
+            l = lerpF(0.1f, 0.5f, colorY);
         }
         return hslToRgb(h, s, l);
     }
@@ -328,21 +666,19 @@ public class NeuronSwarmerRenderer {
             h = rwHueNormal(colorX);
             s = 1.0f - colorY;
 
-            float a = 0.8f + 0.2f * inverseLerp(0.4f, 0.1f, colorX);
+            float a = 0.8f + 0.2f * inverseLerpClamped(0.4f, 0.1f, colorX);
             float t = colorY * colorY;
-            l = lerp(a, 0.35f, t);
+            l = lerpF(a, 0.35f, t);
         } else {
             h = rwHueDark(colorX);
             s = 1.0f;
-            l = lerp(0.75f, 0.9f, colorY);
+            l = lerpF(0.75f, 0.9f, colorY);
         }
 
         return hslToRgb(h, s, l);
     }
 
     private static float rwHueNormal(float colorX) {
-        // (color.x < 0.5) ? LerpMap(x,0..0.5, 4/9..2/3)
-        //                : LerpMap(x,0.5..1, 2/3..0.99722224)
         if (colorX < 0.5f) {
             return lerpMap(colorX, 0.0f, 0.5f, 4f / 9f, 2f / 3f);
         }
@@ -350,19 +686,14 @@ public class NeuronSwarmerRenderer {
     }
 
     private static float rwHueDark(float colorX) {
-        // (color.x <= 0.5) ? (2/3) : LerpMap(x,0.5..1, 2/3..0.99722224)
         if (colorX <= 0.5f) return 2f / 3f;
         return lerpMap(colorX, 0.5f, 1.0f, 2f / 3f, 0.99722224f);
     }
 
     // ======================================================================
-    // HSL utilities (same structure you had, just reused by RW mapping)
+    // HSL utilities
     // ======================================================================
 
-    /**
-     * Converts HSL to RGB.
-     * h, s, l are in [0..1].
-     */
     private static float[] hslToRgb(float h, float s, float l) {
         float r, g, b;
 
@@ -388,34 +719,18 @@ public class NeuronSwarmerRenderer {
         return p;
     }
 
-    // ======================================================================
-    // Math helpers
-    // ======================================================================
-
-    private static float lerp(float a, float b, float t) {
+    private static float lerpF(float a, float b, float t) {
         return a + (b - a) * t;
     }
 
-    private static float inverseLerp(float a, float b, float v) {
+    private static float inverseLerpClamped(float a, float b, float v) {
         if (Math.abs(b - a) < 1e-8f) return 0f;
         float t = (v - a) / (b - a);
         return MathHelper.clamp(t, 0f, 1f);
     }
 
     private static float lerpMap(float v, float inMin, float inMax, float outMin, float outMax) {
-        float t = inverseLerp(inMin, inMax, v);
-        return lerp(outMin, outMax, t);
-    }
-
-    private static Vec3d rotateAroundAxis(Vec3d v, Vec3d axisUnit, double angleRad) {
-        // Rodrigues' rotation formula; axisUnit must be normalized
-        double cos = Math.cos(angleRad);
-        double sin = Math.sin(angleRad);
-
-        Vec3d term1 = v.multiply(cos);
-        Vec3d term2 = axisUnit.crossProduct(v).multiply(sin);
-        Vec3d term3 = axisUnit.multiply(axisUnit.dotProduct(v) * (1.0 - cos));
-
-        return term1.add(term2).add(term3);
+        float t = inverseLerpClamped(inMin, inMax, v);
+        return lerpF(outMin, outMax, t);
     }
 }

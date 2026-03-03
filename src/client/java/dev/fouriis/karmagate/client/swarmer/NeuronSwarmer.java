@@ -207,7 +207,7 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
         this.torque = currentBehavior.torque;
         this.revolveSpeed = currentBehavior.revolveSpeed;
 
-        this.rotation = 0.25f;
+        this.rotation = RANDOM.nextFloat();
         this.lastRotation = rotation;
     }
 
