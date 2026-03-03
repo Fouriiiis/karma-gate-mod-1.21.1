@@ -13,6 +13,7 @@ import dev.fouriis.karmagate.entity.client.CoralNeuronEntityRenderer;
 import dev.fouriis.karmagate.entity.client.WaterfallBlockRenderer;
 import dev.fouriis.karmagate.client.graffiti.GraffitiEntityRenderer;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugRenderer;
+import dev.fouriis.karmagate.entity.garbworm.GarbageWormRenderer;
 import dev.fouriis.karmagate.entity.centipede.CentipedeHeadRenderer;
 import dev.fouriis.karmagate.entity.centipede.CentipedeBodyRenderer;
 import dev.fouriis.karmagate.entity.centipede.RedCentipedeRenderer;
@@ -95,6 +96,9 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		// Register spider entity renderer
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.SPIDER_ENTITY_TYPE, SpiderEntityRenderer::new);
+
+		// Register garbage worm entity renderer
+		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.GARBAGE_WORM_ENTITY_TYPE, GarbageWormRenderer::new);
 
 		// Register Karma Gate item renderer with custom transforms
 		var gateItemRenderer = new KarmaGateItemGeoRenderer();

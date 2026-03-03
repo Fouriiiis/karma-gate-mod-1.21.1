@@ -9,6 +9,7 @@ import dev.fouriis.karmagate.entity.centipede.CentipedeBodyEntity;
 import dev.fouriis.karmagate.entity.centipede.CentipedeHeadEntity;
 import dev.fouriis.karmagate.entity.centipede.CentipedeSegmentEntity;
 import dev.fouriis.karmagate.entity.centipede.RedCentipedeEntity;
+import dev.fouriis.karmagate.entity.garbworm.GarbageWormEntity;
 import dev.fouriis.karmagate.entity.spider.SpiderEntity;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugEntity;
 import dev.fouriis.karmagate.item.ModItems;
@@ -106,6 +107,17 @@ public class KarmaGateMod implements ModInitializer {
                     .build()
     );
 
+    // --- Garbage Worm entity type ---
+    public static final EntityType<GarbageWormEntity> GARBAGE_WORM_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "garbage_worm"),
+            FabricEntityTypeBuilder.<GarbageWormEntity>create(SpawnGroup.CREATURE, (type, world) -> new GarbageWormEntity(type, world))
+                    .dimensions(EntityDimensions.fixed(0.35f, 0.35f))
+                    .trackRangeBlocks(96)
+                    .trackedUpdateRate(3)
+                    .build()
+    );
+
 
     @Override
     public void onInitialize() {
@@ -122,6 +134,7 @@ public class KarmaGateMod implements ModInitializer {
         FabricDefaultAttributeRegistry.register(CENTIPEDE_BODY_ENTITY_TYPE, CentipedeSegmentEntity.createSegmentAttributes());
         FabricDefaultAttributeRegistry.register(RED_CENTIPEDE_ENTITY_TYPE, RedCentipedeEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(SPIDER_ENTITY_TYPE, SpiderEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(GARBAGE_WORM_ENTITY_TYPE, GarbageWormEntity.createAttributes());
 
         // Register networking
         ModNetworking.register();
