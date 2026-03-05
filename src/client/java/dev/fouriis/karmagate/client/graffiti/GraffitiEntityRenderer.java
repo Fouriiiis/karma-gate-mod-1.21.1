@@ -45,6 +45,12 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
 
     private Identifier getEntityTexture(GraffitiEntity entity) {
         String texturePath = entity.getTexturePath();
+        if (texturePath.endsWith(".mp4")) {
+            // Always returns a valid GL identifier — broken videos get a 1×1
+            // black placeholder, never the raw .mp4 path which Minecraft would
+            // try to parse as a PNG and throw "Bad PNG Signature".
+            return VideoTextureManager.getOrCreate(texturePath);
+        }
         return Identifier.of(KarmaGateMod.MOD_ID, "textures/graffiti/" + texturePath);
     }
 

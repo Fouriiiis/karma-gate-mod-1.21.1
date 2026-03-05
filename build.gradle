@@ -11,6 +11,8 @@ base {
 }
 
 repositories {
+	mavenCentral()
+
 	maven {
 		name = 'GeckoLib'
 		url = 'https://dl.cloudsmith.io/public/geckolib3/geckolib/maven/'
@@ -57,6 +59,10 @@ dependencies {
 	modImplementation "software.bernie.geckolib:geckolib-fabric-${minecraft_version}:${geckolib_version}"
 
 	modImplementation "maven.modrinth:librainworldmc:1.0.3"
+
+	// jcodec: pure-Java MP4/H.264 decoder for graffiti video playback (no native libs required)
+	include implementation('org.jcodec:jcodec:0.2.5')
+	include implementation('org.jcodec:jcodec-javase:0.2.5')
 }
 
 processResources {

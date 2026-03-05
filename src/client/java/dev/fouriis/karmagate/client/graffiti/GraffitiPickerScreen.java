@@ -94,24 +94,35 @@ public class GraffitiPickerScreen extends Screen {
         Identifier baseId = Identifier.of(KarmaGateMod.MOD_ID, path);
         
         try {
-            // Get all resources matching the graffiti textures path
+            // PNG/image textures
             Map<Identifier, Resource> resources = client.getResourceManager().findResources(
                 "textures/graffiti",
                 id -> id.getPath().endsWith(".png") && id.getNamespace().equals(KarmaGateMod.MOD_ID)
             );
             
             for (Identifier resourceId : resources.keySet()) {
-                // Extract just the filename
                 String fullPath = resourceId.getPath();
                 String fileName = fullPath.substring(fullPath.lastIndexOf('/') + 1);
-                
-                // Create the texture identifier
                 Identifier textureId = Identifier.of(KarmaGateMod.MOD_ID, fullPath);
-                
-                textures.add(new GraffitiTexture(fileName, textureId));
+                textures.add(new GraffitiTexture(fileName, textureId, false));
+            }
+
+            // MP4 video files — list them so they can be placed as graffiti entities
+            Map<Identifier, Resource> videoResources = client.getResourceManager().findResources(
+                "textures/graffiti",
+                id -> id.getPath().endsWith(".mp4") && id.getNamespace().equals(KarmaGateMod.MOD_ID)
+            );
+
+            for (Identifier resourceId : videoResources.keySet()) {
+                String fullPath = resourceId.getPath();
+                String fileName = fullPath.substring(fullPath.lastIndexOf('/') + 1);
+                // Use the graffiti missing-texture placeholder so the UI renders cleanly.
+                // The actual video frame will appear on the placed entity.
+                textures.add(new GraffitiTexture(fileName, null, true));
             }
             
-            KarmaGateMod.LOGGER.info("Loaded {} graffiti textures", textures.size());
+            KarmaGateMod.LOGGER.info("Loaded {} graffiti textures ({} video)",
+                textures.size(), videoResources.size());
             
         } catch (Exception e) {
             KarmaGateMod.LOGGER.error("Failed to load graffiti textures", e);
@@ -158,8 +169,24 @@ public class GraffitiPickerScreen extends Screen {
             int bgColor = hovered ? 0xFF4080FF : 0xFF303030;
             context.fill(x - 2, y - 2, x + THUMBNAIL_SIZE + 2, y + THUMBNAIL_SIZE + 2, bgColor);
             
-            // Draw texture
-            context.drawTexture(tex.textureId(), x, y, 0, 0, THUMBNAIL_SIZE, THUMBNAIL_SIZE, THUMBNAIL_SIZE, THUMBNAIL_SIZE);
+            if (tex.isVideo()) {
+                // Video tile: dark background + play symbol + filename snippet
+                context.fill(x, y, x + THUMBNAIL_SIZE, y + THUMBNAIL_SIZE, 0xFF1A1A2E);
+                // Play-button triangle (drawn as filled rects approximation)
+                context.fill(x + 20, y + 14, x + 24, y + 50, 0xFF88CCFF);
+                context.fill(x + 24, y + 18, x + 28, y + 46, 0xFF88CCFF);
+                context.fill(x + 28, y + 22, x + 32, y + 42, 0xFF88CCFF);
+                context.fill(x + 32, y + 26, x + 36, y + 38, 0xFF88CCFF);
+                // "MP4" label
+                context.drawText(this.textRenderer, "MP4", x + 40, y + 28, 0xFFAADDFF, true);
+                // Short filename below the icon
+                String name = tex.fileName().replace(".mp4", "");
+                if (name.length() > 9) name = name.substring(0, 7) + "..";
+                context.drawText(this.textRenderer, name, x + 2, y + THUMBNAIL_SIZE - 12, 0xFFCCCCCC, true);
+            } else {
+                // Draw texture
+                context.drawTexture(tex.textureId(), x, y, 0, 0, THUMBNAIL_SIZE, THUMBNAIL_SIZE, THUMBNAIL_SIZE, THUMBNAIL_SIZE);
+            }
         }
         
         context.disableScissor();
@@ -246,7 +273,8 @@ public class GraffitiPickerScreen extends Screen {
     }
     
     /**
-     * Represents a graffiti texture entry.
+     * Represents a graffiti texture or video entry.
+     * {@code textureId} is null for video files (no preview available in the picker).
      */
-    private record GraffitiTexture(String fileName, Identifier textureId) {}
+    private record GraffitiTexture(String fileName, Identifier textureId, boolean isVideo) {}
 }

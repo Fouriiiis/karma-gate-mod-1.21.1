@@ -1,5 +1,7 @@
 package dev.fouriis.karmagate.entity.garbworm;
 
+import dev.fouriis.karmagate.entity.tentacle.RenderTentacle;
+import dev.fouriis.karmagate.entity.tentacle.RenderTentacleChunk;
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasManager;
@@ -16,17 +18,15 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Renderer for the Garbage Worm.
- *
- * Matches C# GarbageWormGraphics:
+ * Renderer for the Garbage Worm — faithful port of C# {@code GarbageWormGraphics}.
+ * <p>
+ * Uses a {@link RenderTentacle} for per-chunk physics, then in {@code render()}
+ * reproduces the C# {@code DrawSprites} logic:
  * <ul>
- *   <li>Body: dark tube from root to head with sinusoidal wave</li>
- *   <li>Head: "WormHead" sprite (dark, like palette.blackColor)</li>
- *   <li>Eyes: "WormEye" sprites (white, red when angry)</li>
+ *   <li>Body: dark {@code TriangleMesh} ribbon from root to head with sinusoidal wave</li>
+ *   <li>Head: {@code "WormHead"} sprite billboard (dark, palette.blackColor)</li>
+ *   <li>Eyes: {@code "WormEye"} sprites (white normally, red when angry)</li>
  * </ul>
- *
- * Tentacle segment positions are computed in the renderer (camera-facing ribbon).
- * Per-entity animation state (sinWave, swallowArray) is cached.
  */
 public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
 
@@ -36,50 +36,74 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
     private static FAtlasElement WORM_HEAD;
 
     // ── Rendering constants ───────────────────────────────────────────
-    /** Number of segments for the body ribbon. C#: ~15 chunks. */
-    private static final int NUM_SEGMENTS = 15;
+    // C#: tentacle = 400px * bodySize, tChunks = 15 * Lerp(bodySize,1,0.5)
+    private static final int NUM_CHUNKS = 15;
 
-    /**
-     * C#: stretchedRad = 2 * Lerp(bodySize,1,0.5).
-     * 2px / 20px = 0.10 blocks radius → total width 0.20 blocks at bodySize=1.
-     */
-    private static final float BASE_BODY_RADIUS_BLOCKS = 0.10f;
+    // C#: chunk radius = 2px * Lerp(bodySize,1,0.5) → 2/20 = 0.10 blocks
+    private static final float BASE_CHUNK_RADIUS = 0.10f;
 
-    /** C#: 11px sine amplitude / 20px = 0.55 blocks. */
-    private static final float SINE_AMPLITUDE_BLOCKS = 0.55f;
+    // C#: idealLength = 400px * bodySize → 400/20 = 20 blocks
+    private static final float BASE_IDEAL_LENGTH = 20.0f;
 
-    /** Head sprite world size (fits ~0.35 blocks). */
+    // C#: sine amplitude = 11px / 20 = 0.55 blocks
+    private static final float SINE_AMPLITUDE = 0.55f;
+
+    // C#: head sprite scale = Lerp(bodySize,1,0.5)
     private static final float HEAD_SIZE_BLOCKS = 0.35f;
 
-    /** Eye sprite world size. */
+    // C#: eye sprite world size
     private static final float EYE_SIZE_BLOCKS = 0.12f;
 
-    /** Eye forward offset from head centre (5px / 20). */
-    private static final float EYE_FORWARD_OFFSET = 0.25f;
+    // C#: eye offsets from head center (pixels / 20)
+    private static final float EYE_FORWARD_OFFSET = 0.25f; // 5px / 20
+    private static final float EYE_LATERAL_OFFSET = 0.15f;  // 3px / 20
 
-    /** Eye lateral offset from head centre (3px / 20). */
-    private static final float EYE_LATERAL_OFFSET = 0.15f;
-
-    // Body + head color: near-black (C#: palette.blackColor)
+    // Body + head colour (C#: palette.blackColor)
     private static final int BODY_R = 15, BODY_G = 15, BODY_B = 15, BODY_A = 255;
 
-    // Normal used for flat shading (same trick as NeuronSwarmerRenderer)
+    // Normal for flat shading
     private static final float NX = 0f, NY = 1f, NZ = 0f;
 
     // ── Per-entity client state ───────────────────────────────────────
     private final Map<Integer, WormAnimState> animStates = new HashMap<>();
 
     /**
-     * Animation state cached per worm entity ID.
+     * Client-side animation + physics state cached per worm entity ID.
+     * Matches C# GarbageWormGraphics fields + GarbageWorm tentacle instance.
      */
     private static class WormAnimState {
+        // ── C# GarbageWormGraphics fields ──
         float sinWave = 0f;
         float numberOfWavesOnBody = 1.8f;
         float sinSpeed = 1f / 60f;
         float lastExtended = 1f;
         float extended = 1f;
-        float[] swallowArray = new float[NUM_SEGMENTS];
+        float[] swallowArray;
+
+        // ── Tick tracking ──
         int lastAge = -1;
+
+        // ── Client-side tentacle (chunk positions) ──
+        RenderTentacle tentacle;
+        boolean initialized = false;
+
+        WormAnimState(float bodySize) {
+            // C#: Lerp(bodySize, 1, 0.5) = bodySize + 0.5*(1-bodySize)
+            float adjustedSize = MathHelper.lerp(0.5f, bodySize, 1f);
+            int chunkCount = Math.max(3, (int) (NUM_CHUNKS * adjustedSize));
+            float length = BASE_IDEAL_LENGTH * bodySize;
+            float radius = BASE_CHUNK_RADIUS * adjustedSize;
+            tentacle = new RenderTentacle(chunkCount, length, radius);
+            // C#: GarbageWorm constructor TentacleProps
+            tentacle.stretchAndSqueeze = 0.1f;
+            tentacle.stiff = false;
+            tentacle.massDeteriorationPerChunk = 0.5f;
+            tentacle.chunkVelocityCap = 0.5f; // 10px / 20
+            tentacle.goalAttractionSpeedTip = 0.07f; // C#: 1.4 / 20
+            tentacle.goalAttractionSpeed = 0f;
+            tentacle.limp = false;
+            swallowArray = new float[chunkCount];
+        }
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -89,12 +113,11 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
 
     @Override
     public Identifier getTexture(GarbageWormEntity entity) {
-        // Not used directly — we fetch atlas textures in render().
         return Identifier.ofVanilla("textures/misc/white.png");
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  render()
+    //  render()  — C#: GarbageWormGraphics.DrawSprites
     // ════════════════════════════════════════════════════════════════════
 
     @Override
@@ -118,6 +141,9 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
         float bodySize = entity.getBodySizeValue();
         if (bodySize < 0.01f) bodySize = 1f;
 
+        // Skip rendering when fully retracted
+        if (ext <= 0f) return;
+
         // Head pos with tick interpolation
         Vec3d headPos = new Vec3d(
                 MathHelper.lerp(tickDelta, entity.lastRenderX, entity.getX()),
@@ -125,149 +151,174 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
                 MathHelper.lerp(tickDelta, entity.lastRenderZ, entity.getZ())
         );
 
-        // Skip rendering when fully retracted.
-        if (ext <= 0f) return;
+        // ── Get / create animation state ──
+        final float bs = bodySize;
+        WormAnimState anim = animStates.computeIfAbsent(entity.getId(), k -> new WormAnimState(bs));
+        if (!anim.initialized) {
+            anim.tentacle.reset(rootPos);
+            anim.initialized = true;
+        }
 
-        // ── Update animation state ──
-        WormAnimState anim = animStates.computeIfAbsent(entity.getId(), k -> new WormAnimState());
+        // ── Tick animation & tentacle physics (once per entity age tick) ──
         if (anim.lastAge != entity.age) {
             anim.lastAge = entity.age;
             tickAnimState(anim, ext, stress, atkCtr);
+
+            // Update tentacle retraction
+            anim.tentacle.retractFac = 1f - ext;
+            anim.tentacle.limp = false;
+
+            // C#: goalAttractionSpeedTip varies with attack state
+            float headDist = (float) anim.tentacle.tip().pos.distanceTo(headPos);
+            if (atkCtr == 0) {
+                // C#: Lerp(0.15, 1.9, InverseLerp(40, 290, dist)) → /20
+                anim.tentacle.goalAttractionSpeedTip =
+                        MathHelper.lerp(inverseLerp(2f, 14.5f, headDist), 0.0075f, 0.095f);
+            } else if (atkCtr < 20) {
+                anim.tentacle.goalAttractionSpeedTip = 0.005f;
+            } else if (atkCtr < 40) {
+                anim.tentacle.goalAttractionSpeedTip = 2.0f;
+            } else {
+                anim.tentacle.goalAttractionSpeedTip = 0.0005f;
+            }
+
+            anim.tentacle.update(rootPos, headPos);
         }
 
         float interpExtended = MathHelper.lerp(tickDelta, anim.lastExtended, anim.extended);
 
-        // ── Camera position ──
+        // ── Camera ──
         Camera camera = this.dispatcher.camera;
         Vec3d cameraPos = camera.getPos();
 
-        // Push matrix, translate to world origin (entity renderer already offsets by entity pos)
+        // ── Matrix setup ──
+        // EntityRenderer places (0,0,0) at the entity's camera-relative pos.
+        // Undo that offset so we work in world-minus-camera coordinates.
         matrices.push();
-        // EntityRenderer adds entity-pos offset; remove it so we work in absolute world coords.
-        matrices.translate(
-                -MathHelper.lerp(tickDelta, entity.lastRenderX, entity.getX()),
-                -MathHelper.lerp(tickDelta, entity.lastRenderY, entity.getY()),
-                -MathHelper.lerp(tickDelta, entity.lastRenderZ, entity.getZ())
-        );
-        // Now translate from world origin to camera-relative (since the matrix already has camera offset)
-        // Actually, EntityRenderer's matrix already translates so that (0,0,0) = entity pos minus camera.
-        // Let's undo that and go to real-world minus camera.
-        // Simpler: revert to how NeuronSwarmerRenderer works.
-        // We'll emit vertices in world space and subtract camera ourselves.
-        // But the matrixStack already has view translation.
-        // The cleanest way: work in camera-relative space.
-        // headPos and rootPos are world-space. Subtract cameraPos for camera-relative.
-        matrices.pop();
-
-        // Re-push without entity offset — work in "absolute at render origin" space
-        matrices.push();
-        // EntityRenderer calls translate(lerpedX - cam.x, lerpedY - cam.y, lerpedZ - cam.z)
-        // then multiplies the model-view matrix. So (0,0,0) = entity pos in camera space.
-        // For absolute coords, we translate by -(entity cam-relative pos).
         Vec3d entityCamRel = new Vec3d(
                 MathHelper.lerp(tickDelta, entity.lastRenderX, entity.getX()) - cameraPos.x,
                 MathHelper.lerp(tickDelta, entity.lastRenderY, entity.getY()) - cameraPos.y,
                 MathHelper.lerp(tickDelta, entity.lastRenderZ, entity.getZ()) - cameraPos.z
         );
         matrices.translate(-entityCamRel.x, -entityCamRel.y, -entityCamRel.z);
-
         Matrix4f matrix = matrices.peek().getPositionMatrix();
 
-        // Make all positions camera-relative.
         Vec3d rootCR = rootPos.subtract(cameraPos);
         Vec3d headCR = headPos.subtract(cameraPos);
 
         // ── Render layers ──
-        VertexConsumer bodyVc = consumers.getBuffer(RenderLayer.getEntityTranslucent(WORM_HEAD.textureIdentifier));
-        VertexConsumer eyeVc  = consumers.getBuffer(RenderLayer.getEntityTranslucent(WORM_EYE.textureIdentifier));
-
-        // Use fullbright for the body (worms glow slightly in dark garbage pits)
+        VertexConsumer bodyVc = consumers.getBuffer(
+                RenderLayer.getEntityTranslucent(WORM_HEAD.textureIdentifier));
+        VertexConsumer eyeVc = consumers.getBuffer(
+                RenderLayer.getEntityTranslucent(WORM_EYE.textureIdentifier));
         int fullLight = LightmapTextureManager.MAX_LIGHT_COORDINATE;
 
         // ═══════════════════════════════════════════════════════════════
-        //  Compute segment positions  (C#: GarbageWormGraphics.DrawSprites)
+        //  Compute segment positions
+        //  C#: GarbageWormGraphics.DrawSprites body loop
         // ═══════════════════════════════════════════════════════════════
 
-        // Start position: root offset downward based on extension.
-        // C#: vector = bodyChunks[1].pos + (0f, -30f - 100f*(1-extended))
-        //              in MC blocks: ÷20 → (0, -1.5 - 5*(1-ext), 0)
+        int numChunks = anim.tentacle.chunkCount();
+
+        // C#: vector = bodyChunks[1].pos + (0, -30 - 100*(1-extended))
+        // → blocks: (0, -1.5 - 5*(1-ext))
         Vec3d startCR = rootCR.add(0, -1.5 - 5.0 * (1.0 - interpExtended), 0);
 
-        Vec3d[] segPositions = new Vec3d[NUM_SEGMENTS];
-        float bodyRadius = BASE_BODY_RADIUS_BLOCKS * MathHelper.lerp(bodySize, 1f, 0.5f);
+        Vec3d[] segPositions = new Vec3d[numChunks];
 
-        for (int i = 0; i < NUM_SEGMENTS; i++) {
-            float t = (float) i / (float) (NUM_SEGMENTS - 1); // 0 at root, 1 at head
+        for (int i = 0; i < numChunks; i++) {
+            RenderTentacleChunk chunk = anim.tentacle.getChunk(i);
 
-            // Base interpolation from start (below root) to head.
-            Vec3d basePos = lerpVec(startCR, headCR, t);
+            // C#: a = Lerp(tChunks[i].lastPos, tChunks[i].pos, timeStacker)
+            Vec3d a = lerpVec(chunk.lastPos, chunk.pos, tickDelta).subtract(cameraPos);
 
-            // C#: retraction blending — segments near root stay at root when not fully extended.
+            float t = (float) i / (float) (numChunks - 1);
+
+            // C#: retraction blend
             // num4 = pow(max(1 - t - extended, 0), 1.5)
             float retractFactor = (float) Math.pow(Math.max(1.0f - t - interpExtended, 0f), 1.5f);
             if (interpExtended < 0.2f) {
                 retractFactor = Math.min(1f, retractFactor + inverseLerp(0.2f, 0f, interpExtended));
             }
-            // Blend toward root position when retracting.
-            basePos = lerpVec(basePos, rootCR, retractFactor);
-            basePos = basePos.add(0, -5.0 * Math.pow(retractFactor, 0.5), 0);
+            // C#: a = Lerp(a, bodyChunks[1].pos, num4) + (0, -100*pow(num4,0.5))
+            a = lerpVec(a, rootCR, retractFactor);
+            a = a.add(0, -5.0 * Math.pow(retractFactor, 0.5), 0);
 
-            // C#: Sine wave perpendicular to body direction.
-            // Compute a stable "horizontal perpendicular" for the sine wave.
-            Vec3d bodyDir = headCR.subtract(startCR);
-            if (bodyDir.lengthSquared() < 1e-8) bodyDir = new Vec3d(0, 1, 0);
-            bodyDir = bodyDir.normalize();
-
-            // Perpendicular in world space (roughly horizontal).
-            Vec3d sinePerp = bodyDir.crossProduct(new Vec3d(0, 0, 1));
-            if (sinePerp.lengthSquared() < 1e-8) {
-                sinePerp = bodyDir.crossProduct(new Vec3d(1, 0, 0));
-            }
-            sinePerp = sinePerp.normalize();
-
-            // C#: sin((sinWave + t*numberOfWavesOnBody) * PI * 2)
+            // C#: sine wave perpendicular to body direction
             float interpSinWave = MathHelper.lerp(tickDelta,
                     anim.sinWave - anim.sinSpeed, anim.sinWave);
             float sineValue = (float) Math.sin(
-                    (interpSinWave + t * anim.numberOfWavesOnBody) * Math.PI * 2.0
-            );
+                    (interpSinWave + t * anim.numberOfWavesOnBody) * Math.PI * 2.0);
 
-            // C#: amplitude modulation: pow(max(0, sin(t*PI)), 0.75) * extended
-            float amplitudeEnvelope = (float) Math.pow(
-                    Math.max(0f, (float) Math.sin(t * Math.PI)), 0.75f
-            ) * interpExtended;
+            // C#: amplitude = 11 * pow(max(0, sin(t*PI)), 0.75) * extended
+            float envelope = (float) Math.pow(Math.max(0f,
+                    (float) Math.sin(t * Math.PI)), 0.75f) * interpExtended;
+            float amplitude = SINE_AMPLITUDE * bodySize * envelope;
 
-            float amplitude = SINE_AMPLITUDE_BLOCKS * bodySize * amplitudeEnvelope;
+            // Perpendicular direction (camera-facing)
+            Vec3d bodyDir = a.subtract(startCR);
+            if (bodyDir.lengthSquared() < 1e-8) bodyDir = new Vec3d(0, 1, 0);
+            bodyDir = bodyDir.normalize();
 
-            basePos = basePos.add(sinePerp.multiply(sineValue * amplitude));
+            Vec3d toCamera = a.multiply(-1);
+            if (toCamera.lengthSquared() < 1e-8) toCamera = new Vec3d(0, 0, 1);
 
-            segPositions[i] = basePos;
+            Vec3d sinePerp = bodyDir.crossProduct(toCamera.normalize());
+            if (sinePerp.lengthSquared() < 1e-8) {
+                sinePerp = bodyDir.crossProduct(new Vec3d(1, 0, 0));
+            }
+            if (sinePerp.lengthSquared() < 1e-8) {
+                sinePerp = bodyDir.crossProduct(new Vec3d(0, 0, 1));
+            }
+            sinePerp = sinePerp.normalize();
+
+            // C#: a += perp * num5 * 11 * pow(max(0,sin(t*PI)),0.75) * extended
+            a = a.add(sinePerp.multiply(sineValue * amplitude));
+
+            segPositions[i] = a;
+        }
+
+        // ── Pin endpoints at root and head, smoothly distribute correction ──
+        // The tentacle physics gives organic curvature, but endpoints may
+        // drift from rootCR / headCR. Blend the offset so segment 0 = rootCR,
+        // segment N-1 = headCR, and intermediate segments shift proportionally.
+        {
+            Vec3d baseOffset = rootCR.subtract(segPositions[0]);
+            Vec3d tipOffset  = headCR.subtract(segPositions[numChunks - 1]);
+            for (int i = 0; i < numChunks; i++) {
+                float blend = (float) i / (float) (numChunks - 1);
+                Vec3d offset = lerpVec(baseOffset, tipOffset, blend);
+                segPositions[i] = segPositions[i].add(offset);
+            }
         }
 
         // ═══════════════════════════════════════════════════════════════
-        //  Draw body mesh  (C#: TriangleMesh — dark tube)
+        //  Draw body mesh  (C#: TriangleMesh ribbon strip)
+        //  C# builds 4 vertices per segment:
+        //    v0 = prevPos - perp*(curWidth+prevWidth)/2 + dir*spacing
+        //    v1 = prevPos + perp*(curWidth+prevWidth)/2 + dir*spacing
+        //    v2 = curPos  - perp*curWidth - dir*spacing
+        //    v3 = curPos  + perp*curWidth - dir*spacing
         // ═══════════════════════════════════════════════════════════════
-        Vec3d prevSegPos = segPositions[0];
-        float prevWidth = bodyRadius;
 
-        for (int i = 1; i < NUM_SEGMENTS; i++) {
-            Vec3d curSegPos = segPositions[i];
-            float t = (float) i / (float) (NUM_SEGMENTS - 1);
+        Vec3d prevPos = segPositions[0];
+        float prevWidth = anim.tentacle.getChunk(0).stretchedRad();
 
-            // Current width (C#: stretchedRad + swallowArray[i]*5)
-            float swallowBonus = anim.swallowArray[i] * 0.25f; // 5px/20
-            float curWidth = bodyRadius + swallowBonus;
+        for (int i = 1; i < numChunks; i++) {
+            Vec3d curPos = segPositions[i];
 
-            // Camera-facing perpendicular for this ribbon section.
-            Vec3d segDir = curSegPos.subtract(prevSegPos);
+            // C#: num8 = stretchedRad + swallowArray[i]*5 → /20 = swallow*0.25
+            float swallowBonus = (i < anim.swallowArray.length)
+                    ? anim.swallowArray[i] * 0.25f : 0f;
+            float curWidth = anim.tentacle.getChunk(i).stretchedRad() + swallowBonus;
+
+            // Direction and camera-facing perpendicular
+            Vec3d segDir = curPos.subtract(prevPos);
             if (segDir.lengthSquared() < 1e-10) segDir = new Vec3d(0, 1, 0);
             segDir = segDir.normalize();
 
-            Vec3d toCamera = cameraPos.subtract(cameraPos).add(curSegPos.multiply(-1)).multiply(-1);
-            // toCamera = viewer direction toward this point (in cam-relative, it's just -curSegPos direction).
-            toCamera = curSegPos.multiply(-1);
+            Vec3d toCamera = curPos.multiply(-1);
             if (toCamera.lengthSquared() < 1e-8) toCamera = new Vec3d(0, 0, 1);
-
             Vec3d ribbonPerp = segDir.crossProduct(toCamera.normalize());
             if (ribbonPerp.lengthSquared() < 1e-8) {
                 ribbonPerp = segDir.crossProduct(new Vec3d(1, 0, 0));
@@ -277,29 +328,30 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
             }
             ribbonPerp = ribbonPerp.normalize();
 
-            // C#: MoveVertice vertices form a strip quad.
-            float avgWidth = (curWidth + prevWidth) * 0.5f;
-            Vec3d bl = prevSegPos.subtract(ribbonPerp.multiply(avgWidth));
-            Vec3d br = prevSegPos.add(ribbonPerp.multiply(avgWidth));
-            Vec3d tr = curSegPos.add(ribbonPerp.multiply(curWidth));
-            Vec3d tl = curSegPos.subtract(ribbonPerp.multiply(curWidth));
+            // Build quad vertices (C# MoveVertice pattern)
+            // No spacing inset — quads share edges in a continuous strip
+            float halfWidth0 = (curWidth + prevWidth) * 0.5f;
+            Vec3d bl = prevPos.subtract(ribbonPerp.multiply(halfWidth0));
+            Vec3d br = prevPos.add(ribbonPerp.multiply(halfWidth0));
+            Vec3d tr = curPos.add(ribbonPerp.multiply(curWidth));
+            Vec3d tl = curPos.subtract(ribbonPerp.multiply(curWidth));
 
-            // UV: map each segment to full texture (body is dark anyway).
             emitQuad(bodyVc, matrix, bl, br, tr, tl,
                     0f, 1f, 1f, 0f,
                     BODY_R, BODY_G, BODY_B, BODY_A, fullLight);
 
-            prevSegPos = curSegPos;
+            prevPos = curPos;
             prevWidth = curWidth;
         }
 
         // ═══════════════════════════════════════════════════════════════
-        //  Draw head sprite  (C#: sprites[2] "WormHead")
+        //  Draw head  (C#: sprites[2] "WormHead")
+        //  Head and eyes render at entity pos (headCR) so they match hitbox.
         // ═══════════════════════════════════════════════════════════════
-        Vec3d headSegPos = segPositions[NUM_SEGMENTS - 1];
+        Vec3d headSegPos = headCR;
         Vec3d headDir;
-        if (NUM_SEGMENTS >= 2) {
-            headDir = headSegPos.subtract(segPositions[NUM_SEGMENTS - 2]);
+        if (numChunks >= 2) {
+            headDir = headSegPos.subtract(segPositions[numChunks - 2]);
             if (headDir.lengthSquared() < 1e-10) headDir = new Vec3d(0, 1, 0);
             headDir = headDir.normalize();
         } else {
@@ -307,16 +359,19 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
         }
 
         {
-            // Camera-facing perpendicular for head billboard.
+            // Camera-facing perpendicular for billboard
             Vec3d camDir = headSegPos.multiply(-1).normalize();
             if (camDir.lengthSquared() < 1e-8) camDir = new Vec3d(0, 0, 1);
 
             Vec3d headRight = headDir.crossProduct(camDir);
-            if (headRight.lengthSquared() < 1e-8) headRight = headDir.crossProduct(new Vec3d(1, 0, 0));
-            if (headRight.lengthSquared() < 1e-8) headRight = headDir.crossProduct(new Vec3d(0, 0, 1));
+            if (headRight.lengthSquared() < 1e-8)
+                headRight = headDir.crossProduct(new Vec3d(1, 0, 0));
+            if (headRight.lengthSquared() < 1e-8)
+                headRight = headDir.crossProduct(new Vec3d(0, 0, 1));
             headRight = headRight.normalize();
 
-            float headScale = HEAD_SIZE_BLOCKS * MathHelper.lerp(bodySize, 1f, 0.5f);
+            // C#: sprites[2].scale = Lerp(bodySize, 1, 0.5)
+            float headScale = HEAD_SIZE_BLOCKS * MathHelper.lerp(0.5f, bodySize, 1f);
             float halfW = headScale * 0.5f;
             float halfH = headScale * 0.5f;
 
@@ -332,44 +387,50 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
 
         // ═══════════════════════════════════════════════════════════════
         //  Draw eyes  (C#: sprites[0] & sprites[3] "WormEye")
-        //  Color: white normally, red when angry.
+        //  C#: white normally, red when angry
         // ═══════════════════════════════════════════════════════════════
         {
-            int eyeR = angry ? 255 : 255;
-            int eyeG = angry ?   0 : 255;
-            int eyeB = angry ?   0 : 255;
+            int eyeR = 255;
+            int eyeG = angry ? 0 : 255;
+            int eyeB = angry ? 0 : 255;
             int eyeA = 255;
 
-            // Direction-dependent eye placement (C# logic).
             Vec3d camDir = headSegPos.multiply(-1).normalize();
             if (camDir.lengthSquared() < 1e-8) camDir = new Vec3d(0, 0, 1);
 
             Vec3d headRight = headDir.crossProduct(camDir);
-            if (headRight.lengthSquared() < 1e-8) headRight = headDir.crossProduct(new Vec3d(1, 0, 0));
-            if (headRight.lengthSquared() < 1e-8) headRight = headDir.crossProduct(new Vec3d(0, 0, 1));
+            if (headRight.lengthSquared() < 1e-8)
+                headRight = headDir.crossProduct(new Vec3d(1, 0, 0));
+            if (headRight.lengthSquared() < 1e-8)
+                headRight = headDir.crossProduct(new Vec3d(0, 0, 1));
             headRight = headRight.normalize();
 
+            // C#: eye depth ordering
+            // f = cos(aimAngle / 360 * 2 * PI), pow(abs(f), 0.25) * sign(f)
+            // In 3D: approximate using dot product of headRight with camDir
+            float facingDot = (float) headRight.dotProduct(camDir);
+            float f = (float) (Math.pow(Math.abs(facingDot), 0.25f) * Math.signum(facingDot));
+
             float fwdOff = EYE_FORWARD_OFFSET * bodySize;
-            float latOff = EYE_LATERAL_OFFSET * MathHelper.lerp(bodySize, 1f, 0.75f);
+            float latOff = EYE_LATERAL_OFFSET * MathHelper.lerp(0.75f, bodySize, 1f);
             float eyeHalf = EYE_SIZE_BLOCKS * 0.5f;
 
-            // Left eye
+            // Left eye  (+ headRight * lateral * f)
             Vec3d eyeL = headSegPos
                     .add(headDir.multiply(fwdOff))
-                    .add(headRight.multiply(latOff));
+                    .add(headRight.multiply(latOff * f));
             emitBillboardQuad(eyeVc, matrix, eyeL, headRight, headDir, eyeHalf,
                     eyeR, eyeG, eyeB, eyeA, fullLight);
 
-            // Right eye
-            Vec3d eyeR2 = headSegPos
+            // Right eye (- headRight * lateral * f)
+            Vec3d eyeRpos = headSegPos
                     .add(headDir.multiply(fwdOff))
-                    .subtract(headRight.multiply(latOff));
-            emitBillboardQuad(eyeVc, matrix, eyeR2, headRight, headDir, eyeHalf,
+                    .subtract(headRight.multiply(latOff * f));
+            emitBillboardQuad(eyeVc, matrix, eyeRpos, headRight, headDir, eyeHalf,
                     eyeR, eyeG, eyeB, eyeA, fullLight);
         }
 
         matrices.pop();
-
         super.render(entity, yaw, tickDelta, matrices, consumers, light);
     }
 
@@ -381,31 +442,37 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
         anim.lastExtended = anim.extended;
         anim.extended = ext;
 
-        // C#: numberOfWavesOnBody & sinSpeed adjust based on stress and attack state.
+        // C#: numberOfWavesOnBody & sinSpeed adjust based on stress and attack state
         if (atkCtr < 20) {
+            // C#: Lerp(numberOfWavesOnBody, Lerp(1.8, 3.4, stress), 0.1)
             anim.numberOfWavesOnBody = MathHelper.lerp(0.1f, anim.numberOfWavesOnBody,
                     MathHelper.lerp(stress, 1.8f, 3.4f));
+            // C#: Lerp(sinSpeed, Lerp(1/60, 0.05, stress), 0.05)
             anim.sinSpeed = MathHelper.lerp(0.05f, anim.sinSpeed,
                     MathHelper.lerp(stress, 1f / 60f, 0.05f));
         } else {
+            // C#: Lerp(numberOfWavesOnBody, 5, 0.01)
             anim.numberOfWavesOnBody = MathHelper.lerp(0.01f, anim.numberOfWavesOnBody, 5f);
+            // C#: Lerp(sinSpeed, 0.05, 0.1)
             anim.sinSpeed = MathHelper.lerp(0.1f, anim.sinSpeed, 0.05f);
         }
 
         anim.sinWave += anim.sinSpeed;
         if (anim.sinWave > 1f) anim.sinWave -= 1f;
 
-        // Swallow bulge propagation during attack.
-        if (atkCtr > 40 && atkCtr < 150 && Math.random() < 1.0 / 30.0) {
+        // C#: swallow bulge propagation during attack (atkCtr 40..190)
+        if (atkCtr > 40 && atkCtr < 190 && Math.random() < 1.0 / 30.0) {
             anim.swallowArray[anim.swallowArray.length - 1] =
                     (float) Math.pow(Math.random(), 0.5);
         }
+        // C#: propagate bulge down the body
         if (Math.random() < 1.0 / 3.0) {
             for (int i = 0; i < anim.swallowArray.length - 1; i++) {
                 anim.swallowArray[i] = MathHelper.lerp(0.7f, anim.swallowArray[i],
                         anim.swallowArray[i + 1]);
             }
         }
+        // C#: Lerp(swallowArray[last], 0, 0.7)
         anim.swallowArray[anim.swallowArray.length - 1] =
                 MathHelper.lerp(0.7f, anim.swallowArray[anim.swallowArray.length - 1], 0f);
     }
@@ -470,7 +537,6 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
 
     private static float inverseLerp(float a, float b, float v) {
         if (Math.abs(b - a) < 1e-8f) return 0f;
-        float t = (v - a) / (b - a);
-        return MathHelper.clamp(t, 0f, 1f);
+        return MathHelper.clamp((v - a) / (b - a), 0f, 1f);
     }
 }
