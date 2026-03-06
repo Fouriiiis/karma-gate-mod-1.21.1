@@ -635,58 +635,70 @@ public final class WormGrassWorldRenderer {
         matrices.pop();
 
         if(!framePendingEyes.isEmpty()) {
-            matrices.push();
-            matrices.translate(-camX, -camY, -camZ);
-            Matrix4f eyePosMat = matrices.peek().getPositionMatrix();
-            VertexConsumer evc = consumers.getBuffer(RenderLayer.getEntityCutoutNoCull(wormgrass_eye.textureIdentifier));
+    matrices.push();
+    matrices.translate(-camX, -camY, -camZ);
+    Matrix4f eyePosMat = matrices.peek().getPositionMatrix();
+    VertexConsumer evc = consumers.getBuffer(RenderLayer.getEntityCutoutNoCull(wormgrass_eye.textureIdentifier));
 
-            for(PendingEye eye : framePendingEyes) {
-                float openAmount = MathHelper.clamp(eye.eyeOpen, 0f, 1f);
-                float eyeSize = eye.tipW * MathHelper.lerp(openAmount, 0.0f, 0.70f);
+    for(PendingEye eye : framePendingEyes) {
+        float openAmount = MathHelper.clamp(eye.eyeOpen, 0f, 1f);
+        float eyeSize = eye.tipW * MathHelper.lerp(openAmount, 0.0f, 0.70f);
 
-                float backsetAlongTangent = eye.tipW * 0.08f;
-                float eyeCenterX = eye.x - eye.tipDirX * backsetAlongTangent;
-                float eyeCenterY = eye.y - eye.tipDirY * backsetAlongTangent;
-                float eyeCenterZ = eye.z - eye.tipDirZ * backsetAlongTangent;
+        float backsetAlongTangent = eye.tipW * 0.08f;
+        float eyeCenterX = eye.x - eye.tipDirX * backsetAlongTangent;
+        float eyeCenterY = eye.y - eye.tipDirY * backsetAlongTangent;
+        float eyeCenterZ = eye.z - eye.tipDirZ * backsetAlongTangent;
 
-                float lateralSide = (randSigned(eye.strandHash) >= 0f) ? 1f : -1f;
-                eyeCenterX += eye.perpAx * (eye.tipW * 0.15f) * lateralSide;
-                eyeCenterY += eye.perpAy * (eye.tipW * 0.15f) * lateralSide;
-                eyeCenterZ += eye.perpAz * (eye.tipW * 0.15f) * lateralSide;
+        float lateralSide = (randSigned(eye.strandHash) >= 0f) ? 1f : -1f;
+        eyeCenterX += eye.perpAx * (eye.tipW * 0.15f) * lateralSide;
+        eyeCenterY += eye.perpAy * (eye.tipW * 0.15f) * lateralSide;
+        eyeCenterZ += eye.perpAz * (eye.tipW * 0.15f) * lateralSide;
 
-                float toCamX = (float)(camX - eyeCenterX);
-                float toCamY = (float)(camY - eyeCenterY);
-                float toCamZ = (float)(camZ - eyeCenterZ);
-                float toCamLen = (float) Math.sqrt(toCamX * toCamX + toCamY * toCamY + toCamZ * toCamZ);
-                if (toCamLen > 0.0001f) { toCamX /= toCamLen; toCamY /= toCamLen; toCamZ /= toCamLen; }
+        float toCamX = (float)(camX - eyeCenterX);
+        float toCamY = (float)(camY - eyeCenterY);
+        float toCamZ = (float)(camZ - eyeCenterZ);
+        float toCamLen = (float) Math.sqrt(toCamX * toCamX + toCamY * toCamY + toCamZ * toCamZ);
+        if (toCamLen > 0.0001f) { toCamX /= toCamLen; toCamY /= toCamLen; toCamZ /= toCamLen; }
 
-                float tubeRadius = eye.strandWidth * 0.5f - 0.005f;
-                eyeCenterX += toCamX * tubeRadius;
-                eyeCenterY += toCamY * tubeRadius;
-                eyeCenterZ += toCamZ * tubeRadius;
+        float tubeRadius = eye.strandWidth * 0.5f - 0.005f;
+        eyeCenterX += toCamX * tubeRadius;
+        eyeCenterY += toCamY * tubeRadius;
+        eyeCenterZ += toCamZ * tubeRadius;
 
-                float verticalDelta = (float)(camY - eye.y);
-                eyeCenterY += verticalDelta * 0.005f;
+        float verticalDelta = (float)(camY - eye.y);
+        eyeCenterY += verticalDelta * 0.005f;
 
-                float eyeColorR = 0.20f, eyeColorG = 0.00f, eyeColorB = 1.00f, eyeColorA = 1.0f;
+        float eyeColorR = 0.20f, eyeColorG = 0.00f, eyeColorB = 1.00f, eyeColorA = 1.0f;
 
-                float halfWidth  = eyeSize * 0.5f;
-                float halfHeight = eyeSize * 0.5f;
+        float halfWidth  = eyeSize * 0.5f;
+        float halfHeight = eyeSize * 0.5f;
 
-                float qRightX = billboardRight.x, qRightY = billboardRight.y, qRightZ = billboardRight.z;
-                float qUpX    = billboardUp.x,    qUpY    = billboardUp.y,    qUpZ    = billboardUp.z;
-                float qNormX  = billboardTowardCam.x, qNormY = billboardTowardCam.y, qNormZ = billboardTowardCam.z;
+        float qRightX = billboardRight.x, qRightY = billboardRight.y, qRightZ = billboardRight.z;
+        float qUpX    = billboardUp.x,    qUpY    = billboardUp.y,    qUpZ    = billboardUp.z;
+        float qNormX  = billboardTowardCam.x, qNormY = billboardTowardCam.y, qNormZ = billboardTowardCam.z;
 
-                emitEyeQuad(evc, eyePosMat,
-                        eyeCenterX, eyeCenterY, eyeCenterZ,
-                        halfWidth, halfHeight,
-                        qRightX, qRightY, qRightZ,
-                        qUpX, qUpY, qUpZ,
-                        qNormX, qNormY, qNormZ,
-                        eyeColorR, eyeColorG, eyeColorB, eyeColorA, eye.light);
-            }
-            matrices.pop();
-        }
+        float eyeAngle = rand01(eye.strandHash * 73428767L + 0x9E3779B97F4A7C15L) * (float)(Math.PI * 2.0);
+        float cos = MathHelper.cos(eyeAngle);
+        float sin = MathHelper.sin(eyeAngle);
+
+        float rX = qRightX * cos + qUpX * sin;
+        float rY = qRightY * cos + qUpY * sin;
+        float rZ = qRightZ * cos + qUpZ * sin;
+
+        float uX = qUpX * cos - qRightX * sin;
+        float uY = qUpY * cos - qRightY * sin;
+        float uZ = qUpZ * cos - qRightZ * sin;
+
+        emitEyeQuad(evc, eyePosMat,
+                eyeCenterX, eyeCenterY, eyeCenterZ,
+                halfWidth, halfHeight,
+                rX, rY, rZ,
+                uX, uY, uZ,
+                qNormX, qNormY, qNormZ,
+                eyeColorR, eyeColorG, eyeColorB, eyeColorA, eye.light);
+    }
+    matrices.pop();
+}
     }
 
     private static void emitEyeQuad(

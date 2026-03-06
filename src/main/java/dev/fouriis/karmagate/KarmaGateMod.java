@@ -18,6 +18,7 @@ import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.ModSounds;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
 import net.minecraft.entity.EntityDimensions;
@@ -144,6 +145,10 @@ public class KarmaGateMod implements ModInitializer {
             ProjectionZoneCommands.register(dispatcher);
             CoralNeuronCommands.register(dispatcher);
         });
+
+        // Wormgrass server-side grab / bury tick
+        ServerTickEvents.END_WORLD_TICK.register(world ->
+                dev.fouriis.karmagate.block.WormGrassManager.tick(world));
 
         
 

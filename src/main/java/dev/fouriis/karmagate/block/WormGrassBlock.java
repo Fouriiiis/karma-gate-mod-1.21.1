@@ -9,12 +9,16 @@ import net.minecraft.util.shape.VoxelShapes;
 import net.minecraft.world.BlockView;
 import net.minecraft.block.ShapeContext;
 import net.minecraft.world.World;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.PlayerEntity;
 
 /**
  * Invisible gameplay anchor. All visuals are done by a custom world renderer.
+ * Grab / bury mechanics are handled server-side by {@link WormGrassManager}.
  */
 public final class WormGrassBlock extends Block {
+    // 1.5-block hitbox: extends 0.25 blocks outside the block on X/Z and is 1.5 blocks tall
+    private static final VoxelShape HITBOX = VoxelShapes.cuboid(-0.25D, 0.0D, -0.25D, 1.25D, 1.5D, 1.25D);
     public WormGrassBlock(Settings settings) {
         super(settings);
     }
@@ -26,12 +30,24 @@ public final class WormGrassBlock extends Block {
 
     @Override
     public VoxelShape getOutlineShape(BlockState state, BlockView view, BlockPos pos, ShapeContext ctx) {
+        //if holding wormgrass block item, show hitbox to make it easier to break/place, otherwise no outline
+        
+        if (ctx.isHolding(state.getBlock().asItem())) {
+            return HITBOX;
+        }
         return VoxelShapes.empty();
     }
 
     @Override
     public VoxelShape getCollisionShape(BlockState state, BlockView view, BlockPos pos, ShapeContext ctx) {
+        //no collide
         return VoxelShapes.empty();
+    }
+
+    @Override
+    public void onEntityCollision(BlockState state, World world, BlockPos pos, Entity entity) {
+        // Delegate all grab / pull / bury logic to the server-side manager.
+        WormGrassManager.onEntityTouch(world, pos, entity);
     }
 
     @Override
