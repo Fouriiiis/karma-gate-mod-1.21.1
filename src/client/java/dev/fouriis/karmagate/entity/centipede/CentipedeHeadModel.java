@@ -6,15 +6,15 @@ import software.bernie.geckolib.model.GeoModel;
 
 /**
  * GeckoLib model for the centipede head segment.
- * Uses the red_centipede_head.geo.json model and red_centipede.png texture.
+ * Uses the centipede_head.geo.json model and centipede.png texture.
  * No animations — orientation is driven by chain physics.
  */
 public class CentipedeHeadModel extends GeoModel<CentipedeHeadEntity> {
 
-    private static final Identifier MODEL = Identifier.of(KarmaGateMod.MOD_ID, "geo/red_centipede_head.geo.json");
-    private static final Identifier TEXTURE = Identifier.of(KarmaGateMod.MOD_ID, "textures/entity/red_centipede.png");
+    private static final Identifier MODEL = Identifier.of(KarmaGateMod.MOD_ID, "geo/centipede_head.geo.json");
+    private static final Identifier TEXTURE = Identifier.of(KarmaGateMod.MOD_ID, "textures/entity/centipede.png");
     // No animation file needed — we use an empty placeholder
-    private static final Identifier ANIMATION = Identifier.of(KarmaGateMod.MOD_ID, "animations/red_centipede.animation.json");
+    private static final Identifier ANIMATION = Identifier.of(KarmaGateMod.MOD_ID, "animations/centipede.animation.json");
 
     @Override
     public Identifier getModelResource(CentipedeHeadEntity animatable) {

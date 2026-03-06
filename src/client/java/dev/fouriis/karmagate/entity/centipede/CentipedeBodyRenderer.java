@@ -167,6 +167,6 @@ public class CentipedeBodyRenderer extends GeoEntityRenderer<CentipedeBodyEntity
 
     @Override
     public Identifier getTextureLocation(CentipedeBodyEntity entity) {
-        return Identifier.of("karma-gate-mod", "textures/entity/red_centipede.png");
+        return Identifier.of("karma-gate-mod", "textures/entity/centipede.png");
     }
 }

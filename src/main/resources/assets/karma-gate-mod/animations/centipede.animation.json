@@ -1,0 +1,21 @@
+{
+	"format_version": "1.8.0",
+	"animations": {
+		"idle": {
+			"loop": true,
+			"bones": {
+				"rightantenna": {
+					"rotation": {
+						"vector": [-15.84766, 19.58991, -40.25298]
+					}
+				},
+				"leftantenna": {
+					"rotation": {
+						"vector": [-15.84766, -19.58991, 40.25298]
+					}
+				}
+			}
+		}
+	},
+	"geckolib_format_version": 2
+}

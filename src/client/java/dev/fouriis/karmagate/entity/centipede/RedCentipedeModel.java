@@ -6,21 +6,22 @@ import software.bernie.geckolib.model.GeoModel;
 /**
  * GeoModel for the invisible RedCentipedeEntity controller.
  * Uses the head geometry as a placeholder (never actually rendered).
+ * Previously referenced red_centipede assets; now points at centipede geometry/texture.
  */
 public class RedCentipedeModel extends GeoModel<RedCentipedeEntity> {
 
     @Override
     public Identifier getModelResource(RedCentipedeEntity entity) {
-        return Identifier.of("karma-gate-mod", "geo/red_centipede_head.geo.json");
+        return Identifier.of("karma-gate-mod", "geo/centipede_head.geo.json");
     }
 
     @Override
     public Identifier getTextureResource(RedCentipedeEntity entity) {
-        return Identifier.of("karma-gate-mod", "textures/entity/red_centipede.png");
+        return Identifier.of("karma-gate-mod", "textures/entity/centipede.png");
     }
 
     @Override
     public Identifier getAnimationResource(RedCentipedeEntity entity) {
-        return Identifier.of("karma-gate-mod", "animations/red_centipede.animation.json");
+        return Identifier.of("karma-gate-mod", "animations/centipede.animation.json");
     }
 }
