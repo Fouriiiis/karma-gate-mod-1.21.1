@@ -50,8 +50,8 @@ import java.util.Random;
 public class CentipedeEntity extends HostileEntity implements GeoAnimatable, CentipedeController {
     private static final Logger LOGGER = LoggerFactory.getLogger(CentipedeEntity.class);
 
-    private final AnimatableInstanceCache geoCache = GeckoLibUtil.createInstanceCache(this);
-    private static final RawAnimation IDLE_ANIM = RawAnimation.begin().thenLoop("idle");
+    protected final AnimatableInstanceCache geoCache = GeckoLibUtil.createInstanceCache(this);
+    protected static final RawAnimation IDLE_ANIM = RawAnimation.begin().thenLoop("idle");
 
     // --- Model depth constants (BlockBench units / 16 * render_scale 0.5) ---
     private static final double BODY_RENDER_DEPTH = 23.0 / 16.0 * 0.5;
@@ -70,42 +70,42 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
             CentipedeEntity.class, TrackedDataHandlerRegistry.FLOAT);
 
     // --- Size-derived config (computed once from size) ---
-    private float size = 0.5f;
-    private int totalSegments = 12;
-    private int bodySegmentCount = 10;
-    private float maxRadius = 6.5f;
+    protected float size = 0.5f;
+    protected int totalSegments = 12;
+    protected int bodySegmentCount = 10;
+    protected float maxRadius = 6.5f;
 
     // --- Segment references ---
-    private int[] segmentIds;
-    private CentipedeSegmentEntity[] segments;
-    private boolean segmentsSpawned = false;
+    protected int[] segmentIds;
+    protected CentipedeSegmentEntity[] segments;
+    protected boolean segmentsSpawned = false;
 
     // --- Movement / AI state ---
-    private boolean bodyDirection = false;
-    private Vec3d moveTarget = Vec3d.ZERO;
-    private float bodyWave = 0f;
-    private boolean moving = false;
-    private int directionChangeBlock = 0;
-    private int changeDirCounter = 0;
+    protected boolean bodyDirection = false;
+    protected Vec3d moveTarget = Vec3d.ZERO;
+    protected float bodyWave = 0f;
+    protected boolean moving = false;
+    protected int directionChangeBlock = 0;
+    protected int changeDirCounter = 0;
 
     // --- Shock / grab state ---
-    private float shockCharge = 0f;
-    private int shockGiveUpCounter = 0;
-    private float doubleGrabCharge = 0f;
+    protected float shockCharge = 0f;
+    protected int shockGiveUpCounter = 0;
+    protected float doubleGrabCharge = 0f;
 
     // --- AI behavior ---
-    private LivingEntity huntTarget = null;
+    protected LivingEntity huntTarget = null;
 
     // --- Pathfinding ---
-    private CentipedePathfinder.IncrementalSearch currentSearch = null;
-    private List<BlockPos> currentPath = null;
-    private int pathIndex = 0;
-    private int pathRecalcTimer = 0;
-    private BlockPos lastPathGoal = null;
-    private static final int PATH_STEPS_PER_TICK = 80;
-    private static final int PATH_RECALC_INTERVAL = 30;
-    private static final int PATH_LOOK_AHEAD = 3;
-    private static final double WAYPOINT_REACH_DIST = 1.5;
+    protected CentipedePathfinder.IncrementalSearch currentSearch = null;
+    protected List<BlockPos> currentPath = null;
+    protected int pathIndex = 0;
+    protected int pathRecalcTimer = 0;
+    protected BlockPos lastPathGoal = null;
+    protected static final int PATH_STEPS_PER_TICK = 80;
+    protected static final int PATH_RECALC_INTERVAL = 30;
+    protected static final int PATH_LOOK_AHEAD = 3;
+    protected static final double WAYPOINT_REACH_DIST = 1.5;
 
     // --- Orange shell colors ---
     // C# HSL(0.07, 0.9, 0.5) ≈ RGB(242, 109, 13)
@@ -122,18 +122,40 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         recalcSizeDerivedFields();
     }
 
+    protected void configureFixedVariant(float size, int totalSegments, float maxRadius) {
+        this.size = size;
+        this.totalSegments = Math.max(totalSegments, 3);
+        this.bodySegmentCount = this.totalSegments - 2;
+        this.maxRadius = maxRadius;
+        this.segmentIds = new int[this.totalSegments];
+        this.segments = new CentipedeSegmentEntity[this.totalSegments];
+        java.util.Arrays.fill(this.segmentIds, -1);
+    }
+
     /**
      * Compute size from the entity's UUID, mirroring C# GenerateSize:
      * size = pow(random, 1.5) where random is seeded from creature ID.
      */
-    private void computeSizeFromSeed() {
+    protected void computeSizeFromSeed() {
         long seed = this.getUuid().getLeastSignificantBits();
         Random rng = new Random(seed);
         this.size = (float) Math.pow(rng.nextFloat(), 1.5f);
         recalcSizeDerivedFields();
     }
 
-    private void recalcSizeDerivedFields() {
+    protected void readTrackedDataFromClient() {
+        bodyDirection = this.dataTracker.get(BODY_DIRECTION);
+        shockCharge = this.dataTracker.get(SHOCK_CHARGE);
+        moving = this.dataTracker.get(IS_MOVING);
+        bodyWave = this.dataTracker.get(BODY_WAVE);
+        float syncedSize = this.dataTracker.get(CENTIPEDE_SIZE);
+        if (Math.abs(syncedSize - this.size) > 0.001f) {
+            this.size = syncedSize;
+            recalcSizeDerivedFields();
+        }
+    }
+
+    protected void recalcSizeDerivedFields() {
         // C#: bodyChunks.Length = (int)Lerp(7, 17, size)
         this.totalSegments = (int) MathHelper.lerp(size, 7f, 17f);
         if (this.totalSegments < 3) this.totalSegments = 3; // minimum: 2 heads + 1 body
@@ -196,7 +218,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
     // Segment management
     // =========================================================================
 
-    private void spawnSegments() {
+    protected void spawnSegments() {
         if (this.getWorld().isClient || segmentsSpawned) return;
         ServerWorld sw = (ServerWorld) this.getWorld();
 
@@ -238,7 +260,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         segmentsSpawned = true;
     }
 
-    private void resolveSegments() {
+    protected void resolveSegments() {
         for (int i = 0; i < totalSegments; i++) {
             if (segments[i] == null || segments[i].isRemoved()) {
                 if (segmentIds[i] != -1) {
@@ -339,7 +361,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         return maxRadius;
     }
 
-    private double getRenderedDepth(int segIndex) {
+    protected double getRenderedDepth(int segIndex) {
         if (segIndex == 0 || segIndex == totalSegments - 1) {
             return HEAD_RENDER_DEPTH;
         }
@@ -376,15 +398,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
             updateShockCharge();
             syncTrackedData();
         } else {
-            bodyDirection = this.dataTracker.get(BODY_DIRECTION);
-            shockCharge = this.dataTracker.get(SHOCK_CHARGE);
-            moving = this.dataTracker.get(IS_MOVING);
-            bodyWave = this.dataTracker.get(BODY_WAVE);
-            float syncedSize = this.dataTracker.get(CENTIPEDE_SIZE);
-            if (Math.abs(syncedSize - this.size) > 0.001f) {
-                this.size = syncedSize;
-                recalcSizeDerivedFields();
-            }
+            readTrackedDataFromClient();
         }
     }
 
@@ -411,7 +425,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         return super.damage(source, amount);
     }
 
-    private void syncTrackedData() {
+    protected void syncTrackedData() {
         this.dataTracker.set(BODY_DIRECTION, bodyDirection);
         this.dataTracker.set(SHOCK_CHARGE, shockCharge);
         this.dataTracker.set(IS_MOVING, moving);
@@ -419,7 +433,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         this.dataTracker.set(CENTIPEDE_SIZE, size);
     }
 
-    private void updateChainPhysics() {
+    protected void updateChainPhysics() {
         CentipedeHeadEntity lead = getLeadingHead();
         if (lead != null && !lead.isRemoved()) {
             this.setPosition(lead.getPos());
@@ -509,7 +523,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         }
     }
 
-    private void updateSegmentRotations() {
+    protected void updateSegmentRotations() {
         for (int i = 0; i < totalSegments; i++) {
             if (segments[i] == null || segments[i].isRemoved()) continue;
 
@@ -528,7 +542,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         }
     }
 
-    private void enforceSpacing(int a, int b) {
+    protected void enforceSpacing(int a, int b) {
         if (segments[a] == null || segments[b] == null) return;
         if (segments[a].isRemoved() || segments[b].isRemoved()) return;
 
@@ -557,7 +571,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         seg.noClip = true;
     }
 
-    private Vec3d getChainDirection(int index) {
+    protected Vec3d getChainDirection(int index) {
         if (index <= 0 && segments.length > 1 && segments[1] != null) {
             return segments[1].getPos().subtract(segments[0].getPos()).normalize();
         }
@@ -570,43 +584,75 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         return new Vec3d(1, 0, 0);
     }
 
-    private boolean isNearSurface(Entity entity) {
-        BlockPos pos = entity.getBlockPos();
-        World world = entity.getWorld();
-        for (Direction dir : Direction.values()) {
-            BlockPos neighbor = pos.offset(dir);
-            if (world.getBlockState(neighbor).isSolidBlock(world, neighbor)) {
-                return true;
-            }
-        }
-        BlockPos below = entity.getBlockPos().down();
-        return world.getBlockState(below).isSolidBlock(world, below);
+    protected boolean isNearSurface(Entity entity) {
+        return computeSurfaceNormal(entity).lengthSquared() > 0.001;
     }
 
     private Vec3d computeSurfaceNormal(Entity entity) {
-        BlockPos pos = entity.getBlockPos();
         World world = entity.getWorld();
+        Box probeBox = entity.getBoundingBox().expand(0.2);
+        Vec3d center = probeBox.getCenter();
         Vec3d normal = Vec3d.ZERO;
         int count = 0;
 
         for (Direction dir : Direction.values()) {
-            BlockPos neighbor = pos.offset(dir);
+            Vec3d probe = center.add(dir.getOffsetX() * 0.55, dir.getOffsetY() * 0.55, dir.getOffsetZ() * 0.55);
+            BlockPos neighbor = BlockPos.ofFloored(probe);
             if (world.getBlockState(neighbor).isSolidBlock(world, neighbor)) {
                 normal = normal.add(-dir.getOffsetX(), -dir.getOffsetY(), -dir.getOffsetZ());
                 count++;
             }
         }
 
-        BlockPos below = entity.getBlockPos().down();
-        if (world.getBlockState(below).isSolidBlock(world, below)) {
-            normal = normal.add(0, 1, 0);
-            count++;
-        }
-
         if (count > 0 && normal.lengthSquared() > 0.001) {
             return normal.normalize();
         }
         return Vec3d.ZERO;
+    }
+
+    private Vec3d getSurfaceAlignedMove(CentipedeSegmentEntity segment, Vec3d desiredDir, double speed) {
+        Vec3d surfaceNormal = computeSurfaceNormal(segment);
+        Vec3d move = desiredDir.normalize().multiply(speed);
+
+        if (surfaceNormal.lengthSquared() > 0.001) {
+            Vec3d tangent = move.subtract(surfaceNormal.multiply(move.dotProduct(surfaceNormal)));
+            if (tangent.lengthSquared() > 1.0E-4) {
+                move = tangent.normalize().multiply(speed);
+            }
+
+            Direction approachDir = Direction.getFacing(desiredDir.x, desiredDir.y, desiredDir.z);
+            BlockPos approachPos = segment.getBlockPos().offset(approachDir);
+            BlockState approachState = this.getWorld().getBlockState(approachPos);
+            if (approachState.isSolidBlock(this.getWorld(), approachPos)) {
+                Vec3d wallNormal = new Vec3d(-approachDir.getOffsetX(), -approachDir.getOffsetY(), -approachDir.getOffsetZ());
+                Vec3d wallTangent = desiredDir.subtract(wallNormal.multiply(desiredDir.dotProduct(wallNormal)));
+                if (wallTangent.lengthSquared() > 1.0E-4) {
+                    move = wallTangent.normalize().multiply(speed);
+                }
+
+                double cling = Math.max(0.03, speed * 0.45);
+                move = move.add(wallNormal.multiply(-cling));
+            }
+        }
+
+        return move;
+    }
+
+    private void applyHeadPathingForce(CentipedeHeadEntity head, Vec3d targetPos, double speed) {
+        Vec3d dir = targetPos.subtract(head.getPos());
+        double dist = dir.length();
+        if (dist < 0.1) return;
+
+        Vec3d desiredDir = dir.normalize();
+        Vec3d move = getSurfaceAlignedMove(head, desiredDir, speed);
+
+        if (!isNearSurface(head)) {
+            move = desiredDir.multiply(speed * 0.3);
+        } else if (targetPos.y > head.getY() + 0.25) {
+            move = move.add(0, Math.min(speed * 0.45, targetPos.y - head.getY()), 0);
+        }
+
+        head.segmentVelocity = head.segmentVelocity.add(move);
     }
 
     // =========================================================================
@@ -654,7 +700,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         requestPath(BlockPos.ofFloored(target.x, target.y, target.z));
     }
 
-    private void updatePathfinding() {
+    protected void updatePathfinding() {
         if (currentSearch != null && !currentSearch.isFinished()) {
             currentSearch.step(PATH_STEPS_PER_TICK);
 
@@ -720,20 +766,9 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
                 nextWaypoint.getY() + 0.5,
                 nextWaypoint.getZ() + 0.5);
 
-        Vec3d dir = waypointCenter.subtract(headPos);
-        double dist = dir.length();
-
-        if (dist < 0.1) return;
-        dir = dir.normalize();
-
         // No Red 1.25 speed boost; size-dependent speed
         double speed = 0.14 * MathHelper.lerp(size, 0.5f, 1.5f);
-
-        if (isNearSurface(head)) {
-            head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed));
-        } else {
-            head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed * 0.3));
-        }
+        applyHeadPathingForce(head, waypointCenter, speed);
 
         for (int i = 1; i < totalSegments - 1; i++) {
             if (segments[i] == null || segments[i].isRemoved()) continue;
@@ -764,12 +799,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         dir = dir.normalize();
 
         double speed = 0.14 * MathHelper.lerp(size, 0.5f, 1.5f);
-
-        if (isNearSurface(head)) {
-            head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed));
-        } else {
-            head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed * 0.3));
-        }
+        applyHeadPathingForce(head, moveTarget, speed);
 
         for (int i = 1; i < totalSegments - 1; i++) {
             if (segments[i] == null || segments[i].isRemoved()) continue;
@@ -820,7 +850,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
     // Grab & Shock system
     // =========================================================================
 
-    private void updateGrabs() {
+    protected void updateGrabs() {
         CentipedeHeadEntity head0 = (segments[0] instanceof CentipedeHeadEntity h) ? h : null;
         CentipedeHeadEntity head1 = (segments[totalSegments - 1] instanceof CentipedeHeadEntity h) ? h : null;
 
@@ -909,7 +939,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         }
     }
 
-    private boolean isValidPrey(LivingEntity entity) {
+    protected boolean isValidPrey(LivingEntity entity) {
         if (entity == this) return false;
         if (entity instanceof CentipedeSegmentEntity) return false;
         if (entity instanceof CentipedeController) return false;
@@ -921,7 +951,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         return true;
     }
 
-    private void updateShockCharge() {
+    protected void updateShockCharge() {
         CentipedeHeadEntity head0 = (segments[0] instanceof CentipedeHeadEntity h) ? h : null;
         CentipedeHeadEntity head1 = (segments[totalSegments - 1] instanceof CentipedeHeadEntity h) ? h : null;
 
@@ -983,7 +1013,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         }
     }
 
-    private void shock(LivingEntity victim) {
+    protected void shock(LivingEntity victim) {
         if (victim == null || victim.isRemoved()) return;
 
         this.getWorld().playSound(null, this.getBlockPos(),
