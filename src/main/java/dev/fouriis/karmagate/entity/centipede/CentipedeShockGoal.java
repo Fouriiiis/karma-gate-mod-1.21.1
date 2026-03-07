@@ -2,6 +2,7 @@ package dev.fouriis.karmagate.entity.centipede;
 
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.EnumSet;
@@ -15,17 +16,17 @@ import java.util.EnumSet;
  * Mirrors C# Centipede.UpdateGrasp() and the double-grab → shock → die flow.
  *
  * Flow:
- * 1. One head grabs target via collision (handled in RedCentipedeEntity.updateGrabs)
+ * 1. One head grabs target via collision (handled in controller's updateGrabs)
  * 2. This goal activates and drives the body to wrap the other head around
  * 3. When both heads are on the target, shock charge builds
  * 4. At full charge → Shock() → instakill
  */
-public class CentipedeShockGoal extends Goal {
+public class CentipedeShockGoal<T extends HostileEntity & CentipedeController> extends Goal {
 
-    private final RedCentipedeEntity centipede;
+    private final T centipede;
     private boolean pathRequested = false;
 
-    public CentipedeShockGoal(RedCentipedeEntity centipede) {
+    public CentipedeShockGoal(T centipede) {
         this.centipede = centipede;
         this.setControls(EnumSet.of(Control.MOVE, Control.LOOK));
     }

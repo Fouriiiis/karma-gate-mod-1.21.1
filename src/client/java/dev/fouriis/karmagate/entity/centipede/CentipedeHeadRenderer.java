@@ -10,6 +10,7 @@ import net.minecraft.util.math.Vec3d;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import software.bernie.geckolib.renderer.GeoEntityRenderer;
+import software.bernie.geckolib.util.Color;
 
 /**
  * Renderer for centipede head segments.
@@ -26,8 +27,18 @@ public class CentipedeHeadRenderer extends GeoEntityRenderer<CentipedeHeadEntity
     }
 
     @Override
+    public Color getRenderColor(CentipedeHeadEntity animatable, float partialTick, int packedLight) {
+        CentipedeController parent = animatable.getParentCentipede();
+        if (parent != null) {
+            return Color.ofOpaque(parent.getShellColorRGB());
+        }
+        return Color.WHITE;
+    }
+
+    @Override
     public void render(CentipedeHeadEntity entity, float yaw, float tickDelta,
                        MatrixStack matrices, VertexConsumerProvider vertexConsumers, int light) {
+        matrices.translate(0f, 0.25f, 0f);
         super.render(entity, yaw, tickDelta, matrices, vertexConsumers, light);
 
         // Render legs after the GeckoLib model
@@ -77,6 +88,13 @@ public class CentipedeHeadRenderer extends GeoEntityRenderer<CentipedeHeadEntity
         // GeckoLib convention: model faces -Z, so we use -forward
         Quaternionf rotation = quatFromAxes(right, up, new Vector3f(-forward.x, -forward.y, -forward.z));
         poseStack.multiply(rotation);
+
+        // Scale heads for small centipede variants (getHeadScaleFactor() defaults to 1.0)
+        CentipedeController parentCtrl = entity.getParentCentipede();
+        if (parentCtrl != null) {
+            float hs = parentCtrl.getHeadScaleFactor();
+            if (hs != 1.0f) poseStack.scale(hs, hs, hs);
+        }
     }
 
     /**
@@ -121,13 +139,14 @@ public class CentipedeHeadRenderer extends GeoEntityRenderer<CentipedeHeadEntity
      * Get the direction this head should face (toward the adjacent body segment).
      */
     private Vec3d getChainDirection(CentipedeHeadEntity entity, float tickDelta) {
-        RedCentipedeEntity parent = entity.getParentCentipede();
+        CentipedeController parent = entity.getParentCentipede();
         if (parent == null) return new Vec3d(0, 0, 1);
 
         CentipedeSegmentEntity[] segs = parent.getSegments();
         if (segs == null) return new Vec3d(0, 0, 1);
 
         int idx = entity.getSegmentIndex();
+        if (idx < 0 || idx >= segs.length) return new Vec3d(0, 0, 1);
 
         // Front head (index 0): direction FROM body TOWARD head = seg[0] - seg[1]
         if (idx == 0 && segs.length > 1 && segs[1] != null) {

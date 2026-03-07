@@ -14,7 +14,6 @@ import net.minecraft.entity.data.DataTracker;
 import net.minecraft.entity.data.TrackedData;
 import net.minecraft.entity.data.TrackedDataHandlerRegistry;
 import net.minecraft.entity.mob.HostileEntity;
-import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.particle.ParticleTypes;
@@ -25,7 +24,6 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.GameMode;
 import net.minecraft.world.World;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,68 +35,79 @@ import software.bernie.geckolib.animation.PlayState;
 import software.bernie.geckolib.animation.RawAnimation;
 import software.bernie.geckolib.util.GeckoLibUtil;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 
 /**
- * Controller entity for a Red Centipede. This invisible entity manages the chain
- * of CentipedeHeadEntity (2) and CentipedeBodyEntity (16) segments.
- *
- * Behavior (from Rain World C# Centipede):
- * - Crawls along surfaces, with a sinusoidal body wave
- * - Hunts living entities; grabs with one head, wraps around to grab with 2nd head
- * - Once both heads grab the same target, shock charge builds → instakill
- * - Body direction can reverse (either end can be the "leading" head)
- * - Shells on body segments absorb damage and can break off
- *
- * The controller itself is invisible (rendered at 0,0,0 offset or hidden).
- * All visual representation comes from the segment entities.
+ * Controller entity for a Centiwing — the winged centipede variant.
+ * C# size range: lerp(0.5, 0.65, random).
+ * Uses standard centipede segment system but with:
+ * - Flying mode with undulating sine-wave body movement
+ * - Wing deployment/folding system
+ * - Shorter legs (legScale = 0.65)
+ * - Green-yellow hue (C# hue = lerp(0.28, 0.38), sat = 0.5)
+ * - Body segments are slightly thinner (radius lerped toward min by 0.4)
  */
-public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, CentipedeController {
-    private static final Logger LOGGER = LoggerFactory.getLogger(RedCentipedeEntity.class);
+public class CentiwingEntity extends HostileEntity implements GeoAnimatable, CentipedeController {
+    private static final Logger LOGGER = LoggerFactory.getLogger(CentiwingEntity.class);
 
     private final AnimatableInstanceCache geoCache = GeckoLibUtil.createInstanceCache(this);
     private static final RawAnimation IDLE_ANIM = RawAnimation.begin().thenLoop("idle");
 
-    // --- Configuration ---
-    /** Total body segments (not counting heads). C# Red = 18 chunks, we use 16 body + 2 heads */
-    public static final int BODY_SEGMENT_COUNT = 16;
-    /** Total segments including heads */
-    public static final int TOTAL_SEGMENTS = BODY_SEGMENT_COUNT + 2;
-    /** Size factor (C# Red centipede: size=1.0) */
-    public static final float SIZE = 1.0f;
-
-    // --- Model depth constants (BlockBench units / 16 * render_scale 0.5) ---
-    /** Body model Z-depth at render scale 0.5: 23 BB / 16 * 0.5 */
+    // --- Model depth constants (same as normal centipede) ---
     private static final double BODY_RENDER_DEPTH = 23.0 / 16.0 * 0.5;
-    /** Head model Z-depth at render scale 0.5: 16 BB / 16 * 0.5 */
     private static final double HEAD_RENDER_DEPTH = 16.0 / 16.0 * 0.5;
-    /** Max C# body chunk radius (at middle of Red centipede) */
-    public static final float MAX_RADIUS = 8.0f;
+
+    // C# pixel scale
+    private static final float PX = 0.025f;
 
     // --- Tracked data ---
     private static final TrackedData<Boolean> BODY_DIRECTION = DataTracker.registerData(
-            RedCentipedeEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
+            CentiwingEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
     private static final TrackedData<Float> SHOCK_CHARGE = DataTracker.registerData(
-            RedCentipedeEntity.class, TrackedDataHandlerRegistry.FLOAT);
+            CentiwingEntity.class, TrackedDataHandlerRegistry.FLOAT);
     private static final TrackedData<Boolean> IS_MOVING = DataTracker.registerData(
-            RedCentipedeEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
+            CentiwingEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
     private static final TrackedData<Float> BODY_WAVE = DataTracker.registerData(
-            RedCentipedeEntity.class, TrackedDataHandlerRegistry.FLOAT);
+            CentiwingEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Float> CENTIPEDE_SIZE = DataTracker.registerData(
+            CentiwingEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Boolean> IS_FLYING = DataTracker.registerData(
+            CentiwingEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
+    private static final TrackedData<Float> WINGS_STARTED_UP = DataTracker.registerData(
+            CentiwingEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Float> WING_FLAP_CYCLE = DataTracker.registerData(
+            CentiwingEntity.class, TrackedDataHandlerRegistry.FLOAT);
 
-    // --- Segment references (server-side entity IDs, resolved each tick) ---
-    private int[] segmentIds = new int[TOTAL_SEGMENTS]; // [0]=front head, [1..16]=body, [17]=rear head
-    private CentipedeSegmentEntity[] segments = new CentipedeSegmentEntity[TOTAL_SEGMENTS];
+    // --- Size-derived config ---
+    private float size = 0.575f; // default midpoint of 0.5-0.65
+    private int totalSegments = 12;
+    private int bodySegmentCount = 10;
+    private float maxRadius = 6.5f;
+    private float[] wingLengths;
+
+    // --- Segment references ---
+    private int[] segmentIds;
+    private CentipedeSegmentEntity[] segments;
     private boolean segmentsSpawned = false;
 
     // --- Movement / AI state ---
-    private boolean bodyDirection = false; // false=head at index 0 leads; true=head at last index leads
+    private boolean bodyDirection = false;
     private Vec3d moveTarget = Vec3d.ZERO;
-    private float bodyWave = 0f; // repurposed as walk cycle (C# walkCycle)
+    private float bodyWave = 0f;
     private boolean moving = false;
     private int directionChangeBlock = 0;
     private int changeDirCounter = 0;
-    private int noFollowCounter = 0;
+
+    // --- Flying state ---
+    private boolean flying = true;
+    private boolean wantToFly = true;
+    private int flyModeCounter = 100;
+    private float wingsStartedUp = 1f;
+    private float wingFlapCycle = 0f;
+    private float lastWingFlapCycle = 0f;
+    private float wingsFolded = 0f;
+    private float lastWingsFolded = 0f;
 
     // --- Shock / grab state ---
     private float shockCharge = 0f;
@@ -108,41 +117,83 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
     // --- AI behavior ---
     private LivingEntity huntTarget = null;
 
-    // --- Pathfinding (from C# PathFinder → StandardPather → CentipedePather) ---
+    // --- Pathfinding ---
     private CentipedePathfinder.IncrementalSearch currentSearch = null;
     private List<BlockPos> currentPath = null;
     private int pathIndex = 0;
     private int pathRecalcTimer = 0;
     private BlockPos lastPathGoal = null;
-    /** How many A* nodes to process per tick (C# stepsPerFrame) */
     private static final int PATH_STEPS_PER_TICK = 80;
-    /** Ticks between path recalculations */
     private static final int PATH_RECALC_INTERVAL = 30;
-    /** Look-ahead distance for path following (smoother movement) */
     private static final int PATH_LOOK_AHEAD = 3;
-    /** Waypoints within this distance are considered "reached" */
     private static final double WAYPOINT_REACH_DIST = 1.5;
 
-    // --- Run/excitement (from C# AI) ---
-    private float excitement = 0f;
-    private float run = 500f; // Red centipedes always run
+    // --- Centiwing colors ---
+    // C# HSL(lerp(0.28,0.38), 0.5, 0.5) ≈ green-yellow.
+    // Using midpoint hue 0.33 → HSL(0.33, 0.5, 0.5) ≈ RGB(106, 191, 64)
+    private static final int SHELL_COLOR = (106 << 16) | (191 << 8) | 64;
+    // HSL(0.33, 0.5, 0.3) ≈ RGB(64, 115, 38)
+    private static final int SECONDARY_SHELL_COLOR = (64 << 16) | (115 << 8) | 38;
 
-    public RedCentipedeEntity(EntityType<? extends HostileEntity> type, World world) {
+    public CentiwingEntity(EntityType<? extends HostileEntity> type, World world) {
         super(type, world);
-        // Controller is invisible and non-physical; only segments have hitboxes
         this.noClip = true;
         this.setNoGravity(true);
+        recalcSizeDerivedFields();
+    }
+
+    /**
+     * Compute size from UUID. C# Centiwing: size = lerp(0.5, 0.65, random).
+     */
+    private void computeSizeFromSeed() {
+        long seed = this.getUuid().getLeastSignificantBits();
+        Random rng = new Random(seed);
+        this.size = MathHelper.lerp(rng.nextFloat(), 0.5f, 0.65f);
+        recalcSizeDerivedFields();
+    }
+
+    private void recalcSizeDerivedFields() {
+        // C#: bodyChunks.Length = (int)Lerp(7, 17, size)
+        this.totalSegments = (int) MathHelper.lerp(size, 7f, 17f);
+        if (this.totalSegments < 3) this.totalSegments = 3;
+        this.bodySegmentCount = this.totalSegments - 2;
+
+        // Centiwing body radius: standard formula lerped toward min by 0.4
+        // maxRadius at middle segment
+        this.maxRadius = computeSegmentRadius(totalSegments / 2);
+
+        // Initialize arrays
+        this.segmentIds = new int[totalSegments];
+        this.segments = new CentipedeSegmentEntity[totalSegments];
         java.util.Arrays.fill(segmentIds, -1);
+
+        // Wing lengths — C# formula from CentipedeGraphics constructor
+        this.wingLengths = new float[totalSegments];
+        for (int j = 0; j < totalSegments; j++) {
+            float num = (float) j / (float) (totalSegments - 1);
+            float num2 = (float) Math.sin(Math.pow(MathHelper.clamp(
+                    (0.5f - num) / 0.5f, 0f, 1f), 0.75) * Math.PI);
+            num2 *= 1f - num;
+            float num3 = (float) Math.sin(Math.pow(MathHelper.clamp(
+                    (1f - num) / 0.5f, 0f, 1f), 0.75) * Math.PI);
+            num3 *= num;
+            num2 = 0.5f + 0.5f * num2;
+            num3 = 0.5f + 0.5f * num3;
+            float maxWingLen = MathHelper.lerp(MathHelper.clamp((size - 0.5f) / 0.5f, 0f, 1f), 60f, 80f);
+            wingLengths[j] = MathHelper.lerp(
+                    Math.max(num2, num3) - (float) Math.sin(num * Math.PI) * 0.25f,
+                    3f, maxWingLen);
+        }
     }
 
     public static DefaultAttributeContainer.Builder createAttributes() {
         return HostileEntity.createHostileAttributes()
-                .add(EntityAttributes.GENERIC_MAX_HEALTH, 80.0)
-                .add(EntityAttributes.GENERIC_MOVEMENT_SPEED, 0.35)
-                .add(EntityAttributes.GENERIC_FOLLOW_RANGE, 48.0)
-                .add(EntityAttributes.GENERIC_ATTACK_DAMAGE, 6.0)
-                .add(EntityAttributes.GENERIC_ARMOR, 8.0)
-                .add(EntityAttributes.GENERIC_KNOCKBACK_RESISTANCE, 0.8);
+                .add(EntityAttributes.GENERIC_MAX_HEALTH, 30.0)
+                .add(EntityAttributes.GENERIC_MOVEMENT_SPEED, 0.28)
+                .add(EntityAttributes.GENERIC_FOLLOW_RANGE, 40.0)
+                .add(EntityAttributes.GENERIC_ATTACK_DAMAGE, 2.0)
+                .add(EntityAttributes.GENERIC_ARMOR, 2.0)
+                .add(EntityAttributes.GENERIC_KNOCKBACK_RESISTANCE, 0.2);
     }
 
     @Override
@@ -150,20 +201,22 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
         super.initDataTracker(builder);
         builder.add(BODY_DIRECTION, false);
         builder.add(SHOCK_CHARGE, 0f);
-        builder.add(IS_MOVING, false);
+        builder.add(IS_MOVING, true);
         builder.add(BODY_WAVE, 0f);
+        builder.add(CENTIPEDE_SIZE, 0.575f);
+        builder.add(IS_FLYING, true);
+        builder.add(WINGS_STARTED_UP, 1f);
+        builder.add(WING_FLAP_CYCLE, 0f);
     }
 
     @Override
     protected void initGoals() {
-        // Custom centipede AI goals
         this.goalSelector.add(0, new SwimGoal(this));
-        this.goalSelector.add(1, new CentipedeShockGoal(this));
-        this.goalSelector.add(2, new CentipedeHuntGoal(this));
-        this.goalSelector.add(3, new CentipedeWanderGoal(this));
+        this.goalSelector.add(1, new CentipedeShockGoal<>(this));
+        this.goalSelector.add(2, new CentiwingHuntGoal<>(this));
+        this.goalSelector.add(3, new CentiwingWanderGoal<>(this));
         this.goalSelector.add(4, new LookAroundGoal(this));
 
-        // Only target players in survival mode
         this.targetSelector.add(1, new ActiveTargetGoal<>(this, PlayerEntity.class, 10, true, false,
                 entity -> {
                     if (entity instanceof PlayerEntity player) {
@@ -172,7 +225,7 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
                     return true;
                 }));
         this.targetSelector.add(2, new ActiveTargetGoal<>(this, LivingEntity.class, 10, true, false,
-                entity -> !(entity instanceof RedCentipedeEntity)
+                entity -> !(entity instanceof CentipedeController)
                         && !(entity instanceof CentipedeSegmentEntity)
                         && !(entity instanceof PlayerEntity p && (p.isCreative() || p.isSpectator()))
                         && entity.getType().getSpawnGroup().isPeaceful()));
@@ -182,35 +235,29 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
     // Segment management
     // =========================================================================
 
-    /**
-     * Spawn all segment entities on the first server tick.
-     */
     private void spawnSegments() {
         if (this.getWorld().isClient || segmentsSpawned) return;
         ServerWorld sw = (ServerWorld) this.getWorld();
 
         Vec3d basePos = this.getPos();
-        // Get yaw direction for initial chain layout
         float yawRad = this.getYaw() * ((float) Math.PI / 180f);
         Vec3d forward = new Vec3d(-Math.sin(yawRad), 0, Math.cos(yawRad));
 
         double cumulativeOffset = 0;
-        for (int i = 0; i < TOTAL_SEGMENTS; i++) {
+        for (int i = 0; i < totalSegments; i++) {
             if (i > 0) {
                 cumulativeOffset += getSegmentSpacing(i - 1, i);
             }
             Vec3d segPos = basePos.subtract(forward.multiply(cumulativeOffset));
             CentipedeSegmentEntity seg;
 
-            if (i == 0 || i == TOTAL_SEGMENTS - 1) {
-                // Head segments
+            if (i == 0 || i == totalSegments - 1) {
                 EntityType<?> headType = dev.fouriis.karmagate.KarmaGateMod.CENTIPEDE_HEAD_ENTITY_TYPE;
                 CentipedeHeadEntity head = (CentipedeHeadEntity) headType.create(sw);
                 if (head == null) continue;
                 head.setFrontHead(i == 0);
                 seg = head;
             } else {
-                // Body segments
                 EntityType<?> bodyType = dev.fouriis.karmagate.KarmaGateMod.CENTIPEDE_BODY_ENTITY_TYPE;
                 CentipedeBodyEntity body = (CentipedeBodyEntity) bodyType.create(sw);
                 if (body == null) continue;
@@ -228,13 +275,13 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
         }
 
         segmentsSpawned = true;
+
+        // Initialize moveTarget to spawn position so fly physics doesn't steer toward world origin
+        moveTarget = this.getPos();
     }
 
-    /**
-     * Resolve segment entity references from IDs (handles save/load).
-     */
     private void resolveSegments() {
-        for (int i = 0; i < TOTAL_SEGMENTS; i++) {
+        for (int i = 0; i < totalSegments; i++) {
             if (segments[i] == null || segments[i].isRemoved()) {
                 if (segmentIds[i] != -1) {
                     Entity e = this.getWorld().getEntityById(segmentIds[i]);
@@ -246,104 +293,149 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
         }
     }
 
+    @Override
     public CentipedeHeadEntity getFrontHead() {
-        int idx = bodyDirection ? (TOTAL_SEGMENTS - 1) : 0;
-        if (segments[idx] instanceof CentipedeHeadEntity h) return h;
+        int idx = bodyDirection ? (totalSegments - 1) : 0;
+        if (segments != null && idx < segments.length && segments[idx] instanceof CentipedeHeadEntity h) return h;
         return null;
     }
 
+    @Override
     public CentipedeHeadEntity getRearHead() {
-        int idx = bodyDirection ? 0 : (TOTAL_SEGMENTS - 1);
-        if (segments[idx] instanceof CentipedeHeadEntity h) return h;
+        int idx = bodyDirection ? 0 : (totalSegments - 1);
+        if (segments != null && idx < segments.length && segments[idx] instanceof CentipedeHeadEntity h) return h;
         return null;
     }
 
-    /**
-     * Get the "leading" head (the one that chases the target).
-     */
     public CentipedeHeadEntity getLeadingHead() {
         return getFrontHead();
     }
 
-    /**
-     * Get the head index in the segments array that leads.
-     */
     public int getHeadIndex() {
-        return bodyDirection ? (TOTAL_SEGMENTS - 1) : 0;
+        return bodyDirection ? (totalSegments - 1) : 0;
     }
 
+    @Override
     public CentipedeSegmentEntity[] getSegments() {
         return segments;
     }
 
-    /**
-     * Get the walk cycle phase. Used by client-side leg renderers.
-     * C# walkCycle: advances by ±1/10 per tick when moving.
-     */
+    @Override
     public float getWalkCycle() {
         return bodyWave;
     }
 
-    /**
-     * Whether the body is moving in the "reverse" direction (rear head leads).
-     * C# centipede.bodyDirection.
-     */
+    @Override
     public boolean isBodyDirection() {
         return bodyDirection;
     }
 
-    /**
-     * Register a segment on the client side so renderers can find neighbors.
-     */
+    @Override
     public void registerClientSegment(CentipedeSegmentEntity seg) {
         int idx = seg.getSegmentIndex();
-        if (idx >= 0 && idx < TOTAL_SEGMENTS) {
+        if (idx >= totalSegments) {
+            totalSegments = idx + 1;
+            bodySegmentCount = totalSegments - 2;
+            int[] newIds = new int[totalSegments];
+            CentipedeSegmentEntity[] newSegs = new CentipedeSegmentEntity[totalSegments];
+            java.util.Arrays.fill(newIds, -1);
+            if (segmentIds != null) {
+                System.arraycopy(segmentIds, 0, newIds, 0, Math.min(segmentIds.length, totalSegments));
+            }
+            if (segments != null) {
+                System.arraycopy(segments, 0, newSegs, 0, Math.min(segments.length, totalSegments));
+            }
+            segmentIds = newIds;
+            segments = newSegs;
+        }
+        if (segments != null && idx >= 0 && idx < totalSegments) {
             segments[idx] = seg;
             segmentIds[idx] = seg.getId();
         }
     }
 
+    @Override
     public boolean areSegmentsSpawned() {
         return segmentsSpawned;
     }
 
     /**
-     * Compute the C# body chunk radius for Red centipede segment index.
-     * C# formula for Red (size=1.0):
-     *   radius = lerp(3.5, 6.5, pow(clamp(sin(PI * segRatio), 0, 1), 0.3)) + 1.5
-     * Range: 5.0 (heads) to 8.0 (middle).
+     * Centiwing body radius: standard formula but lerped 40% toward the thinner bound.
+     * C#: num2 = Lerp(num2, Lerp(2, 3.5, size), 0.4) where num2 is the standard radius.
      */
-    public static float computeRedSegmentRadius(int segIndex) {
-        float segRatio = (float) segIndex / (float) (TOTAL_SEGMENTS - 1);
+    @Override
+    public float computeSegmentRadius(int segIndex) {
+        float segRatio = (totalSegments > 1) ? (float) segIndex / (float) (totalSegments - 1) : 0.5f;
         float sinVal = (float) Math.max(0, Math.sin(Math.PI * segRatio));
-        float powVal = (float) Math.pow(sinVal, 0.3f);
-        return MathHelper.lerp(powVal, 3.5f, 6.5f) + 1.5f;
+        float powExp = MathHelper.lerp(size, 0.7f, 0.3f);
+        float powVal = (float) Math.pow(sinVal, powExp);
+        float minR = MathHelper.lerp(size, 2f, 3.5f);
+        float maxR = MathHelper.lerp(size, 4f, 6.5f);
+        float standardRadius = MathHelper.lerp(powVal, minR, maxR);
+        // Centiwing: lerp toward the thinner end by 0.4
+        return MathHelper.lerp(0.4f, standardRadius, minR);
     }
 
     @Override
-    public float computeSegmentRadius(int segIndex) {
-        return computeRedSegmentRadius(segIndex);
+    public float getMaxRadius() {
+        return maxRadius;
     }
 
-    /**
-     * Compute the rendered depth (along chain) for a segment, accounting for
-     * different head vs body models and the C# radius-based scale factor.
-     */
     private double getRenderedDepth(int segIndex) {
-        if (segIndex == 0 || segIndex == TOTAL_SEGMENTS - 1) {
-            // Head model
+        if (segIndex == 0 || segIndex == totalSegments - 1) {
             return HEAD_RENDER_DEPTH;
         }
-        // Body model, scaled by C# radius ratio
-        float scaleFactor = computeRedSegmentRadius(segIndex) / MAX_RADIUS;
+        float scaleFactor = computeSegmentRadius(segIndex) / maxRadius;
         return BODY_RENDER_DEPTH * scaleFactor;
     }
 
-    /**
-     * Compute the spacing between two adjacent segments based on their rendered depths.
-     */
+    @Override
     public double getSegmentSpacing(int a, int b) {
         return (getRenderedDepth(a) + getRenderedDepth(b)) / 2.0;
+    }
+
+    // =========================================================================
+    // Wing interface
+    // =========================================================================
+
+    @Override
+    public boolean hasWings() { return true; }
+
+    @Override
+    public boolean isFlying() { return flying; }
+
+    @Override
+    public float getWingsStartedUp() { return wingsStartedUp; }
+
+    @Override
+    public float getWingFlapCycle() { return wingFlapCycle; }
+
+    @Override
+    public float getLastWingFlapCycle() { return lastWingFlapCycle; }
+
+    @Override
+    public float getWingsFolded() { return wingsFolded; }
+
+    @Override
+    public float getLastWingsFolded() { return lastWingsFolded; }
+
+    @Override
+    public float getWingLength(int segIndex) {
+        if (wingLengths == null || segIndex < 0 || segIndex >= wingLengths.length) return 0f;
+        return wingLengths[segIndex];
+    }
+
+    // Public accessors for AI goals
+    public boolean isWantToFly() { return wantToFly; }
+    public void setWantToFly(boolean want) { this.wantToFly = want; }
+    public int getFlyModeCounter() { return flyModeCounter; }
+
+    /**
+     * C# RatherClimbThanFly: returns true if the position is near a solid surface
+     * (should crawl instead of fly).
+     */
+    public boolean ratherClimbThanFly(BlockPos pos) {
+        return CentipedePathfinder.getTerrainProximity(this.getWorld(), pos) < 2;
     }
 
     // =========================================================================
@@ -352,34 +444,242 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
 
     @Override
     public void tick() {
-        // Ensure controller stays non-physical
         this.noClip = true;
         super.tick();
 
         if (!this.getWorld().isClient) {
-            // Spawn segments on first tick
             if (!segmentsSpawned) {
+                computeSizeFromSeed();
                 spawnSegments();
                 return;
             }
 
             resolveSegments();
+            updateFlyState();
             updatePathfinding();
-            updateChainPhysics();
+
+            if (flying) {
+                updateFlyPhysics();
+            } else {
+                updateChainPhysics();
+            }
+
             updateSegmentRotations();
             updateGrabs();
             updateShockCharge();
             syncTrackedData();
         } else {
-            // Client: read tracked data
             bodyDirection = this.dataTracker.get(BODY_DIRECTION);
             shockCharge = this.dataTracker.get(SHOCK_CHARGE);
             moving = this.dataTracker.get(IS_MOVING);
             bodyWave = this.dataTracker.get(BODY_WAVE);
+            flying = this.dataTracker.get(IS_FLYING);
+            wingsStartedUp = this.dataTracker.get(WINGS_STARTED_UP);
+
+            // Wing animation cycles (client-side)
+            lastWingFlapCycle = wingFlapCycle;
+            wingFlapCycle = this.dataTracker.get(WING_FLAP_CYCLE);
+
+            lastWingsFolded = wingsFolded;
+            wingsFolded = 1f - wingsStartedUp;
+
+            float syncedSize = this.dataTracker.get(CENTIPEDE_SIZE);
+            if (Math.abs(syncedSize - this.size) > 0.001f) {
+                this.size = syncedSize;
+                recalcSizeDerivedFields();
+            }
         }
     }
 
-    // --- Environment protection (controller is non-physical) ---
+    /**
+     * C# Centiwing fly state machine:
+     * - wantToFly controls intent
+     * - flyModeCounter ramps 0..100 to control transition
+     * - wingsStartedUp smoothly follows flyModeCounter
+     */
+    private void updateFlyState() {
+        if (wantToFly) {
+            if (flyModeCounter == 100) {
+                flying = true;
+            }
+            flyModeCounter = Math.min(100, flyModeCounter + 1);
+        } else {
+            if (flyModeCounter < 90) {
+                flying = false;
+            }
+            flyModeCounter = Math.max(0, flyModeCounter - 1);
+        }
+
+        float target = MathHelper.clamp((flyModeCounter - 80f) / 20f, 0f, 1f);
+        if (wingsStartedUp < target) {
+            wingsStartedUp = Math.min(1f, wingsStartedUp + 0.025f);
+        } else {
+            wingsStartedUp = Math.max(0f, wingsStartedUp - 0.025f);
+        }
+        wingsStartedUp = MathHelper.lerp(0.05f, wingsStartedUp, target);
+
+        // Wing animation
+        lastWingFlapCycle = wingFlapCycle;
+        wingFlapCycle += (float) Math.pow(wingsStartedUp, 3f);
+
+        lastWingsFolded = wingsFolded;
+        wingsFolded = 1f - wingsStartedUp;
+    }
+
+    /**
+     * C# Fly(): undulating sine-wave "swimming through air" physics.
+     *
+     * Key C# behaviors ported:
+     * - vel *= 0.9 (dampen)
+     * - vel.y += gravity * wingsStartedUp (counteract gravity only)
+     * - Body segments get forward thrust toward the segment ahead of them
+     * - pos += perp * 2.5 * waveVal — POSITION offset, not velocity, for visible undulation
+     * - Head gets thrust toward moveTarget with a DegToVec(bodyWave*10)*60 oscillation wobble
+     *   that creates the characteristic swimming flight path
+     *
+     * 3D adaptation: two perpendicular axes create helical swimming through all 3 dimensions
+     * instead of the C# 2D horizontal-only wave.
+     */
+    private void updateFlyPhysics() {
+        bodyWave += 1f;
+        moving = true;
+
+        for (int i = 0; i < totalSegments; i++) {
+            if (segments[i] == null || segments[i].isRemoved()) continue;
+
+            float num = (float) i / (float) (totalSegments - 1);
+            if (!bodyDirection) num = 1f - num;
+
+            // C#: sin((bodyWave - num * lerp(12,28,size)) * PI * 0.11)
+            float wavePhase = (bodyWave - num * MathHelper.lerp(size, 12f, 28f)) * (float) Math.PI * 0.11f;
+            float waveVal = (float) Math.sin(wavePhase);
+            // Second wave 90° offset for 3D helical swimming
+            float waveVal2 = (float) Math.cos(wavePhase);
+
+            // C#: vel *= 0.9
+            segments[i].segmentVelocity = segments[i].segmentVelocity.multiply(0.9);
+
+            // C#: vel.y += gravity * wingsStartedUp
+            // Since MC gravity is disabled (setNoGravity(true)), we apply manual gravity (−0.06)
+            // then counteract it based on wingsStartedUp. Net: 0 when hovering, −0.06 when grounded.
+            segments[i].segmentVelocity = segments[i].segmentVelocity.add(0, 0.06 * (wingsStartedUp - 1.0), 0);
+
+            // Body segments (not head/tail) get forward thrust + wave position offset
+            if (i > 0 && i < totalSegments - 1) {
+                int ahead = bodyDirection ? (i - 1) : (i + 1);
+                if (ahead >= 0 && ahead < totalSegments && segments[ahead] != null && !segments[ahead].isRemoved()) {
+                    Vec3d toAhead = segments[ahead].getPos().subtract(segments[i].getPos());
+                    double len = toAhead.length();
+                    if (len > 0.001) {
+                        Vec3d dir = toAhead.normalize();
+
+                        // C#: vel += vector * 0.5 * lerp(0.5, 1.5, size)
+                        // Forward thrust per body segment — pulls each segment toward the one ahead
+                        segments[i].segmentVelocity = segments[i].segmentVelocity.add(
+                                dir.multiply(0.045 * MathHelper.lerp(size, 0.5f, 1.5f)));
+
+                        // Compute TWO perpendicular axes for 3D wave displacement.
+                        // This is the critical difference from the 2D C# code:
+                        // perp1 = horizontal perpendicular, perp2 = vertical perpendicular
+                        // Together they create a helical swimming motion in all 3 dimensions.
+                        Vec3d perp1 = dir.crossProduct(new Vec3d(0, 1, 0));
+                        if (perp1.lengthSquared() < 0.01) {
+                            // Direction is nearly vertical — use X axis as reference
+                            perp1 = dir.crossProduct(new Vec3d(1, 0, 0));
+                        }
+                        perp1 = perp1.normalize();
+
+                        Vec3d perp2 = perp1.crossProduct(dir);
+                        if (perp2.lengthSquared() > 0.001) {
+                            perp2 = perp2.normalize();
+                        } else {
+                            perp2 = new Vec3d(0, 1, 0);
+                        }
+
+                        // C#: pos += perp * 2.5 * waveVal — direct POSITION offset (not velocity!)
+                        // 2.5 C# pixels ≈ 0.0625 MC blocks. Use both perpendiculars for 3D swimming.
+                        double waveStrength = 0.065;
+                        Vec3d waveDisplacement = perp1.multiply(waveVal * waveStrength)
+                                .add(perp2.multiply(waveVal2 * waveStrength * 0.5));
+
+                        segments[i].setPosition(segments[i].getPos().add(waveDisplacement));
+                    }
+                }
+            }
+        }
+
+        // Head thrust toward moveTarget with swimming wobble.
+        // C#: HeadChunk.vel += DirVec(head, moveToPos + DegToVec(bodyWave * 10) * 60) * 4 * lerp(0.7,1.3,size)
+        // The DegToVec wobble makes the head trace a circling/swimming path through the air,
+        // which the body segments then trail behind in a 3D undulating pattern.
+        CentipedeHeadEntity head = getLeadingHead();
+        if (head != null && !head.isRemoved()) {
+            Vec3d headPos = head.getPos();
+
+            // Wobble: circular oscillation in horizontal + slight vertical
+            double wobbleAngle = bodyWave * 10.0 * Math.PI / 180.0;
+            double wobbleRadius = 60.0 * PX; // 60 C# pixels → MC blocks
+            Vec3d wobble = new Vec3d(
+                    Math.cos(wobbleAngle) * wobbleRadius,
+                    Math.sin(wobbleAngle * 0.7) * wobbleRadius * 0.3,
+                    Math.sin(wobbleAngle) * wobbleRadius);
+
+            Vec3d adjustedTarget = moveTarget.add(wobble);
+            Vec3d dir = adjustedTarget.subtract(headPos);
+            double dist = dir.length();
+            if (dist > 0.3) {
+                dir = dir.normalize();
+                // C#: 4 * lerp(0.7, 1.3, size) pixels/frame → scaled to MC
+                double speed = 0.1 * MathHelper.lerp(size, 0.7f, 1.3f);
+                head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed));
+            }
+
+            this.setPosition(head.getPos());
+        }
+
+        // Stiffness — keeps the chain from folding on itself
+        float stiffnessForce = (float) (MathHelper.lerp(shockCharge, 1.0, 6.0) * MathHelper.lerp(size, 1.0, 2.0));
+        float stiffnessMC = stiffnessForce * 0.015f;
+        for (int i = 0; i < totalSegments - 2; i++) {
+            if (segments[i] == null || segments[i + 2] == null) continue;
+            if (segments[i].isRemoved() || segments[i + 2].isRemoved()) continue;
+
+            Vec3d diff = segments[i].getPos().subtract(segments[i + 2].getPos());
+            double dist = diff.length();
+            if (dist > 0.01) {
+                Vec3d push = diff.normalize().multiply(stiffnessMC);
+                segments[i].segmentVelocity = segments[i].segmentVelocity.add(push);
+                segments[i + 2].segmentVelocity = segments[i + 2].segmentVelocity.subtract(push);
+            }
+        }
+
+        // Apply velocity (no surface adhesion when flying)
+        for (int i = 0; i < totalSegments; i++) {
+            if (segments[i] == null || segments[i].isRemoved()) continue;
+            Vec3d vel = segments[i].segmentVelocity;
+
+            // Decay surface normals when flying (used by renderers for orientation)
+            segments[i].surfaceNormalX *= 0.9f;
+            segments[i].surfaceNormalY *= 0.9f;
+            segments[i].surfaceNormalZ *= 0.9f;
+
+            Vec3d oldPos = segments[i].getPos();
+            segments[i].noClip = false;
+            segments[i].move(MovementType.SELF, vel);
+            segments[i].noClip = true;
+            segments[i].segmentVelocity = segments[i].getPos().subtract(oldPos);
+        }
+
+        // Chain spacing constraints
+        for (int iter = 0; iter < 3; iter++) {
+            for (int i = 0; i < totalSegments - 1; i++) {
+                enforceSpacing(i, i + 1);
+            }
+            for (int i = totalSegments - 2; i >= 0; i--) {
+                enforceSpacing(i, i + 1);
+            }
+        }
+    }
 
     @Override
     public boolean isInsideWall() {
@@ -393,13 +693,11 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
 
     @Override
     public boolean handleFallDamage(float fallDistance, float damageMultiplier, DamageSource damageSource) {
-        // Centipedes are immune to fall damage (wall/ceiling crawlers)
         return false;
     }
 
     @Override
     public boolean damage(DamageSource source, float amount) {
-        // Immune to suffocation and fall damage
         if (source.isOf(DamageTypes.IN_WALL) || source.isOf(DamageTypes.FALL)) {
             return false;
         }
@@ -411,58 +709,49 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
         this.dataTracker.set(SHOCK_CHARGE, shockCharge);
         this.dataTracker.set(IS_MOVING, moving);
         this.dataTracker.set(BODY_WAVE, bodyWave);
+        this.dataTracker.set(CENTIPEDE_SIZE, size);
+        this.dataTracker.set(IS_FLYING, flying);
+        this.dataTracker.set(WINGS_STARTED_UP, wingsStartedUp);
+        this.dataTracker.set(WING_FLAP_CYCLE, wingFlapCycle);
     }
 
-    /**
-     * Chain physics: keep segments spaced, apply crawl propulsion.
-     * Follows C# Centipede.Update() for rope/chain constraints
-     * and Centipede.Crawl() for movement.
-     * Uses Entity.move() for proper Minecraft block collision.
-     * Supports wall and ceiling crawling like C# AccessibleTile().
-     */
+    // Crawl physics — same as CentipedeEntity
     private void updateChainPhysics() {
-        // Move controller entity to the leading head position
         CentipedeHeadEntity lead = getLeadingHead();
         if (lead != null && !lead.isRemoved()) {
             this.setPosition(lead.getPos());
         }
 
-        // Update walk cycle (C# walkCycle += bodyDirection ? -1 : 1 / 10)
         if (moving) {
             bodyWave += (bodyDirection ? -1f : 1f) * 0.1f;
         }
 
-        // --- Crawl propulsion (from C# Crawl method) ---
-        // Body segments push toward the segment ahead when moving
         if (moving) {
-            for (int i = 1; i < TOTAL_SEGMENTS - 1; i++) {
+            for (int i = 1; i < totalSegments - 1; i++) {
                 if (segments[i] == null || segments[i].isRemoved()) continue;
                 if (!isNearSurface(segments[i])) continue;
 
-                // Push toward the segment ahead (toward head)
                 int ahead = bodyDirection ? (i + 1) : (i - 1);
                 int behind = bodyDirection ? (i - 1) : (i + 1);
 
-                if (ahead >= 0 && ahead < TOTAL_SEGMENTS && segments[ahead] != null && !segments[ahead].isRemoved()) {
+                if (ahead >= 0 && ahead < totalSegments && segments[ahead] != null && !segments[ahead].isRemoved()) {
                     if (isNearSurface(segments[ahead])) {
                         Vec3d toAhead = segments[ahead].getPos().subtract(segments[i].getPos()).normalize();
-                        // C#: vel += DirVec(...) * 1.5 * Lerp(0.5,1.5,size) * 1.25 for Red
-                        segments[i].segmentVelocity = segments[i].segmentVelocity.add(toAhead.multiply(0.085));
+                        segments[i].segmentVelocity = segments[i].segmentVelocity.add(
+                                toAhead.multiply(0.068 * MathHelper.lerp(size, 0.5f, 1.5f)));
                     }
                 }
 
-                // Pull away from the segment behind (C#: vel -= DirVec * 0.8 * Lerp(...))
-                if (behind >= 0 && behind < TOTAL_SEGMENTS && segments[behind] != null && !segments[behind].isRemoved()) {
+                if (behind >= 0 && behind < totalSegments && segments[behind] != null && !segments[behind].isRemoved()) {
                     Vec3d toBehind = segments[behind].getPos().subtract(segments[i].getPos()).normalize();
-                    segments[i].segmentVelocity = segments[i].segmentVelocity.subtract(toBehind.multiply(0.05));
+                    segments[i].segmentVelocity = segments[i].segmentVelocity.subtract(toBehind.multiply(0.04));
                 }
             }
         }
 
-        // --- Stiffness: push non-adjacent segments apart (C# bodyChunkConnections push) ---
-        float stiffnessForce = (float)(MathHelper.lerp(shockCharge, 1.0, 6.0) * MathHelper.lerp(SIZE, 1.0, 2.0));
+        float stiffnessForce = (float) (MathHelper.lerp(shockCharge, 1.0, 6.0) * MathHelper.lerp(size, 1.0, 2.0));
         float stiffnessMC = stiffnessForce * 0.015f;
-        for (int i = 0; i < TOTAL_SEGMENTS - 2; i++) {
+        for (int i = 0; i < totalSegments - 2; i++) {
             if (segments[i] == null || segments[i + 2] == null) continue;
             if (segments[i].isRemoved() || segments[i + 2].isRemoved()) continue;
 
@@ -475,85 +764,55 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
             }
         }
 
-        // --- Apply velocity, gravity, surface adhesion to each segment ---
-        for (int i = 0; i < TOTAL_SEGMENTS; i++) {
+        for (int i = 0; i < totalSegments; i++) {
             if (segments[i] == null || segments[i].isRemoved()) continue;
 
             Vec3d vel = segments[i].segmentVelocity;
-
-            // Compute surface normal for this segment (for wall/ceiling crawling)
             Vec3d surfaceNormal = computeSurfaceNormal(segments[i]);
             boolean onSurface = surfaceNormal.lengthSquared() > 0.01;
 
             if (onSurface) {
-                // C# Crawl: on accessible tile, vel *= 0.7 and cancel gravity entirely
                 vel = vel.multiply(0.7);
-
-                // Adhere to surface: push segment toward surface (cancel gravity + stick)
-                // This allows ceiling and wall crawling
                 vel = vel.subtract(surfaceNormal.multiply(0.06));
-
-                // Store surface normal on segment for renderer roll computation
                 segments[i].surfaceNormalX = (float) surfaceNormal.x;
                 segments[i].surfaceNormalY = (float) surfaceNormal.y;
                 segments[i].surfaceNormalZ = (float) surfaceNormal.z;
             } else {
-                // In air: apply gravity, less friction
                 vel = vel.add(0, -0.06, 0);
                 vel = vel.multiply(0.92);
-
-                // Decay surface normal
                 segments[i].surfaceNormalX *= 0.9f;
                 segments[i].surfaceNormalY *= 0.9f;
                 segments[i].surfaceNormalZ *= 0.9f;
             }
 
-            // Use Minecraft's collision system via Entity.move()
             Vec3d oldPos = segments[i].getPos();
             segments[i].noClip = false;
             segments[i].move(MovementType.SELF, vel);
             segments[i].noClip = true;
-
-            // Update velocity to reflect actual movement (collision may have truncated it)
-            Vec3d actualMovement = segments[i].getPos().subtract(oldPos);
-            segments[i].segmentVelocity = actualMovement;
+            segments[i].segmentVelocity = segments[i].getPos().subtract(oldPos);
         }
 
-        // --- Chain constraints: enforce spacing (C# connectionRopes) ---
-        // Multiple iterations for convergence
         for (int iter = 0; iter < 3; iter++) {
-            for (int i = 0; i < TOTAL_SEGMENTS - 1; i++) {
+            for (int i = 0; i < totalSegments - 1; i++) {
                 enforceSpacing(i, i + 1);
             }
-            for (int i = TOTAL_SEGMENTS - 2; i >= 0; i--) {
+            for (int i = totalSegments - 2; i >= 0; i--) {
                 enforceSpacing(i, i + 1);
             }
         }
     }
 
-    /**
-     * Compute and set the yaw, pitch, and surface normal for each segment.
-     * Used by client-side renderers for full pitch/yaw/roll orientation.
-     * Mirrors C# CentipedeGraphics.bodyRotations / RotatAtChunk().
-     */
     private void updateSegmentRotations() {
-        for (int i = 0; i < TOTAL_SEGMENTS; i++) {
+        for (int i = 0; i < totalSegments; i++) {
             if (segments[i] == null || segments[i].isRemoved()) continue;
 
             Vec3d dir = getChainDirection(i);
-
-            // Compute yaw from horizontal direction
             float yaw = (float) (Math.atan2(-dir.x, dir.z) * (180.0 / Math.PI));
-
-            // For the rear head, flip 180 degrees
-            if (i == TOTAL_SEGMENTS - 1) {
+            if (i == totalSegments - 1) {
                 yaw += 180f;
             }
-
-            // Compute pitch from vertical component of chain direction
             float pitch = (float) (Math.asin(MathHelper.clamp(dir.y, -1, 1)) * (180.0 / Math.PI));
 
-            // Set entity yaw/bodyYaw so GeckoLib picks it up
             segments[i].prevBodyYaw = segments[i].bodyYaw;
             segments[i].bodyYaw = yaw;
             segments[i].prevYaw = segments[i].getYaw();
@@ -570,27 +829,20 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
         Vec3d posB = segments[b].getPos();
         Vec3d diff = posB.subtract(posA);
         double dist = diff.length();
-
         if (dist < 0.001) return;
 
         double spacing = getSegmentSpacing(a, b);
         double error = dist - spacing;
         Vec3d correction = diff.normalize().multiply(error * 0.5);
 
-        // Move both segments toward each other using collision-aware movement
         moveWithCollision(segments[a], correction);
         moveWithCollision(segments[b], correction.negate());
 
-        // Also adjust velocities
         Vec3d velCorrection = correction.multiply(0.5);
         segments[a].segmentVelocity = segments[a].segmentVelocity.add(velCorrection);
         segments[b].segmentVelocity = segments[b].segmentVelocity.subtract(velCorrection);
     }
 
-    /**
-     * Move a segment using Minecraft's collision system.
-     * Temporarily disables noClip so Entity.move() checks block collisions.
-     */
     private void moveWithCollision(CentipedeSegmentEntity seg, Vec3d movement) {
         seg.noClip = false;
         seg.move(MovementType.SELF, movement);
@@ -598,22 +850,18 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
     }
 
     private Vec3d getChainDirection(int index) {
-        if (index <= 0 && segments[1] != null) {
+        if (index <= 0 && segments.length > 1 && segments[1] != null) {
             return segments[1].getPos().subtract(segments[0].getPos()).normalize();
         }
-        if (index >= TOTAL_SEGMENTS - 1 && segments[TOTAL_SEGMENTS - 2] != null) {
-            return segments[TOTAL_SEGMENTS - 1].getPos().subtract(segments[TOTAL_SEGMENTS - 2].getPos()).normalize();
+        if (index >= totalSegments - 1 && segments[totalSegments - 2] != null) {
+            return segments[totalSegments - 1].getPos().subtract(segments[totalSegments - 2].getPos()).normalize();
         }
-        if (segments[index - 1] != null && segments[index + 1] != null) {
+        if (index > 0 && index < totalSegments - 1 && segments[index - 1] != null && segments[index + 1] != null) {
             return segments[index + 1].getPos().subtract(segments[index - 1].getPos()).normalize();
         }
         return new Vec3d(1, 0, 0);
     }
 
-    /**
-     * Check if a segment is near any surface (floor, wall, or ceiling).
-     * Mirrors C# AccessibleTile / ClimbableTile — centipedes can use any adjacent surface.
-     */
     private boolean isNearSurface(Entity entity) {
         BlockPos pos = entity.getBlockPos();
         World world = entity.getWorld();
@@ -623,19 +871,10 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
                 return true;
             }
         }
-        // Also check one block below with a slightly larger range
         BlockPos below = entity.getBlockPos().down();
-        if (world.getBlockState(below).isSolidBlock(world, below)) return true;
-        return false;
+        return world.getBlockState(below).isSolidBlock(world, below);
     }
 
-    /**
-     * Compute the surface normal for a segment based on nearby solid blocks.
-     * This is a weighted average of directions pointing AWAY from nearby solid surfaces.
-     * Mirrors C# CentipedeGraphics.BestBodyRotatAtChunk() which checks perpendicular
-     * directions for solids and orients the body accordingly.
-     * Returns Vec3d.ZERO if not near any surface.
-     */
     private Vec3d computeSurfaceNormal(Entity entity) {
         BlockPos pos = entity.getBlockPos();
         World world = entity.getWorld();
@@ -645,17 +884,11 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
         for (Direction dir : Direction.values()) {
             BlockPos neighbor = pos.offset(dir);
             if (world.getBlockState(neighbor).isSolidBlock(world, neighbor)) {
-                // Surface detected: normal points AWAY from the solid block
-                normal = normal.add(
-                    -dir.getOffsetX(),
-                    -dir.getOffsetY(),
-                    -dir.getOffsetZ()
-                );
+                normal = normal.add(-dir.getOffsetX(), -dir.getOffsetY(), -dir.getOffsetZ());
                 count++;
             }
         }
 
-        // Also check below for ground (common case)
         BlockPos below = entity.getBlockPos().down();
         if (world.getBlockState(below).isSolidBlock(world, below)) {
             normal = normal.add(0, 1, 0);
@@ -669,37 +902,32 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
     }
 
     // =========================================================================
-    // Movement API (called by AI goals)
+    // Movement API
     // =========================================================================
 
-    /**
-     * Set the target position the leading head should move toward.
-     * Called by AI goals.
-     */
+    @Override
     public void setMoveTarget(Vec3d target) {
         this.moveTarget = target;
         this.moving = true;
     }
 
+    @Override
     public void stopMoving() {
         this.moving = false;
         this.currentPath = null;
         this.currentSearch = null;
     }
 
+    @Override
     public boolean isMoving() {
         return moving;
     }
 
     // =========================================================================
-    // Pathfinding API (from C# PathFinder → StandardPather → CentipedePather)
+    // Pathfinding
     // =========================================================================
 
-    /**
-     * Request a new path to the given goal position.
-     * Uses the incremental pathfinder that spreads computation across ticks.
-     * Mirrors C# PathFinder.Update() with stepsPerFrame.
-     */
+    @Override
     public void requestPath(BlockPos goal) {
         if (goal == null) return;
 
@@ -713,82 +941,48 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
         pathRecalcTimer = PATH_RECALC_INTERVAL;
     }
 
-    /**
-     * Request a path to a Vec3d target (converts to BlockPos).
-     */
+    @Override
     public void requestPathTo(Vec3d target) {
         requestPath(BlockPos.ofFloored(target.x, target.y, target.z));
     }
 
-    /**
-     * Update the incremental pathfinder search each tick.
-     * Mirrors C# PathFinder.Update() main loop.
-     */
     private void updatePathfinding() {
-        // Process incremental search steps
         if (currentSearch != null && !currentSearch.isFinished()) {
             currentSearch.step(PATH_STEPS_PER_TICK);
-
             if (currentSearch.isFinished()) {
                 currentPath = currentSearch.getPath();
                 pathIndex = 0;
                 currentSearch = null;
             }
         }
-
-        // Periodic path recalculation
         if (pathRecalcTimer > 0) {
             pathRecalcTimer--;
         }
     }
 
-    /**
-     * Check if the current path needs recalculation.
-     * Returns true if:
-     * - No path exists
-     * - Goal has moved significantly
-     * - Path has become invalid (blocked by world changes)
-     * - Recalc timer has expired
-     */
+    @Override
     public boolean needsPathRecalc(Vec3d goalPos) {
         if (currentPath == null || currentPath.isEmpty()) return true;
         if (pathRecalcTimer > 0) return false;
 
-        // Check if goal moved significantly
         if (lastPathGoal != null) {
             BlockPos newGoal = BlockPos.ofFloored(goalPos.x, goalPos.y, goalPos.z);
             if (newGoal.getManhattanDistance(lastPathGoal) > 3) return true;
         }
 
-        // Check if path is still valid (sample a few waypoints)
         if (!CentipedePathfinder.isPathValid(this.getWorld(), currentPath)) return true;
-
         return false;
     }
 
-    /**
-     * Get the current path (may be null if no path computed yet).
-     */
-    public List<BlockPos> getCurrentPath() {
-        return currentPath;
-    }
-
-    /**
-     * Check if a search is currently in progress.
-     */
-    public boolean isSearching() {
-        return currentSearch != null && !currentSearch.isFinished();
-    }
-
-    /**
-     * Follow the current path, driving segment velocity toward the next waypoint.
-     * Mirrors C# StandardPather.FollowPath() + Centipede.Crawl().
-     *
-     * Called by AI goals instead of the old direct driveTowardTarget().
-     */
+    @Override
     public void followCurrentPath() {
+        if (flying) {
+            // When flying, updateFlyPhysics() handles all movement (head wobble + body thrust).
+            // AI goals just need to set moveTarget; no additional thrust here.
+            return;
+        }
+
         if (currentPath == null || currentPath.isEmpty()) {
-            // No path available — fall back to direct movement
             driveTowardTarget();
             return;
         }
@@ -798,19 +992,15 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
 
         Vec3d headPos = head.getPos();
 
-        // Find the next waypoint to move toward using path following
-        // (mirrors C# StandardPather.FollowPath finding best connection)
         BlockPos nextWaypoint = CentipedePathfinder.followPath(
                 currentPath, headPos, PATH_LOOK_AHEAD);
 
         if (nextWaypoint == null) {
-            // Path exhausted
             currentPath = null;
             moving = false;
             return;
         }
 
-        // Check if we've reached the end of the path
         BlockPos lastWaypoint = currentPath.get(currentPath.size() - 1);
         double distToEnd = headPos.squaredDistanceTo(
                 lastWaypoint.getX() + 0.5, lastWaypoint.getY() + 0.5, lastWaypoint.getZ() + 0.5);
@@ -820,7 +1010,6 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
             return;
         }
 
-        // Drive toward the waypoint
         Vec3d waypointCenter = new Vec3d(
                 nextWaypoint.getX() + 0.5,
                 nextWaypoint.getY() + 0.5,
@@ -828,12 +1017,10 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
 
         Vec3d dir = waypointCenter.subtract(headPos);
         double dist = dir.length();
-
         if (dist < 0.1) return;
         dir = dir.normalize();
 
-        // C# Crawl: HeadChunk.vel += DirVec(HeadChunk.pos, moveToPos) * speed
-        double speed = 0.18 * SIZE * 1.25;
+        double speed = 0.14 * MathHelper.lerp(size, 0.5f, 1.5f);
 
         if (isNearSurface(head)) {
             head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed));
@@ -841,26 +1028,25 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
             head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed * 0.3));
         }
 
-        // Body propulsion: middle segments push along path direction
-        for (int i = 1; i < TOTAL_SEGMENTS - 1; i++) {
+        for (int i = 1; i < totalSegments - 1; i++) {
             if (segments[i] == null || segments[i].isRemoved()) continue;
             if (!isNearSurface(segments[i])) continue;
 
             int inFront = bodyDirection ? (i + 1) : (i - 1);
-            if (inFront < 0 || inFront >= TOTAL_SEGMENTS) continue;
+            if (inFront < 0 || inFront >= totalSegments) continue;
             if (segments[inFront] == null) continue;
 
             Vec3d towardFront = segments[inFront].getPos().subtract(segments[i].getPos()).normalize();
-            segments[i].segmentVelocity = segments[i].segmentVelocity.add(towardFront.multiply(0.06));
+            segments[i].segmentVelocity = segments[i].segmentVelocity.add(towardFront.multiply(0.05));
         }
     }
 
-    /**
-     * Drive the leading head toward the move target.
-     * Called each tick by the crawl AI goal.
-     * Mirrors C# Centipede.Crawl() and Centipede.Act() logic.
-     */
     public void driveTowardTarget() {
+        // When flying, all physics (head thrust + wobble + body segment thrust)
+        // are handled by updateFlyPhysics(). Do NOT apply additional thrust here
+        // or it doubles up and the entity rockets out of control.
+        if (flying) return;
+
         CentipedeHeadEntity head = getLeadingHead();
         if (head == null || head.isRemoved()) return;
 
@@ -874,47 +1060,35 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
         }
 
         dir = dir.normalize();
-
-        // C# Crawl: HeadChunk.vel += DirVec(HeadChunk.pos, moveToPos) * LerpMap(num, 0, bodyChunks.Length, 6, 3) * Lerp(0.7, 1.3, size)
-        // For Red centipede (size=1.0), that's about 3 * 1.3 = 3.9 in C# units
-        // Convert to MC: 3.9 * (1/20) pixels ≈ 0.195 blocks/tick
-        double speed = 0.18 * SIZE * 1.25; // Red centipede speed boost
-
-        // Check if head is on any accessible surface (floor, wall, or ceiling)
+        double speed = 0.14 * MathHelper.lerp(size, 0.5f, 1.5f);
         if (isNearSurface(head)) {
             head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed));
         } else {
-            // In air, less control
             head.segmentVelocity = head.segmentVelocity.add(dir.multiply(speed * 0.3));
         }
 
-        // Body propulsion: middle segments push toward the direction of travel (C# Crawl body wave)
-        int leadIdx = getHeadIndex();
-        for (int i = 1; i < TOTAL_SEGMENTS - 1; i++) {
+        for (int i = 1; i < totalSegments - 1; i++) {
             if (segments[i] == null || segments[i].isRemoved()) continue;
             if (!isNearSurface(segments[i])) continue;
 
-            // Determine direction toward the segment in front (toward head)
             int inFront = bodyDirection ? (i + 1) : (i - 1);
-            if (inFront < 0 || inFront >= TOTAL_SEGMENTS) continue;
+            if (inFront < 0 || inFront >= totalSegments) continue;
             if (segments[inFront] == null) continue;
 
             Vec3d towardFront = segments[inFront].getPos().subtract(segments[i].getPos()).normalize();
-            // C#: bodyChunks[i].vel += DirVec(...) * 1.5 * Lerp(0.5, 1.5, size) * 1.25
-            segments[i].segmentVelocity = segments[i].segmentVelocity.add(towardFront.multiply(0.06));
+            segments[i].segmentVelocity = segments[i].segmentVelocity.add(towardFront.multiply(0.05));
         }
     }
 
-    /**
-     * Handle body direction changes (C# Act() directionChange logic).
-     * Uses CentipedePather.TileClosestToGoal() to determine which head
-     * is closer to the goal along accessible surfaces.
-     */
+    @Override
     public void updateDirectionChange() {
         if (directionChangeBlock > 0) {
             if (moving) directionChangeBlock--;
             return;
         }
+
+        // C#: Centiwing has higher direction change threshold (40/10 vs 10/2)
+        if (flying) return; // Don't change direction while flying
 
         if (huntTarget == null) return;
         BlockPos targetBlock = huntTarget.getBlockPos();
@@ -923,18 +1097,15 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
         CentipedeHeadEntity rear = getRearHead();
         if (front == null || rear == null) return;
 
-        // Use CentipedePather.TileClosestToGoal: compare the two head positions
-        // to determine which is better positioned to reach the goal
         boolean rearIsCloser = CentipedePathfinder.tileClosestToGoal(
                 this.getWorld(), rear.getBlockPos(), front.getBlockPos(), targetBlock);
 
         if (rearIsCloser) {
             changeDirCounter++;
-            if (changeDirCounter > 5) {
+            if (changeDirCounter > 20) { // C#: Centiwing uses flag ? 40 : 10
                 bodyDirection = !bodyDirection;
                 directionChangeBlock = 40;
                 changeDirCounter = 0;
-                // Re-request path from the new leading head
                 if (currentPath != null) {
                     requestPath(targetBlock);
                 }
@@ -945,33 +1116,24 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
     }
 
     // =========================================================================
-    // Grab & Shock system (core combat mechanic)
+    // Grab & Shock system (same as CentipedeEntity)
     // =========================================================================
 
-    /**
-     * Called each tick to check for entities to grab with head segments.
-     * Mirrors C# Centipede.Collide() — grab on collision with prey.
-     */
     private void updateGrabs() {
         CentipedeHeadEntity head0 = (segments[0] instanceof CentipedeHeadEntity h) ? h : null;
-        CentipedeHeadEntity head1 = (segments[TOTAL_SEGMENTS - 1] instanceof CentipedeHeadEntity h) ? h : null;
+        CentipedeHeadEntity head1 = (segments[totalSegments - 1] instanceof CentipedeHeadEntity h) ? h : null;
 
-        // Check for entities near each head for grabbing
         if (head0 != null) checkHeadGrab(head0);
         if (head1 != null) checkHeadGrab(head1);
 
-        // If one head has grabbed, drive the other head toward the grabbed entity
-        // (C# UpdateGrasp: when grasps[1-g] == null, move other head toward grabbed)
         if (head0 != null && head1 != null) {
-            // Determine which head is grabbing and which is free
             CentipedeHeadEntity grabbingHead = null;
             CentipedeHeadEntity freeHead = null;
-            int grabbingIdx = -1;
 
             if (head0.isGrabbing() && !head1.isGrabbing()) {
-                grabbingHead = head0; freeHead = head1; grabbingIdx = 0;
+                grabbingHead = head0; freeHead = head1;
             } else if (head1.isGrabbing() && !head0.isGrabbing()) {
-                grabbingHead = head1; freeHead = head0; grabbingIdx = TOTAL_SEGMENTS - 1;
+                grabbingHead = head1; freeHead = head0;
             }
 
             if (grabbingHead != null && freeHead != null) {
@@ -981,8 +1143,6 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
                     moveTarget = grabPos;
                     moving = true;
 
-                    // Ensure direction points the FREE head as the leader
-                    // so crawl drives the free head toward the prey
                     boolean freeHeadIsAt0 = (freeHead == head0);
                     boolean needsDirection = freeHeadIsAt0 ? bodyDirection : !bodyDirection;
                     if (needsDirection && directionChangeBlock <= 0) {
@@ -992,27 +1152,21 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
 
                     doubleGrabCharge = Math.min(1.0f, doubleGrabCharge + 0.02f);
 
-                    // Strong constant force pulling free head toward target
-                    // (C# UpdateGrasp: aggressive velocity toward grabbed creature)
                     Vec3d toTarget = grabPos.subtract(freeHead.getPos());
                     double distToTarget = toTarget.length();
                     if (distToTarget > 0.3) {
-                        Vec3d dir = toTarget.normalize();
-                        // Base force + ramping force as charge builds
+                        Vec3d dirVec = toTarget.normalize();
                         double force = 0.15 + 0.2 * doubleGrabCharge;
-                        freeHead.segmentVelocity = freeHead.segmentVelocity.add(dir.multiply(force));
+                        freeHead.segmentVelocity = freeHead.segmentVelocity.add(dirVec.multiply(force));
                     }
 
-                    // Body curl: segments actively pull toward the grabbed entity
-                    // This makes the centipede wrap its body around the prey
-                    for (int i = 1; i < TOTAL_SEGMENTS - 1; i++) {
+                    for (int i = 1; i < totalSegments - 1; i++) {
                         if (segments[i] == null || segments[i].isRemoved()) continue;
                         Vec3d segToTarget = grabPos.subtract(segments[i].getPos());
                         double segDist = segToTarget.length();
                         if (segDist > 1.0) {
-                            // Curl force is stronger for segments closer to the free head
-                            int distFromFree = freeHeadIsAt0 ? i : (TOTAL_SEGMENTS - 1 - i);
-                            double curlWeight = 1.0 - (double) distFromFree / TOTAL_SEGMENTS;
+                            int distFromFree = freeHeadIsAt0 ? i : (totalSegments - 1 - i);
+                            double curlWeight = 1.0 - (double) distFromFree / totalSegments;
                             double curlForce = 0.04 * curlWeight * doubleGrabCharge;
                             segments[i].segmentVelocity = segments[i].segmentVelocity.add(
                                     segToTarget.normalize().multiply(curlForce));
@@ -1025,34 +1179,28 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
             }
         }
 
-        // Shock give-up: if wrapping takes too long, release and retry
         if (doubleGrabCharge > 0.85f) {
             shockGiveUpCounter++;
             if (shockGiveUpCounter >= 160) {
-                if (head0 != null) head0.releaseGrab();
-                if (head1 != null) head1.releaseGrab();
+                CentipedeHeadEntity head0g = (segments[0] instanceof CentipedeHeadEntity h) ? h : null;
+                CentipedeHeadEntity head1g = (segments[totalSegments - 1] instanceof CentipedeHeadEntity h) ? h : null;
+                if (head0g != null) head0g.releaseGrab();
+                if (head1g != null) head1g.releaseGrab();
                 shockGiveUpCounter = 0;
                 doubleGrabCharge = 0;
             }
         }
     }
 
-    /**
-     * Check if a head should grab a nearby entity.
-     * C# Collide: grabs on collision with prey, plays attach sound.
-     */
     private void checkHeadGrab(CentipedeHeadEntity head) {
         if (head.isGrabbing()) return;
 
-        // Find entities near this head
         Box searchBox = head.getBoundingBox().expand(0.8);
         List<LivingEntity> nearby = this.getWorld().getEntitiesByClass(
-                LivingEntity.class, searchBox,
-                e -> isValidPrey(e));
+                LivingEntity.class, searchBox, this::isValidPrey);
 
         for (LivingEntity target : nearby) {
             if (head.tryGrab(target)) {
-                // C#: room.PlaySound(SoundID.Centipede_Attach, ...)
                 this.getWorld().playSound(null, head.getBlockPos(),
                         SoundEvents.ENTITY_SPIDER_AMBIENT, this.getSoundCategory(), 0.6f, 1.8f);
                 break;
@@ -1060,33 +1208,21 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
         }
     }
 
-    /**
-     * Check if an entity is valid prey for the centipede.
-     * Ignores players not in survival mode.
-     */
     private boolean isValidPrey(LivingEntity entity) {
         if (entity == this) return false;
         if (entity instanceof CentipedeSegmentEntity) return false;
-        if (entity instanceof RedCentipedeEntity) return false;
+        if (entity instanceof CentipedeController) return false;
         if (entity.isRemoved() || entity.isDead()) return false;
         if (entity.isInvulnerable()) return false;
-        // Ignore players not in survival mode
         if (entity instanceof PlayerEntity player) {
             if (player.isCreative() || player.isSpectator()) return false;
         }
         return true;
     }
 
-    /**
-     * Update shock charge. When both heads grab the same (or any) target,
-     * charge builds. At full charge → shock → instakill.
-     * From C# UpdateGrasp: shockCharge += 1/Lerp(100,5,size)
-     * For Red (size=1): 1/5 = 0.2 per tick → 5 ticks to charge
-     * In MC at 20tps that's 0.25 seconds which may be too fast; we slow it down.
-     */
     private void updateShockCharge() {
         CentipedeHeadEntity head0 = (segments[0] instanceof CentipedeHeadEntity h) ? h : null;
-        CentipedeHeadEntity head1 = (segments[TOTAL_SEGMENTS - 1] instanceof CentipedeHeadEntity h) ? h : null;
+        CentipedeHeadEntity head1 = (segments[totalSegments - 1] instanceof CentipedeHeadEntity h) ? h : null;
 
         if (head0 == null || head1 == null) return;
 
@@ -1094,7 +1230,6 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
         boolean head1Grab = head1.isGrabbing();
 
         if (head0Grab && head1Grab) {
-            // Both heads grabbing — check if they're grabbing the same target or are close enough
             LivingEntity target0 = head0.getGrabbedEntity();
             LivingEntity target1 = head1.getGrabbedEntity();
 
@@ -1102,7 +1237,6 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
             boolean headsCloseToTarget = false;
 
             if (!sameTarget && target0 != null) {
-                // Check if head1 is close to target0's body
                 headsCloseToTarget = head1.getPos().distanceTo(target0.getPos())
                         < target0.getWidth() + 3.0;
             }
@@ -1112,12 +1246,10 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
             }
 
             if (sameTarget || headsCloseToTarget) {
-                // C#: shockCharge += 1 / Lerp(100, 5, size) → for Red (size=1): 0.2/tick
-                // Charge over ~1.5 seconds (30 ticks); both heads are in position
-                shockCharge += 0.033f;
+                float chargeRate = 1.0f / MathHelper.lerp(size, 100f, 5f);
+                shockCharge += chargeRate * 2f;
 
                 if (shockCharge >= 1.0f) {
-                    // SHOCK — instakill!
                     LivingEntity victim = (target0 != null) ? target0 : target1;
                     shock(victim);
                     shockCharge = 0;
@@ -1126,7 +1258,6 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
                 }
             }
         } else if (head0Grab || head1Grab) {
-            // Only one head grabbing — check if the other head is near the grabbed entity's body
             CentipedeHeadEntity grabbing = head0Grab ? head0 : head1;
             CentipedeHeadEntity free = head0Grab ? head1 : head0;
             LivingEntity grabbed = grabbing.getGrabbedEntity();
@@ -1134,9 +1265,8 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
             if (grabbed != null) {
                 double dist = free.getPos().distanceTo(grabbed.getPos());
                 if (dist < grabbed.getWidth() + 2.5) {
-                    // Free head is close to the grabbed entity — build charge!
-                    // C# UpdateGrasp: shockCharge += 1/Lerp(100,5,size)
-                    shockCharge += 0.033f;
+                    float chargeRate = 1.0f / MathHelper.lerp(size, 100f, 5f);
+                    shockCharge += chargeRate * 2f;
                     if (shockCharge >= 1.0f) {
                         shock(grabbed);
                         shockCharge = 0;
@@ -1145,26 +1275,20 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
                 }
             }
         } else {
-            // No grabs — decay charge
             shockCharge = Math.max(0, shockCharge - 1f / 60f);
         }
     }
 
-    /**
-     * Shock a victim entity — instakill for smaller creatures, heavy stun for larger.
-     * From C# Centipede.Shock().
-     */
     private void shock(LivingEntity victim) {
         if (victim == null || victim.isRemoved()) return;
 
-        // Play shock sound
         this.getWorld().playSound(null, this.getBlockPos(),
-                SoundEvents.ENTITY_LIGHTNING_BOLT_IMPACT, this.getSoundCategory(), 1.0f, 1.5f);
+                SoundEvents.ENTITY_LIGHTNING_BOLT_IMPACT, this.getSoundCategory(), 0.8f, 1.5f);
 
-        // Spark particles
         if (this.getWorld() instanceof ServerWorld sw) {
             Vec3d victimPos = victim.getPos();
-            for (int i = 0; i < 15; i++) {
+            int particleCount = (int) MathHelper.lerp(size, 5f, 15f);
+            for (int i = 0; i < particleCount; i++) {
                 sw.spawnParticles(ParticleTypes.ELECTRIC_SPARK,
                         victimPos.x + (random.nextDouble() - 0.5) * 2,
                         victimPos.y + random.nextDouble() * victim.getHeight(),
@@ -1173,7 +1297,6 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
             }
         }
 
-        // Knockback all segments (C#: bodyChunks[j].vel += RNV() * 6)
         for (CentipedeSegmentEntity seg : segments) {
             if (seg != null && !seg.isRemoved()) {
                 seg.segmentVelocity = seg.segmentVelocity.add(
@@ -1183,16 +1306,12 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
             }
         }
 
-        // C#: if TotalMass < centipede.TotalMass → Die()
-        // Red centipede always instakills smaller creatures
-        float centipedeMass = TOTAL_SEGMENTS * 2.0f; // Rough mass approximation
+        float shockDamage = MathHelper.lerp(size, 4f, 20f);
+        float centipedeMass = totalSegments * 2.0f;
         if (victim.getWidth() * victim.getHeight() * 10 < centipedeMass) {
-            // Instakill
             victim.damage(this.getDamageSources().mobAttack(this), Float.MAX_VALUE);
         } else {
-            // Heavy damage + stun
-            victim.damage(this.getDamageSources().mobAttack(this), 20.0f);
-            // Apply slowness as "stun"
+            victim.damage(this.getDamageSources().mobAttack(this), shockDamage);
             victim.setVelocity(
                     (random.nextDouble() - 0.5) * 0.5,
                     0.3,
@@ -1204,10 +1323,12 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
     // Target management
     // =========================================================================
 
+    @Override
     public void setHuntTarget(LivingEntity target) {
         this.huntTarget = target;
     }
 
+    @Override
     public LivingEntity getHuntTarget() {
         return huntTarget;
     }
@@ -1219,7 +1340,6 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
     @Override
     public void onDeath(DamageSource source) {
         super.onDeath(source);
-        // Kill all segments
         for (CentipedeSegmentEntity seg : segments) {
             if (seg != null && !seg.isRemoved()) {
                 seg.discard();
@@ -1230,9 +1350,11 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
     @Override
     public void remove(RemovalReason reason) {
         super.remove(reason);
-        for (CentipedeSegmentEntity seg : segments) {
-            if (seg != null && !seg.isRemoved()) {
-                seg.discard();
+        if (segments != null) {
+            for (CentipedeSegmentEntity seg : segments) {
+                if (seg != null && !seg.isRemoved()) {
+                    seg.discard();
+                }
             }
         }
     }
@@ -1244,12 +1366,17 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
     @Override
     public void writeCustomDataToNbt(NbtCompound nbt) {
         super.writeCustomDataToNbt(nbt);
+        nbt.putFloat("CentipedeSize", size);
         nbt.putBoolean("BodyDirection", bodyDirection);
         nbt.putFloat("ShockCharge", shockCharge);
         nbt.putBoolean("SegmentsSpawned", segmentsSpawned);
+        nbt.putBoolean("Flying", flying);
+        nbt.putFloat("WingsStartedUp", wingsStartedUp);
+        nbt.putInt("FlyModeCounter", flyModeCounter);
+        nbt.putBoolean("WantToFly", wantToFly);
 
-        int[] ids = new int[TOTAL_SEGMENTS];
-        for (int i = 0; i < TOTAL_SEGMENTS; i++) {
+        int[] ids = new int[totalSegments];
+        for (int i = 0; i < totalSegments; i++) {
             ids[i] = segmentIds[i];
         }
         nbt.putIntArray("SegmentIds", ids);
@@ -1258,20 +1385,33 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
     @Override
     public void readCustomDataFromNbt(NbtCompound nbt) {
         super.readCustomDataFromNbt(nbt);
+        if (nbt.contains("CentipedeSize")) {
+            this.size = nbt.getFloat("CentipedeSize");
+            recalcSizeDerivedFields();
+        }
         if (nbt.contains("BodyDirection")) bodyDirection = nbt.getBoolean("BodyDirection");
         if (nbt.contains("ShockCharge")) shockCharge = nbt.getFloat("ShockCharge");
         if (nbt.contains("SegmentsSpawned")) segmentsSpawned = nbt.getBoolean("SegmentsSpawned");
+        if (nbt.contains("Flying")) flying = nbt.getBoolean("Flying");
+        if (nbt.contains("WingsStartedUp")) wingsStartedUp = nbt.getFloat("WingsStartedUp");
+        if (nbt.contains("FlyModeCounter")) flyModeCounter = nbt.getInt("FlyModeCounter");
+        if (nbt.contains("WantToFly")) wantToFly = nbt.getBoolean("WantToFly");
 
         if (nbt.contains("SegmentIds")) {
             int[] ids = nbt.getIntArray("SegmentIds");
-            for (int i = 0; i < Math.min(ids.length, TOTAL_SEGMENTS); i++) {
+            if (segmentIds == null || segmentIds.length != totalSegments) {
+                segmentIds = new int[totalSegments];
+                segments = new CentipedeSegmentEntity[totalSegments];
+                java.util.Arrays.fill(segmentIds, -1);
+            }
+            for (int i = 0; i < Math.min(ids.length, totalSegments); i++) {
                 segmentIds[i] = ids[i];
             }
         }
     }
 
     // =========================================================================
-    // GeckoLib (controller entity is invisible but still needs the interface)
+    // GeckoLib
     // =========================================================================
 
     @Override
@@ -1307,34 +1447,26 @@ public class RedCentipedeEntity extends HostileEntity implements GeoAnimatable, 
 
     @Override
     public int getTotalSegments() {
-        return TOTAL_SEGMENTS;
+        return totalSegments;
     }
 
     @Override
     public float getSize() {
-        return SIZE;
+        return size;
     }
 
-    @Override
-    public float getMaxRadius() {
-        return MAX_RADIUS;
-    }
-
-    /** Red shell color: C# HSL(~0, 0.95, 0.5) → RGB(249, 6, 6) */
     @Override
     public int getShellColorRGB() {
-        return (249 << 16) | (6 << 8) | 6;
+        return SHELL_COLOR;
     }
 
-    /** Red secondary shell color: C# HSL(~0, 0.95, 0.3) → RGB(149, 4, 4) */
     @Override
     public int getSecondaryShellColorRGB() {
-        return (149 << 16) | (4 << 8) | 4;
+        return SECONDARY_SHELL_COLOR;
     }
 
-    /** C# Red centipede leg scale: 1.3 */
     @Override
     public float getLegScale() {
-        return 1.3f;
+        return 0.65f; // C#: Centiwing legs are shorter
     }
 }

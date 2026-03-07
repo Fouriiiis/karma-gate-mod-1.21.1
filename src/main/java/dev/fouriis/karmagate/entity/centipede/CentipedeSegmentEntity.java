@@ -109,12 +109,13 @@ public abstract class CentipedeSegmentEntity extends MobEntity implements GeoAni
 
     /**
      * Resolve the parent centipede controller entity.
+     * Works with any centipede variant (Red, Normal, etc.).
      */
-    public RedCentipedeEntity getParentCentipede() {
+    public CentipedeController getParentCentipede() {
         int pid = getParentId();
         if (pid == -1) return null;
         Entity e = this.getWorld().getEntityById(pid);
-        if (e instanceof RedCentipedeEntity rce) return rce;
+        if (e instanceof CentipedeController cc) return cc;
         return null;
     }
 
@@ -160,7 +161,7 @@ public abstract class CentipedeSegmentEntity extends MobEntity implements GeoAni
         }
 
         // Propagate damage to parent controller's health pool
-        RedCentipedeEntity parent = getParentCentipede();
+        CentipedeController parent = getParentCentipede();
         if (parent != null && !parent.isRemoved()) {
             parent.damage(source, amount);
             return false; // parent handles the actual damage
@@ -210,13 +211,13 @@ public abstract class CentipedeSegmentEntity extends MobEntity implements GeoAni
 
         if (!this.getWorld().isClient) {
             // If the parent is dead/gone, die too
-            RedCentipedeEntity parent = getParentCentipede();
+            CentipedeController parent = getParentCentipede();
             if (parent == null || parent.isRemoved() || parent.isDead()) {
                 this.discard();
             }
         } else {
             // Client: register with parent so renderers can find neighbors
-            RedCentipedeEntity parent = getParentCentipede();
+            CentipedeController parent = getParentCentipede();
             if (parent != null) {
                 parent.registerClientSegment(this);
             }

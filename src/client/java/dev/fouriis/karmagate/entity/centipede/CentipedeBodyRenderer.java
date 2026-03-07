@@ -10,6 +10,7 @@ import net.minecraft.util.math.Vec3d;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import software.bernie.geckolib.renderer.GeoEntityRenderer;
+import software.bernie.geckolib.util.Color;
 
 /**
  * Renderer for centipede body segments.
@@ -26,14 +27,32 @@ public class CentipedeBodyRenderer extends GeoEntityRenderer<CentipedeBodyEntity
     }
 
     @Override
+    public Color getRenderColor(CentipedeBodyEntity animatable, float partialTick, int packedLight) {
+        CentipedeController parent = animatable.getParentCentipede();
+        if (parent != null) {
+            return Color.ofOpaque(parent.getShellColorRGB());
+        }
+        return Color.WHITE;
+    }
+
+    @Override
     public void render(CentipedeBodyEntity entity, float yaw, float tickDelta,
                        MatrixStack matrices, VertexConsumerProvider vertexConsumers, int light) {
+        matrices.translate(0f, 0.25f, 0f);
         super.render(entity, yaw, tickDelta, matrices, vertexConsumers, light);
 
         // Render legs after the GeckoLib model
         matrices.push();
         CentipedeLegRenderer.renderLegs(entity, matrices, vertexConsumers, light, tickDelta);
         matrices.pop();
+
+        // Render wings for Centiwing parents
+        CentipedeController parent = entity.getParentCentipede();
+        if (parent != null && parent.hasWings()) {
+            matrices.push();
+            CentiwingWingRenderer.renderWings(entity, matrices, vertexConsumers, light, tickDelta);
+            matrices.pop();
+        }
     }
 
     @Override
@@ -74,6 +93,15 @@ public class CentipedeBodyRenderer extends GeoEntityRenderer<CentipedeBodyEntity
         // GeckoLib convention: model faces -Z, so we use -forward
         Quaternionf rotation = quatFromAxes(right, up, new Vector3f(-forward.x, -forward.y, -forward.z));
         poseStack.multiply(rotation);
+
+        // Scale body segments per C# body chunk radius profile, using the parent's
+        // size-dependent formula via the CentipedeController interface
+        CentipedeController parentCtrl = entity.getParentCentipede();
+        if (parentCtrl != null) {
+            float radius = parentCtrl.computeSegmentRadius(entity.getSegmentIndex());
+            float scaleFactor = radius / parentCtrl.getMaxRadius();
+            poseStack.scale(scaleFactor, scaleFactor, scaleFactor);
+        }
     }
 
     /**
@@ -120,13 +148,14 @@ public class CentipedeBodyRenderer extends GeoEntityRenderer<CentipedeBodyEntity
      * previous segment to this one, and from this one to the next segment.
      */
     private Vec3d getChainDirection(CentipedeBodyEntity entity, float tickDelta) {
-        RedCentipedeEntity parent = entity.getParentCentipede();
+        CentipedeController parent = entity.getParentCentipede();
         if (parent == null) return new Vec3d(0, 0, 1);
 
         CentipedeSegmentEntity[] segs = parent.getSegments();
         if (segs == null) return new Vec3d(0, 0, 1);
 
         int idx = entity.getSegmentIndex();
+        if (idx < 0 || idx >= segs.length) return new Vec3d(0, 0, 1);
         Vec3d direction = Vec3d.ZERO;
         int count = 0;
 

@@ -2,7 +2,6 @@ package dev.fouriis.karmagate.entity.centipede;
 
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
-import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
 import net.minecraft.client.render.VertexConsumer;
@@ -14,8 +13,6 @@ import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import org.joml.Matrix4f;
-import org.joml.Quaternionf;
-import org.joml.Vector3f;
 
 /**
  * Leg rendering and per-tick limb simulation for centipede segments.
@@ -39,20 +36,16 @@ public final class CentipedeLegRenderer {
     // Body radius for attach point offset (C#: bodyChunks[j].rad ≈ 5-6 px)
     private static final float BODY_RADIUS = 5f * PX;
 
-    // Red centipede leg scale (C#: scaleX *= 1.3f for Red)
-    private static final float RED_LEG_SCALE = 1.3f;
-
     // Sprite pixel aspect ratio (width / nativeHeight).
     // C#: CentipedeLegA native height = 27px, width ≈ 6px  → 6/27 ≈ 0.22
     //     CentipedeLegB native height = 25px, width ≈ 6px  → 6/25 ≈ 0.24
-    // halfWidth = (boneLength * ASPECT_A * RED_LEG_SCALE) / 2
     private static final float ASPECT_A = 0.22f;   // upper bone (LegA)
     private static final float ASPECT_B = 0.24f;   // lower bone (LegB)
 
-    // Colors
-    private static final int UPPER_R = 30, UPPER_G = 25, UPPER_B = 22;
-    private static final int LOWER_TOP_R = 100, LOWER_TOP_G = 15, LOWER_TOP_B = 10;
-    private static final int LOWER_BOT_R = 25, LOWER_BOT_G = 20, LOWER_BOT_B = 18;
+    // LegA (upper): blackColor — same for all centipede variants
+    private static final int UPPER_R = 9, UPPER_G = 7, UPPER_B = 6;
+    // LegB (lower) bottom: blackColor — same for all variants
+    private static final int LOWER_BOT_R = 9, LOWER_BOT_G = 7, LOWER_BOT_B = 6;
 
     private CentipedeLegRenderer() {}
 
@@ -71,14 +64,15 @@ public final class CentipedeLegRenderer {
             if (legBSprite == null) return;
         }
 
-        RedCentipedeEntity parent = entity.getParentCentipede();
+        CentipedeController parent = entity.getParentCentipede();
         if (parent == null) return;
         CentipedeSegmentEntity[] segs = parent.getSegments();
         if (segs == null) return;
 
         int idx = entity.getSegmentIndex();
         int totalSegs = segs.length;
-        float segRatio = (float) idx / (float) (totalSegs - 1);
+        if (idx < 0 || idx >= totalSegs) return;
+        float segRatio = (totalSegs > 1) ? (float) idx / (float) (totalSegs - 1) : 0f;
 
         // --- Per-tick limb simulation update ---
         boolean newTick = (entity.legUpdateAge != entity.age);
@@ -88,17 +82,12 @@ public final class CentipedeLegRenderer {
         }
 
         // --- Rendering ---
-        Vec3d segPos = lerpPos(entity, tickDelta);
+        // segPos is offset +0.25Y to match the visual raise applied in the segment renderers,
+        // so all leg-local coordinates (footLocal, attachLocal) map correctly onto screen.
+        Vec3d segPos = lerpPos(entity, tickDelta).add(0, 0.25, 0);
         Vec3d chainDir = computeChainDirection(segs, idx, tickDelta);
         Vec3d perp = surfacePerp(chainDir, entity);
-        float legLength = computeLegLength(segRatio);
-
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.gameRenderer == null) return;
-        Quaternionf camRot = new Quaternionf(client.gameRenderer.getCamera().getRotation());
-        Vector3f billRight = camRot.transform(new Vector3f(1f, 0f, 0f));
-        Vector3f billUp = camRot.transform(new Vector3f(0f, 1f, 0f));
-        Vector3f billNorm = camRot.transform(new Vector3f(0f, 0f, 1f));
+        float legLength = computeLegLength(segRatio, parent.getSize());
 
         // C# bodyDir for IK bend factor
         float bodyDir = parent.isBodyDirection() ? -1f : 1f;
@@ -130,19 +119,30 @@ public final class CentipedeLegRenderer {
             // C#: scaleY = distance/27 (LegA) or /25 (LegB); scaleX = ±1.3 (fixed pixels)
             double upperLen = kneeLocal.subtract(attachLocal).length();
             double lowerLen = footLocal.subtract(kneeLocal).length();
-            float halfWidthA = (float)(upperLen * ASPECT_A * 0.5f) * RED_LEG_SCALE;
-            float halfWidthB = (float)(lowerLen * ASPECT_B * 0.5f) * RED_LEG_SCALE;
+            float legScale = parent.getLegScale();
+            float halfWidthA = (float)(upperLen * ASPECT_A * 0.5f) * legScale;
+            float halfWidthB = (float)(lowerLen * ASPECT_B * 0.5f) * legScale;
+
+            // Lower leg top color from parent's secondary shell color
+            int secColor = parent.getSecondaryShellColorRGB();
+            int lowerTopR = (secColor >> 16) & 0xFF;
+            int lowerTopG = (secColor >> 8) & 0xFF;
+            int lowerTopB = secColor & 0xFF;
 
             renderLegSprite(matrices, vcProvider, light,
                     attachLocal, kneeLocal, halfWidthA, legASprite,
-                    billRight, billUp, billNorm,
+                    perp,
                     UPPER_R, UPPER_G, UPPER_B, UPPER_R, UPPER_G, UPPER_B);
 
             renderLegSprite(matrices, vcProvider, light,
                     kneeLocal, footLocal, halfWidthB, legBSprite,
-                    billRight, billUp, billNorm,
-                    LOWER_TOP_R, LOWER_TOP_G, LOWER_TOP_B,
+                    perp,
+                    lowerTopR, lowerTopG, lowerTopB,
                     LOWER_BOT_R, LOWER_BOT_G, LOWER_BOT_B);
+
+            // Debug: bright blue = bone A (upper), cyan-blue = bone B (lower)
+            renderDebugLine(matrices, vcProvider, attachLocal, kneeLocal, 50, 50, 255);
+            renderDebugLine(matrices, vcProvider, kneeLocal, footLocal, 80, 200, 255);
         }
     }
 
@@ -164,11 +164,11 @@ public final class CentipedeLegRenderer {
      */
     private static void updateLimbs(CentipedeSegmentEntity entity,
                                      CentipedeSegmentEntity[] segs, int idx, int totalSegs,
-                                     float segRatio, RedCentipedeEntity parent) {
+                                     float segRatio, CentipedeController parent) {
         Vec3d segPos = entity.getPos();
         Vec3d chainDir = computeChainDirectionTick(segs, idx);
         Vec3d perp = surfacePerp(chainDir, entity);
-        float legLength = computeLegLength(segRatio);
+        float legLength = computeLegLength(segRatio, parent.getSize());
         float walkCycle = parent.getWalkCycle();
         float bodyDirSign = parent.isBodyDirection() ? -1f : 1f;
         World world = entity.getWorld();
@@ -397,6 +397,7 @@ public final class CentipedeLegRenderer {
 
     /** Chain direction for tick update (no interpolation needed). */
     private static Vec3d computeChainDirectionTick(CentipedeSegmentEntity[] segs, int idx) {
+        if (idx < 0 || idx >= segs.length) return new Vec3d(0, 0, 1);
         Vec3d dir = Vec3d.ZERO;
         int count = 0;
         if (idx > 0 && segs[idx - 1] != null && !segs[idx - 1].isRemoved()) {
@@ -413,6 +414,7 @@ public final class CentipedeLegRenderer {
 
     /** Chain direction for render with interpolation. */
     private static Vec3d computeChainDirection(CentipedeSegmentEntity[] segs, int idx, float tickDelta) {
+        if (idx < 0 || idx >= segs.length) return new Vec3d(0, 0, 1);
         Vec3d dir = Vec3d.ZERO;
         int count = 0;
         if (idx > 0 && segs[idx - 1] != null && !segs[idx - 1].isRemoved()) {
@@ -474,9 +476,9 @@ public final class CentipedeLegRenderer {
     }
 
     /** Leg length from C# constructor: Lerp(10,25,sin(t*PI)) * Lerp(0.5,1.5,size). */
-    private static float computeLegLength(float t) {
+    private static float computeLegLength(float t, float size) {
         float csharpLen = MathHelper.lerp((float) Math.sin(t * Math.PI), 10f, 25f);
-        csharpLen *= MathHelper.lerp(RedCentipedeEntity.SIZE, 0.5f, 1.5f);
+        csharpLen *= MathHelper.lerp(size, 0.5f, 1.5f);
         return csharpLen * PX;
     }
 
@@ -538,64 +540,82 @@ public final class CentipedeLegRenderer {
     }
 
     // =========================================================================
+    // Debug line rendering
+    // =========================================================================
+
+    private static void renderDebugLine(MatrixStack matrices, VertexConsumerProvider vcProvider,
+                                         Vec3d start, Vec3d end, int r, int g, int b) {
+        Matrix4f mat = matrices.peek().getPositionMatrix();
+        VertexConsumer vc = vcProvider.getBuffer(RenderLayer.LINES);
+        Vec3d dir = end.subtract(start);
+        double len = dir.length();
+        float nx = 0f, ny = 1f, nz = 0f;
+        if (len > 0.001) {
+            Vec3d n = dir.normalize();
+            nx = (float) n.x; ny = (float) n.y; nz = (float) n.z;
+        }
+        vc.vertex(mat, (float) start.x, (float) start.y, (float) start.z)
+                .color(r, g, b, 255).normal(nx, ny, nz);
+        vc.vertex(mat, (float) end.x, (float) end.y, (float) end.z)
+                .color(r, g, b, 255).normal(nx, ny, nz);
+    }
+
+    // =========================================================================
     // Billboard sprite rendering
     // =========================================================================
 
     private static void renderLegSprite(MatrixStack matrices, VertexConsumerProvider vcProvider, int light,
                                          Vec3d startLocal, Vec3d endLocal, float halfWidth,
                                          FAtlasElement sprite,
-                                         Vector3f billRight, Vector3f billUp, Vector3f billNorm,
+                                         Vec3d perp,
                                          int topR, int topG, int topB,
                                          int botR, int botG, int botB) {
         Vec3d limbDir = endLocal.subtract(startLocal);
         double limbLen = limbDir.length();
         if (limbLen < 0.001) return;
 
+        // Fixed-angle orientation: the sprite lies in the plane of the leg (not camera-facing).
+        // tangent runs along the bone; widthDir is perpendicular to the bone within the leg plane.
         Vec3d tangent = limbDir.normalize();
-        float tRight = (float)(tangent.x * billRight.x + tangent.y * billRight.y + tangent.z * billRight.z);
-        float tUp = (float)(tangent.x * billUp.x + tangent.y * billUp.y + tangent.z * billUp.z);
-        float angle = (float) Math.atan2(tRight, tUp);
+        // Project perp onto the plane perpendicular to the bone so widthDir stays stable.
+        Vec3d perpProj = perp.subtract(tangent.multiply(perp.dotProduct(tangent)));
+        if (perpProj.lengthSquared() < 0.001) {
+            perpProj = tangent.crossProduct(new Vec3d(0, 1, 0));
+            if (perpProj.lengthSquared() < 0.001) perpProj = tangent.crossProduct(new Vec3d(1, 0, 0));
+        }
+        perpProj = perpProj.normalize();
+        // Width direction = tangent x perpProj (lies in the leg plane, perpendicular to bone)
+        Vec3d widthDir = tangent.crossProduct(perpProj);
+        if (widthDir.lengthSquared() < 0.001) widthDir = perpProj;
+        else widthDir = widthDir.normalize();
 
-        float cosA = (float) Math.cos(angle);
-        float sinA = (float) Math.sin(angle);
+        // Face normal points in the perpProj direction (sprite faces sideways from body)
+        float nfx = (float) perpProj.x, nfy = (float) perpProj.y, nfz = (float) perpProj.z;
 
-        float rotUpX = cosA * billUp.x + sinA * billRight.x;
-        float rotUpY = cosA * billUp.y + sinA * billRight.y;
-        float rotUpZ = cosA * billUp.z + sinA * billRight.z;
-        float rotRightX = cosA * billRight.x - sinA * billUp.x;
-        float rotRightY = cosA * billRight.y - sinA * billUp.y;
-        float rotRightZ = cosA * billRight.z - sinA * billUp.z;
+        float wdx = (float)(widthDir.x * halfWidth);
+        float wdy = (float)(widthDir.y * halfWidth);
+        float wdz = (float)(widthDir.z * halfWidth);
 
-        float cx = (float)((startLocal.x + endLocal.x) * 0.5);
-        float cy = (float)((startLocal.y + endLocal.y) * 0.5);
-        float cz = (float)((startLocal.z + endLocal.z) * 0.5);
-        float halfH = (float)(limbLen * 0.5);
+        float s0x = (float) startLocal.x, s0y = (float) startLocal.y, s0z = (float) startLocal.z;
+        float s1x = (float) endLocal.x,   s1y = (float) endLocal.y,   s1z = (float) endLocal.z;
 
-        float blX = cx - rotRightX * halfWidth - rotUpX * halfH;
-        float blY = cy - rotRightY * halfWidth - rotUpY * halfH;
-        float blZ = cz - rotRightZ * halfWidth - rotUpZ * halfH;
-        float brX = cx + rotRightX * halfWidth - rotUpX * halfH;
-        float brY = cy + rotRightY * halfWidth - rotUpY * halfH;
-        float brZ = cz + rotRightZ * halfWidth - rotUpZ * halfH;
-        float trX = cx + rotRightX * halfWidth + rotUpX * halfH;
-        float trY = cy + rotRightY * halfWidth + rotUpY * halfH;
-        float trZ = cz + rotRightZ * halfWidth + rotUpZ * halfH;
-        float tlX = cx - rotRightX * halfWidth + rotUpX * halfH;
-        float tlY = cy - rotRightY * halfWidth + rotUpY * halfH;
-        float tlZ = cz - rotRightZ * halfWidth + rotUpZ * halfH;
+        // Quad: start = bottom of sprite (tex v=1, botColor), end = top (tex v=0, topColor)
+        float blX = s0x - wdx, blY = s0y - wdy, blZ = s0z - wdz;
+        float brX = s0x + wdx, brY = s0y + wdy, brZ = s0z + wdz;
+        float trX = s1x + wdx, trY = s1y + wdy, trZ = s1z + wdz;
+        float tlX = s1x - wdx, tlY = s1y - wdy, tlZ = s1z - wdz;
 
-        float nx = billNorm.x, ny = billNorm.y, nz = billNorm.z;
         Matrix4f mat = matrices.peek().getPositionMatrix();
         VertexConsumer vc = vcProvider.getBuffer(
                 RenderLayer.getEntityCutoutNoCull(sprite.textureIdentifier));
 
         vc.vertex(mat, blX, blY, blZ).color(botR, botG, botB, 255)
-                .texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
+                .texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nfx, nfy, nfz);
         vc.vertex(mat, brX, brY, brZ).color(botR, botG, botB, 255)
-                .texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
+                .texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nfx, nfy, nfz);
         vc.vertex(mat, trX, trY, trZ).color(topR, topG, topB, 255)
-                .texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
+                .texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nfx, nfy, nfz);
         vc.vertex(mat, tlX, tlY, tlZ).color(topR, topG, topB, 255)
-                .texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
+                .texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nfx, nfy, nfz);
     }
 }

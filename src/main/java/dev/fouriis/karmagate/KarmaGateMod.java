@@ -8,7 +8,11 @@ import dev.fouriis.karmagate.entity.ModBlockEntities;
 import dev.fouriis.karmagate.entity.centipede.CentipedeBodyEntity;
 import dev.fouriis.karmagate.entity.centipede.CentipedeHeadEntity;
 import dev.fouriis.karmagate.entity.centipede.CentipedeSegmentEntity;
+import dev.fouriis.karmagate.entity.centipede.CentipedeEntity;
+import dev.fouriis.karmagate.entity.centipede.CentiwingEntity;
 import dev.fouriis.karmagate.entity.centipede.RedCentipedeEntity;
+import dev.fouriis.karmagate.entity.centipede.SmallCentipedeEntity;
+import dev.fouriis.karmagate.entity.centipede.SmallCentiwingEntity;
 import dev.fouriis.karmagate.entity.garbworm.GarbageWormEntity;
 import dev.fouriis.karmagate.entity.spider.SpiderEntity;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugEntity;
@@ -81,7 +85,7 @@ public class KarmaGateMod implements ModInitializer {
             Registries.ENTITY_TYPE,
             Identifier.of(MOD_ID, "centipede_body"),
             FabricEntityTypeBuilder.<CentipedeBodyEntity>create(SpawnGroup.MONSTER, (type, world) -> new CentipedeBodyEntity(type, world))
-                    .dimensions(EntityDimensions.fixed(0.45f, 0.45f))
+                    .dimensions(EntityDimensions.fixed(0.8f, 0.45f))
                     .trackRangeBlocks(128)
                     .trackedUpdateRate(3)
                     .build()
@@ -92,6 +96,46 @@ public class KarmaGateMod implements ModInitializer {
             Identifier.of(MOD_ID, "red_centipede"),
             FabricEntityTypeBuilder.<RedCentipedeEntity>create(SpawnGroup.MONSTER, (type, world) -> new RedCentipedeEntity(type, world))
                     .dimensions(EntityDimensions.fixed(0.5f, 0.5f))
+                    .trackRangeBlocks(128)
+                    .trackedUpdateRate(3)
+                    .build()
+    );
+
+    public static final EntityType<CentipedeEntity> CENTIPEDE_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "centipede"),
+            FabricEntityTypeBuilder.<CentipedeEntity>create(SpawnGroup.MONSTER, (type, world) -> new CentipedeEntity(type, world))
+                    .dimensions(EntityDimensions.fixed(0.5f, 0.5f))
+                    .trackRangeBlocks(128)
+                    .trackedUpdateRate(3)
+                    .build()
+    );
+
+    public static final EntityType<CentiwingEntity> CENTIWING_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "centiwing"),
+            FabricEntityTypeBuilder.<CentiwingEntity>create(SpawnGroup.MONSTER, (type, world) -> new CentiwingEntity(type, world))
+                    .dimensions(EntityDimensions.fixed(0.5f, 0.5f))
+                    .trackRangeBlocks(128)
+                    .trackedUpdateRate(3)
+                    .build()
+    );
+
+    public static final EntityType<SmallCentipedeEntity> SMALL_CENTIPEDE_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "small_centipede"),
+            FabricEntityTypeBuilder.<SmallCentipedeEntity>create(SpawnGroup.MONSTER, (type, world) -> new SmallCentipedeEntity(type, world))
+                    .dimensions(EntityDimensions.fixed(0.3f, 0.3f))
+                    .trackRangeBlocks(128)
+                    .trackedUpdateRate(3)
+                    .build()
+    );
+
+    public static final EntityType<SmallCentiwingEntity> SMALL_CENTIWING_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "small_centiwing"),
+            FabricEntityTypeBuilder.<SmallCentiwingEntity>create(SpawnGroup.MONSTER, (type, world) -> new SmallCentiwingEntity(type, world))
+                    .dimensions(EntityDimensions.fixed(0.3f, 0.3f))
                     .trackRangeBlocks(128)
                     .trackedUpdateRate(3)
                     .build()
@@ -134,6 +178,10 @@ public class KarmaGateMod implements ModInitializer {
         FabricDefaultAttributeRegistry.register(CENTIPEDE_HEAD_ENTITY_TYPE, CentipedeSegmentEntity.createSegmentAttributes());
         FabricDefaultAttributeRegistry.register(CENTIPEDE_BODY_ENTITY_TYPE, CentipedeSegmentEntity.createSegmentAttributes());
         FabricDefaultAttributeRegistry.register(RED_CENTIPEDE_ENTITY_TYPE, RedCentipedeEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(CENTIPEDE_ENTITY_TYPE, CentipedeEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(CENTIWING_ENTITY_TYPE, CentiwingEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(SMALL_CENTIPEDE_ENTITY_TYPE, SmallCentipedeEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(SMALL_CENTIWING_ENTITY_TYPE, SmallCentiwingEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(SPIDER_ENTITY_TYPE, SpiderEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(GARBAGE_WORM_ENTITY_TYPE, GarbageWormEntity.createAttributes());
 

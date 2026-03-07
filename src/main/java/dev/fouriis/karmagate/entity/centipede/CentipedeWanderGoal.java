@@ -1,6 +1,7 @@
 package dev.fouriis.karmagate.entity.centipede;
 
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -13,15 +14,15 @@ import java.util.EnumSet;
  * Mirrors C# CentipedeAI Behavior.Idle with idle position scoring
  * and StandardPather.FollowPath() for path following.
  */
-public class CentipedeWanderGoal extends Goal {
+public class CentipedeWanderGoal<T extends HostileEntity & CentipedeController> extends Goal {
 
-    private final RedCentipedeEntity centipede;
+    private final T centipede;
     private Vec3d wanderTarget;
     private int idleCounter = 0;
     private int retargetCooldown = 0;
     private int failedAttempts = 0;
 
-    public CentipedeWanderGoal(RedCentipedeEntity centipede) {
+    public CentipedeWanderGoal(T centipede) {
         this.centipede = centipede;
         this.setControls(EnumSet.of(Control.MOVE));
     }

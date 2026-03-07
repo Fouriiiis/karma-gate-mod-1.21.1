@@ -2,6 +2,7 @@ package dev.fouriis.karmagate.entity.centipede;
 
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.math.Vec3d;
 
@@ -13,13 +14,13 @@ import java.util.EnumSet;
  * path to its target, then follows the path waypoints.
  * Mirrors C# CentipedeAI Behavior.Hunt + StandardPather.FollowPath().
  */
-public class CentipedeHuntGoal extends Goal {
+public class CentipedeHuntGoal<T extends HostileEntity & CentipedeController> extends Goal {
 
-    private final RedCentipedeEntity centipede;
+    private final T centipede;
     private LivingEntity target;
     private int pathRecalcCooldown = 0;
 
-    public CentipedeHuntGoal(RedCentipedeEntity centipede) {
+    public CentipedeHuntGoal(T centipede) {
         this.centipede = centipede;
         this.setControls(EnumSet.of(Control.MOVE, Control.LOOK));
     }
