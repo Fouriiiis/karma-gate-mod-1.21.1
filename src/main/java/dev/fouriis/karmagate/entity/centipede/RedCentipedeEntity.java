@@ -14,8 +14,9 @@ public class RedCentipedeEntity extends CentipedeEntity {
     private static final float SIZE = 1.0f;
     private static final int TOTAL_SEGMENTS = 18;
     private static final float MAX_RADIUS = 8.0f;
-    private static final int SHELL_COLOR = (242 << 16) | (109 << 8) | 13;
-    private static final int SECONDARY_SHELL_COLOR = (145 << 16) | (66 << 8) | 8;
+    // RedCentipedeEntity.java
+private static final int SHELL_COLOR = (200 << 16) | (40 << 8) | 24;
+private static final int SECONDARY_SHELL_COLOR = (120 << 16) | (18 << 8) | 10;
 
     public RedCentipedeEntity(EntityType<? extends HostileEntity> type, World world) {
         super(type, world);

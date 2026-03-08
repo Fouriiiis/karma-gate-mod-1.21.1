@@ -80,6 +80,11 @@ public interface CentipedeController {
     void setHuntTarget(LivingEntity target);
     LivingEntity getHuntTarget();
     void updateDirectionChange();
+
+    /** Whether the entity is in forced-pathing debug mode (ignores AI goals). */
+    default boolean isForcedPathing() { return false; }
+    /** Set forced-pathing target. Null clears it. */
+    default void setForcedPathTarget(BlockPos target) { }
     CentipedeHeadEntity getFrontHead();
     CentipedeHeadEntity getRearHead();
 

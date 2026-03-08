@@ -9,715 +9,1043 @@ import net.minecraft.world.World;
 import java.util.*;
 
 /**
- * 3D A* pathfinder for centipedes, ported from Rain World's
- * PathFinder → StandardPather → CentipedePather chain.
+ * Rain World-inspired centipede pathfinder for Minecraft.
  *
- * Key Rain World concept: a tile is "accessible" if its terrainProximity < 2,
- * meaning it is within 1 tile of a solid surface. This allows centipedes to
- * path along walls, ceilings, and floors — any air block adjacent to solid.
+ * Design goals:
+ * - Reverse pathfinding from destination outward, like Rain World's PathFinder.
+ * - Separate accessibility mapping from path-cost propagation.
+ * - Distinguish:
+ *     reachable            = can get there from the creature's current local area
+ *     possibleToGetBackFrom = can safely return / not a point of no return
+ * - Use legality + resistance, not just one scalar cost.
+ * - Let movement follow the pathfield by choosing the best local next move,
+ *   instead of trusting a static waypoint path as ground truth.
  *
- * This version operates on Minecraft BlockPos (3D grid), using 6-face
- * connectivity with diagonal expansion for smoother movement.
+ * Important approximation notes:
+ * - Rain World has a hand-authored AI map and creature-specific MovementConnections.
+ *   Minecraft does not, so this class synthesizes a local graph from nearby voxel cells.
+ * - "possibleToGetBackFrom" is approximated using a stricter flood fill over locally
+ *   valid cells; it is still much closer to Rain World's model than plain A*.
+ * - This class is bounded to a local search volume for performance.
  */
-public class CentipedePathfinder {
+public final class CentipedePathfinder {
+
+    private CentipedePathfinder() {
+    }
 
     // =========================================================================
-    // Configuration
+    // Config
     // =========================================================================
 
-    /** Maximum nodes to expand before giving up (performance budget) */
-    private static final int MAX_NODES = 3000;
+    public static final int DEFAULT_MAX_RANGE = 40;
+    public static final int DEFAULT_ACCESSIBILITY_STEPS = 200;
+    public static final int DEFAULT_PATH_STEPS = 300;
+    public static final int DEFAULT_FOLLOW_LOOK_RADIUS = 2;
 
-    /** Maximum straight-line range for path search (in blocks) */
-    private static final int MAX_RANGE = 48;
+    /** StandardPather-like: prioritize true path cost heavily, current-creature distance lightly. */
+    private static final double HEURISTIC_COST_FAC = 40.0;
+    private static final double HEURISTIC_DEST_FAC = 1.0;
 
-    /** Heuristic weight multiplier (> 1.0 = greedier, faster but less optimal) */
-    private static final double HEURISTIC_WEIGHT = 1.4;
+    /** Surface hugging preference; tiles at proximity 1 are preferred. */
+    private static final double SURFACE_PREFERENCE_PENALTY = 0.35;
+
+    /** Mild penalty for leaving strong surface contact. */
+    private static final double LOOSE_SURFACE_PENALTY = 0.20;
+
+    /** Movement resistance by connection type. */
+    private static final double FACE_MOVE_COST = 1.00;
+    private static final double EDGE_MOVE_COST = 1.45;
+    private static final double CORNER_MOVE_COST = 1.80;
+
+    /** Penalty for unsupported / risky transfers that are still technically possible. */
+    private static final double UNWANTED_MOVE_PENALTY = 0.75;
+
+    /** How many recent connections make a move "off limits" / unwanted. */
+    private static final int RECENT_CONNECTION_LIMIT = 3;
+    private static final int SAVED_RECENT_CONNECTIONS = 20;
+
+    /** Search hard caps. */
+    private static final int MAX_ACCESSIBILITY_VISITED = 12000;
+    private static final int MAX_PATH_VISITED = 20000;
+
+    // =========================================================================
+    // Legality / cost
+    // =========================================================================
 
     /**
-     * Cost multiplier for tiles that are accessible but not directly touching
-     * a solid surface (terrainProximity == 1 in Rain World terms).
-     * Centipedes prefer crawling right next to surfaces.
+     * Ordering mirrors Rain World's behavior:
+     * lower ordinal = better.
      */
-    private static final double SURFACE_PREFERENCE = 0.3;
+    public enum Legality {
+        ALLOWED,
+        UNWANTED,
+        ILLEGAL,
+        UNALLOWED
+    }
 
-    /** Cost of moving to a direct face neighbor */
-    private static final double MOVE_COST_FACE = 1.0;
+    public static final class PathCost implements Comparable<PathCost> {
+        public final double resistance;
+        public final Legality legality;
 
-    /** Cost of moving to an edge-diagonal neighbor */
-    private static final double MOVE_COST_EDGE = 1.414;
-
-    /** Cost of moving to a corner-diagonal neighbor */
-    private static final double MOVE_COST_CORNER = 1.732;
-
-    // =========================================================================
-    // 26-neighbor offsets (6 face + 12 edge + 8 corner)
-    // =========================================================================
-
-    private static final int[][] FACE_OFFSETS = {
-        {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
-    };
-
-    private static final int[][] EDGE_OFFSETS = {
-        {1,1,0}, {1,-1,0}, {-1,1,0}, {-1,-1,0},
-        {1,0,1}, {1,0,-1}, {-1,0,1}, {-1,0,-1},
-        {0,1,1}, {0,1,-1}, {0,-1,1}, {0,-1,-1}
-    };
-
-    private static final int[][] CORNER_OFFSETS = {
-        {1,1,1}, {1,1,-1}, {1,-1,1}, {1,-1,-1},
-        {-1,1,1}, {-1,1,-1}, {-1,-1,1}, {-1,-1,-1}
-    };
-
-    // =========================================================================
-    // Node class for A*
-    // =========================================================================
-
-    private static class PathNode implements Comparable<PathNode> {
-        final BlockPos pos;
-        PathNode parent;
-        double gCost; // cost from start
-        double hCost; // heuristic cost to goal
-        int terrainProximity; // 0 = solid (not accessible), 1 = touching solid, 2 = 1 away from solid
-
-        PathNode(BlockPos pos) {
-            this.pos = pos;
-            this.gCost = Double.MAX_VALUE;
-            this.hCost = 0;
-            this.terrainProximity = 2;
+        public PathCost(double resistance, Legality legality) {
+            this.resistance = resistance;
+            this.legality = legality;
         }
 
-        double fCost() {
-            return gCost + hCost * HEURISTIC_WEIGHT;
+        public boolean allowed() {
+            return legality.ordinal() <= Legality.UNWANTED.ordinal();
+        }
+
+        public boolean considerable() {
+            return legality != Legality.UNALLOWED;
+        }
+
+        public PathCost plus(PathCost other) {
+            Legality worst = this.legality.ordinal() >= other.legality.ordinal() ? this.legality : other.legality;
+            return new PathCost(this.resistance + other.resistance, worst);
         }
 
         @Override
-        public int compareTo(PathNode other) {
-            return Double.compare(this.fCost(), other.fCost());
+        public int compareTo(PathCost o) {
+            if (this.legality != o.legality) {
+                return Integer.compare(this.legality.ordinal(), o.legality.ordinal());
+            }
+            return Double.compare(this.resistance, o.resistance);
+        }
+
+        public boolean betterThan(PathCost o) {
+            return compareTo(o) < 0;
+        }
+
+        @Override
+        public String toString() {
+            return "PathCost{" + legality + ", " + resistance + '}';
         }
     }
 
     // =========================================================================
-    // Accessibility checks (mirrors C# AccessibleTile / terrainProximity)
+    // Local graph
     // =========================================================================
 
-    /**
-     * Check if a block position is accessible to the centipede.
-     * Mirrors C# AImap.TileAccessibleToCreature for centipedes:
-     * - The block itself must NOT be solid (centipede can occupy it)
-     * - The block must be adjacent to at least one solid block (terrainProximity < 2)
-     *
-     * This is what enables wall/ceiling/floor crawling — the centipede can
-     * path through any air block that touches a surface.
-     */
-    public static boolean isAccessible(World world, BlockPos pos) {
-        BlockState state = world.getBlockState(pos);
-        // Must not be solid — centipede can't be inside solid blocks
-        if (state.blocksMovement()) return false;
+    public enum MoveType {
+        FACE,
+        EDGE_DIAGONAL,
+        CORNER_DIAGONAL,
+        OFF_SURFACE_TRANSFER
+    }
 
-        // Check 6 face neighbors for solid contact
-        for (Direction dir : Direction.values()) {
-            BlockPos neighbor = pos.offset(dir);
-            if (world.getBlockState(neighbor).blocksMovement()) {
-                return true;
+    public static final class MovementConnection {
+        public final BlockPos start;
+        public final BlockPos end;
+        public final MoveType type;
+
+        public MovementConnection(BlockPos start, BlockPos end, MoveType type) {
+            this.start = start;
+            this.end = end;
+            this.type = type;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (!(obj instanceof MovementConnection other)) return false;
+            return start.equals(other.start) && end.equals(other.end) && type == other.type;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(start, end, type);
+        }
+    }
+
+    private static final class PathingCell {
+        final BlockPos pos;
+        int generation = -1;
+        PathCost heuristicValue = new PathCost(Double.POSITIVE_INFINITY, Legality.UNALLOWED);
+        PathCost costToGoal = new PathCost(Double.POSITIVE_INFINITY, Legality.UNALLOWED);
+        boolean inOpen = false;
+        boolean reachable = false;
+        boolean possibleToGetBackFrom = false;
+
+        PathingCell(BlockPos pos) {
+            this.pos = pos;
+        }
+    }
+
+    private static final class LocalCache {
+        final World world;
+        final BlockPos center;
+        final int range;
+
+        private final Map<BlockPos, Integer> terrainProximityCache = new HashMap<>();
+        private final Map<BlockPos, Boolean> occupiableCache = new HashMap<>();
+        private final Map<BlockPos, Boolean> accessibleCache = new HashMap<>();
+        private final Map<BlockPos, List<MovementConnection>> outgoingCache = new HashMap<>();
+        private final Map<BlockPos, List<MovementConnection>> incomingCache = new HashMap<>();
+        private final Map<BlockPos, PathingCell> cells = new HashMap<>();
+
+        LocalCache(World world, BlockPos center, int range) {
+            this.world = world;
+            this.center = center;
+            this.range = range;
+        }
+
+        boolean inBounds(BlockPos pos) {
+            return Math.abs(pos.getX() - center.getX()) <= range
+                && Math.abs(pos.getY() - center.getY()) <= range
+                && Math.abs(pos.getZ() - center.getZ()) <= range;
+        }
+
+        PathingCell cell(BlockPos pos) {
+            return cells.computeIfAbsent(pos.toImmutable(), PathingCell::new);
+        }
+
+        boolean occupiable(BlockPos pos) {
+            return occupiableCache.computeIfAbsent(pos.toImmutable(), p -> {
+                if (!inBounds(p)) return false;
+                BlockState state = world.getBlockState(p);
+                return !state.blocksMovement();
+            });
+        }
+
+        int terrainProximity(BlockPos pos) {
+            return terrainProximityCache.computeIfAbsent(pos.toImmutable(), p -> {
+                if (!occupiable(p)) return 0;
+
+                for (Direction d : Direction.values()) {
+                    if (world.getBlockState(p.offset(d)).blocksMovement()) {
+                        return 1;
+                    }
+                }
+
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dz = -1; dz <= 1; dz++) {
+                            if (dx == 0 && dy == 0 && dz == 0) continue;
+                            BlockPos q = p.add(dx, dy, dz);
+                            if (!inBounds(q)) continue;
+                            if (world.getBlockState(q).blocksMovement()) {
+                                return 2;
+                            }
+                        }
+                    }
+                }
+
+                return 3;
+            });
+        }
+
+        boolean accessible(BlockPos pos) {
+            return accessibleCache.computeIfAbsent(pos.toImmutable(), p -> {
+                if (!occupiable(p)) return false;
+                int prox = terrainProximity(p);
+                return prox >= 1 && prox <= 2;
+            });
+        }
+
+        List<MovementConnection> outgoing(BlockPos pos) {
+            return outgoingCache.computeIfAbsent(pos.toImmutable(), this::buildOutgoing);
+        }
+
+        List<MovementConnection> incoming(BlockPos pos) {
+            return incomingCache.computeIfAbsent(pos.toImmutable(), this::buildIncoming);
+        }
+
+        private List<MovementConnection> buildOutgoing(BlockPos from) {
+            if (!accessible(from)) return Collections.emptyList();
+
+            List<MovementConnection> out = new ArrayList<>(26);
+
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+
+                        BlockPos to = from.add(dx, dy, dz);
+                        if (!inBounds(to)) continue;
+                        if (!accessible(to)) continue;
+
+                        int nonZero = (dx != 0 ? 1 : 0) + (dy != 0 ? 1 : 0) + (dz != 0 ? 1 : 0);
+                        MoveType moveType;
+                        if (nonZero == 1) {
+                            moveType = MoveType.FACE;
+                        } else if (nonZero == 2) {
+                            if (!canMoveDiagonalEdge(from, dx, dy, dz)) continue;
+                            moveType = MoveType.EDGE_DIAGONAL;
+                        } else {
+                            if (!canMoveDiagonalCorner(from, dx, dy, dz)) continue;
+                            moveType = MoveType.CORNER_DIAGONAL;
+                        }
+
+                        // Surface transfer detection: still allowed, but may be marked unwanted by cost.
+                        if (terrainProximity(from) == 1 && terrainProximity(to) == 2) {
+                            moveType = MoveType.OFF_SURFACE_TRANSFER;
+                        }
+
+                        out.add(new MovementConnection(from, to, moveType));
+                    }
+                }
+            }
+
+            return out;
+        }
+
+        private List<MovementConnection> buildIncoming(BlockPos to) {
+            if (!accessible(to)) return Collections.emptyList();
+
+            List<MovementConnection> in = new ArrayList<>(26);
+
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+
+                        BlockPos from = to.add(-dx, -dy, -dz);
+                        if (!inBounds(from)) continue;
+                        if (!accessible(from)) continue;
+
+                        int nonZero = (dx != 0 ? 1 : 0) + (dy != 0 ? 1 : 0) + (dz != 0 ? 1 : 0);
+                        MoveType moveType;
+                        if (nonZero == 1) {
+                            moveType = MoveType.FACE;
+                        } else if (nonZero == 2) {
+                            if (!canMoveDiagonalEdge(from, dx, dy, dz)) continue;
+                            moveType = MoveType.EDGE_DIAGONAL;
+                        } else {
+                            if (!canMoveDiagonalCorner(from, dx, dy, dz)) continue;
+                            moveType = MoveType.CORNER_DIAGONAL;
+                        }
+
+                        if (terrainProximity(from) == 1 && terrainProximity(to) == 2) {
+                            moveType = MoveType.OFF_SURFACE_TRANSFER;
+                        }
+
+                        in.add(new MovementConnection(from, to, moveType));
+                    }
+                }
+            }
+
+            return in;
+        }
+
+        private boolean canMoveDiagonalEdge(BlockPos from, int dx, int dy, int dz) {
+            // At least one of the relevant face slides must remain occupiable.
+            if (dx != 0 && dy != 0 && dz == 0) {
+                return occupiable(from.add(dx, 0, 0)) || occupiable(from.add(0, dy, 0));
+            }
+            if (dx != 0 && dz != 0 && dy == 0) {
+                return occupiable(from.add(dx, 0, 0)) || occupiable(from.add(0, 0, dz));
+            }
+            if (dy != 0 && dz != 0 && dx == 0) {
+                return occupiable(from.add(0, dy, 0)) || occupiable(from.add(0, 0, dz));
+            }
+            return false;
+        }
+
+        private boolean canMoveDiagonalCorner(BlockPos from, int dx, int dy, int dz) {
+            int passable = 0;
+            if (occupiable(from.add(dx, 0, 0))) passable++;
+            if (occupiable(from.add(0, dy, 0))) passable++;
+            if (occupiable(from.add(0, 0, dz))) passable++;
+            return passable >= 2;
+        }
+    }
+
+    // =========================================================================
+    // Incremental reverse pathfield
+    // =========================================================================
+
+    public static final class Search {
+        private final World world;
+        private final BlockPos start;
+        private BlockPos destination;
+        private final int maxRange;
+        private final LocalCache cache;
+
+        private final List<PathingCell> open = new ArrayList<>();
+        private final Deque<BlockPos> accQueueReachable = new ArrayDeque<>();
+        private final Deque<BlockPos> accQueueReturnable = new ArrayDeque<>();
+
+        private final Deque<MovementConnection> pastConnections = new ArrayDeque<>();
+        private final Set<BlockPos> accVisited = new HashSet<>();
+        private final Set<BlockPos> retVisited = new HashSet<>();
+
+        private int generation = 1;
+        private boolean mappingFinished = false;
+        private boolean pathFinished = false;
+        private boolean lookingForImpossiblePath = false;
+
+        private PathingCell closestCellToDestinationFromStart = null;
+
+        public Search(World world, BlockPos creatureStart, BlockPos rawDestination, int maxRange) {
+            this.world = world;
+            this.maxRange = maxRange > 0 ? maxRange : DEFAULT_MAX_RANGE;
+
+            BlockPos adjustedStart = findNearestAccessible(world, creatureStart, 6, this.maxRange);
+            if (adjustedStart == null) adjustedStart = creatureStart;
+            this.start = adjustedStart.toImmutable();
+
+            BlockPos adjustedDest = findNearestAccessible(world, rawDestination, 6, this.maxRange);
+            this.destination = (adjustedDest != null ? adjustedDest : rawDestination).toImmutable();
+
+            BlockPos center = midpoint(this.start, this.destination);
+            this.cache = new LocalCache(world, center, this.maxRange + 4);
+
+            beginAccessibilityMapping();
+        }
+
+        public BlockPos getStart() {
+            return start;
+        }
+
+        public BlockPos getDestination() {
+            return destination;
+        }
+
+        public boolean isAccessibilityFinished() {
+            return mappingFinished;
+        }
+
+        public boolean isPathfieldFinished() {
+            return pathFinished;
+        }
+
+        public boolean isFinished() {
+            return mappingFinished && pathFinished;
+        }
+
+        public boolean isLookingForImpossiblePath() {
+            return lookingForImpossiblePath;
+        }
+
+        public void setDestination(BlockPos newDestination) {
+            BlockPos adjusted = findNearestAccessible(world, newDestination, 6, maxRange);
+            this.destination = (adjusted != null ? adjusted : newDestination).toImmutable();
+            this.generation++;
+            this.pathFinished = false;
+            this.open.clear();
+            this.closestCellToDestinationFromStart = null;
+
+            if (mappingFinished) {
+                seedDestination();
             }
         }
-        return false;
+
+        public void update(int accessibilitySteps, int pathSteps) {
+            if (!mappingFinished) {
+                stepAccessibility(accessibilitySteps <= 0 ? DEFAULT_ACCESSIBILITY_STEPS : accessibilitySteps);
+            } else if (!pathFinished) {
+                stepPathfield(pathSteps <= 0 ? DEFAULT_PATH_STEPS : pathSteps);
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // Accessibility mapping
+        // ---------------------------------------------------------------------
+
+        private void beginAccessibilityMapping() {
+            mappingFinished = false;
+            pathFinished = false;
+            open.clear();
+            accQueueReachable.clear();
+            accQueueReturnable.clear();
+            accVisited.clear();
+            retVisited.clear();
+
+            for (PathingCell cell : cache.cells.values()) {
+                cell.reachable = false;
+                cell.possibleToGetBackFrom = false;
+                cell.inOpen = false;
+                cell.generation = -1;
+                cell.costToGoal = new PathCost(Double.POSITIVE_INFINITY, Legality.UNALLOWED);
+                cell.heuristicValue = new PathCost(Double.POSITIVE_INFINITY, Legality.UNALLOWED);
+            }
+
+            if (cache.accessible(start)) {
+                cache.cell(start).reachable = true;
+                accQueueReachable.add(start);
+                accVisited.add(start);
+            }
+        }
+
+        private void stepAccessibility(int steps) {
+            int visitedCount = 0;
+
+            // Phase 1: reachable flood
+            while (steps > 0 && !accQueueReachable.isEmpty() && visitedCount < MAX_ACCESSIBILITY_VISITED) {
+                BlockPos cur = accQueueReachable.pollFirst();
+                visitedCount++;
+                steps--;
+
+                for (MovementConnection c : cache.outgoing(cur)) {
+                    if (!accVisited.add(c.end)) continue;
+                    PathingCell cell = cache.cell(c.end);
+                    cell.reachable = true;
+                    accQueueReachable.addLast(c.end);
+                }
+            }
+
+            if (!accQueueReachable.isEmpty()) {
+                return;
+            }
+
+            // Start returnability phase once reachable fill is done.
+            if (accQueueReturnable.isEmpty() && retVisited.isEmpty()) {
+                if (cache.accessible(start)) {
+                    cache.cell(start).possibleToGetBackFrom = true;
+                    accQueueReturnable.add(start);
+                    retVisited.add(start);
+                }
+            }
+
+            while (steps > 0 && !accQueueReturnable.isEmpty() && visitedCount < MAX_ACCESSIBILITY_VISITED) {
+                BlockPos cur = accQueueReturnable.pollFirst();
+                visitedCount++;
+                steps--;
+
+                for (MovementConnection c : cache.incoming(cur)) {
+                    if (!retVisited.add(c.start)) continue;
+                    PathingCell cell = cache.cell(c.start);
+                    cell.possibleToGetBackFrom = true;
+                    accQueueReturnable.addLast(c.start);
+                }
+            }
+
+            if (accQueueReturnable.isEmpty()) {
+                mappingFinished = true;
+                seedDestination();
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // Reverse pathfield
+        // ---------------------------------------------------------------------
+
+        private void seedDestination() {
+    open.clear();
+
+    PathingCell destCell = cache.cell(destination);
+    lookingForImpossiblePath = !(destCell.reachable);
+
+    PathCost destLegality = coordinateLegality(destination);
+
+    destCell.generation = generation;
+    destCell.costToGoal = new PathCost(0.0, destLegality.legality);
+    destCell.heuristicValue = new PathCost(0.0, destLegality.legality);
+    destCell.inOpen = true;
+    addToOpen(destCell);
+
+    closestCellToDestinationFromStart = destCell;
+}
+
+        private void stepPathfield(int steps) {
+            int visited = 0;
+
+            while (steps > 0 && !open.isEmpty() && visited < MAX_PATH_VISITED) {
+                PathingCell current = open.remove(0);
+                current.inOpen = false;
+                visited++;
+                steps--;
+
+                checkNeighbours(current);
+
+                if (current.pos.equals(start)) {
+                    pathFinished = true;
+                    return;
+                }
+            }
+
+            if (open.isEmpty()) {
+                pathFinished = true;
+            }
+        }
+
+        private void checkNeighbours(PathingCell checkNow) {
+            for (MovementConnection incoming : cache.incoming(checkNow.pos)) {
+                PathingCell fromCell = cache.cell(incoming.start);
+                PathCost edgeCost = connectionCost(incoming.start, incoming.end, incoming, false);
+
+                if ((!edgeCost.allowed() || !fromCell.reachable) && (!lookingForImpossiblePath || !edgeCost.considerable())) {
+                    continue;
+                }
+
+                PathCost newCostToGoal = checkNow.costToGoal.plus(edgeCost);
+                PathCost heuristic = heuristicForCell(fromCell.pos, newCostToGoal);
+
+                if (fromCell.generation == generation) {
+                    boolean changed = false;
+
+                    if (heuristic.betterThan(fromCell.heuristicValue)) {
+                        fromCell.heuristicValue = heuristic;
+                        changed = true;
+                    }
+                    if (newCostToGoal.betterThan(fromCell.costToGoal)) {
+                        fromCell.costToGoal = newCostToGoal;
+                        changed = true;
+                    }
+
+                    if (changed && !fromCell.inOpen) {
+                        fromCell.inOpen = true;
+                        addToOpen(fromCell);
+                    }
+                } else {
+                    fromCell.generation = generation;
+                    fromCell.costToGoal = newCostToGoal;
+                    fromCell.heuristicValue = heuristic;
+                    fromCell.inOpen = true;
+                    addToOpen(fromCell);
+                }
+
+                if (fromCell.pos.equals(start)) {
+                    closestCellToDestinationFromStart = fromCell;
+                }
+            }
+        }
+
+        private void addToOpen(PathingCell cell) {
+            int i = 0;
+            while (i < open.size()) {
+                if (cell.heuristicValue.compareTo(open.get(i).heuristicValue) <= 0) {
+                    open.add(i, cell);
+                    return;
+                }
+                i++;
+            }
+            open.add(cell);
+        }
+
+        // ---------------------------------------------------------------------
+        // Following
+        // ---------------------------------------------------------------------
+
+        /**
+         * Mirror of StandardPather.FollowPath:
+         * choose the best immediate outgoing move from the current local position
+         * using legality, generation, then total path cost.
+         */
+        public BlockPos chooseNextStep(BlockPos currentPos, boolean actuallyFollowing) {
+            BlockPos current = cache.accessible(currentPos) ? currentPos.toImmutable() : findNearestAccessible(world, currentPos, 4, maxRange);
+            if (current == null) return null;
+
+            PathingCell currentCell = cache.cell(current);
+            if (!currentCell.reachable || !currentCell.possibleToGetBackFrom) {
+                // Equivalent spirit to OutOfElement: best effort fallback.
+                BlockPos rescue = findNearestReachableAndReturnable(current, 4);
+                if (rescue != null) current = rescue;
+            }
+
+            MovementConnection bestConn = null;
+            PathCost bestPathCost = new PathCost(Double.POSITIVE_INFINITY, Legality.UNALLOWED);
+            Legality bestLegality = Legality.UNALLOWED;
+            int bestGen = Integer.MIN_VALUE;
+
+            for (MovementConnection conn : cache.outgoing(current)) {
+                PathingCell next = cache.cell(conn.end);
+                PathCost moveCost = connectionCost(conn.start, conn.end, conn, true);
+
+                if (!next.possibleToGetBackFrom) {
+                    moveCost = moveCost.plus(new PathCost(0.0, Legality.UNALLOWED));
+                }
+
+                PathCost combined = next.costToGoal.plus(moveCost);
+
+                if (conn.end.equals(destination)) {
+                    combined = new PathCost(0.0, combined.legality);
+                } else if (connectionAlreadyFollowedSeveralTimes(conn)) {
+                    combined = combined.plus(new PathCost(0.0, Legality.UNWANTED));
+                    moveCost = moveCost.plus(new PathCost(0.0, Legality.UNWANTED));
+                }
+
+                if (moveCost.legality.ordinal() < bestLegality.ordinal()) {
+                    bestConn = conn;
+                    bestLegality = moveCost.legality;
+                    bestGen = next.generation;
+                    bestPathCost = combined;
+                } else if (moveCost.legality == bestLegality) {
+                    if (next.generation > bestGen) {
+                        bestConn = conn;
+                        bestGen = next.generation;
+                        bestPathCost = combined;
+                    } else if (next.generation == bestGen && combined.betterThan(bestPathCost)) {
+                        bestConn = conn;
+                        bestPathCost = combined;
+                    }
+                }
+            }
+
+            if (bestConn != null && bestLegality.ordinal() <= Legality.UNWANTED.ordinal()) {
+                if (actuallyFollowing) {
+                    rememberConnection(bestConn);
+                }
+                return bestConn.end;
+            }
+
+            return bestEffortTowardDestination(current);
+        }
+
+        /**
+         * Debug/helper: reconstruct a local best-effort path by repeatedly calling chooseNextStep.
+         * This is not how Rain World fundamentally follows paths, but useful if your entity code still
+         * wants a list of waypoints.
+         */
+        public List<BlockPos> reconstructCurrentBestPath(BlockPos from, int maxSteps) {
+            List<BlockPos> path = new ArrayList<>();
+            BlockPos cur = from;
+            Set<BlockPos> seen = new HashSet<>();
+            path.add(cur);
+
+            for (int i = 0; i < maxSteps; i++) {
+                if (cur.equals(destination)) break;
+                if (!seen.add(cur)) break;
+
+                BlockPos next = chooseNextStep(cur, false);
+                if (next == null || next.equals(cur)) break;
+
+                path.add(next);
+                cur = next;
+            }
+
+            return path;
+        }
+
+        public boolean tileClosestToGoal(BlockPos a, BlockPos b) {
+            PathingCell ca = cache.cell(a);
+            PathingCell cb = cache.cell(b);
+
+            boolean aGood = ca.reachable && ca.possibleToGetBackFrom;
+            boolean bGood = cb.reachable && cb.possibleToGetBackFrom;
+
+            if (aGood && !bGood) return true;
+            if (bGood && !aGood) return false;
+
+            if (ca.costToGoal.legality.ordinal() < cb.costToGoal.legality.ordinal()) return true;
+            if (cb.costToGoal.legality.ordinal() < ca.costToGoal.legality.ordinal()) return false;
+
+            if (ca.generation > cb.generation) return true;
+            if (cb.generation > ca.generation) return false;
+
+            return ca.costToGoal.resistance < cb.costToGoal.resistance;
+        }
+
+        // ---------------------------------------------------------------------
+        // Cost / heuristic
+        // ---------------------------------------------------------------------
+
+        private PathCost heuristicForCell(BlockPos cell, PathCost costToGoal) {
+            if (lookingForImpossiblePath && !cache.cell(cell).reachable) {
+                return costToGoal;
+            }
+
+            double distToCreature = euclidean(cell, start);
+            double h = costToGoal.resistance * HEURISTIC_COST_FAC + distToCreature * HEURISTIC_DEST_FAC;
+            return new PathCost(h, costToGoal.legality);
+        }
+
+        private PathCost coordinateLegality(BlockPos pos) {
+            if (!cache.accessible(pos)) {
+                return new PathCost(Double.POSITIVE_INFINITY, Legality.UNALLOWED);
+            }
+
+            int prox = cache.terrainProximity(pos);
+            if (prox == 1) {
+                return new PathCost(0.0, Legality.ALLOWED);
+            }
+            if (prox == 2) {
+                return new PathCost(SURFACE_PREFERENCE_PENALTY, Legality.ALLOWED);
+            }
+            return new PathCost(0.0, Legality.UNALLOWED);
+        }
+
+        private PathCost connectionCost(BlockPos startPos, BlockPos endPos, MovementConnection conn, boolean followingPath) {
+            if (!cache.accessible(startPos) || !cache.accessible(endPos)) {
+                return new PathCost(Double.POSITIVE_INFINITY, Legality.UNALLOWED);
+            }
+
+            double base;
+            switch (conn.type) {
+                case FACE -> base = FACE_MOVE_COST;
+                case EDGE_DIAGONAL -> base = EDGE_MOVE_COST;
+                case CORNER_DIAGONAL -> base = CORNER_MOVE_COST;
+                case OFF_SURFACE_TRANSFER -> base = FACE_MOVE_COST + LOOSE_SURFACE_PENALTY;
+                default -> base = FACE_MOVE_COST;
+            }
+
+            PathCost coordCost = coordinateLegality(endPos);
+            PathCost startCoordCost = coordinateLegality(startPos);
+
+            if (!coordCost.considerable() || !startCoordCost.considerable()) {
+                return new PathCost(Double.POSITIVE_INFINITY, Legality.UNALLOWED);
+            }
+
+            PathCost result = new PathCost(base, Legality.ALLOWED)
+                .plus(coordCost)
+                .plus(new PathCost(0.0, startCoordCost.legality));
+
+            // Approximate point-of-no-return logic:
+            if (cache.cell(endPos).reachable && !cache.cell(endPos).possibleToGetBackFrom) {
+                result = result.plus(new PathCost(0.0, Legality.UNALLOWED));
+            }
+
+            // Moves that reduce surface attachment are allowed but unwanted.
+            int startProx = cache.terrainProximity(startPos);
+            int endProx = cache.terrainProximity(endPos);
+            if (startProx == 1 && endProx == 2) {
+                result = result.plus(new PathCost(UNWANTED_MOVE_PENALTY, Legality.UNWANTED));
+            }
+
+            // Penalize upward moves that lack wall support at the destination.
+            if (endPos.getY() > startPos.getY() && !hasStrongWallSupport(endPos)) {
+                result = result.plus(new PathCost(2.0, Legality.UNWANTED));
+            }
+
+            return result;
+        }
+
+        private boolean hasStrongWallSupport(BlockPos pos) {
+            int solidSides = 0;
+
+            for (Direction dir : Direction.values()) {
+                if (dir == Direction.UP || dir == Direction.DOWN) continue;
+                BlockPos adj = pos.offset(dir);
+                if (world.getBlockState(adj).isSolidBlock(world, adj)) {
+                    solidSides++;
+                }
+            }
+
+            return solidSides >= 1;
+        }
+
+        // ---------------------------------------------------------------------
+        // Recent connection memory
+        // ---------------------------------------------------------------------
+
+        private void rememberConnection(MovementConnection connection) {
+            if (!pastConnections.isEmpty() && pastConnections.peekFirst().equals(connection)) {
+                return;
+            }
+            pastConnections.addFirst(connection);
+            while (pastConnections.size() > SAVED_RECENT_CONNECTIONS) {
+                pastConnections.removeLast();
+            }
+        }
+
+        private boolean connectionAlreadyFollowedSeveralTimes(MovementConnection connection) {
+            int count = 0;
+            for (MovementConnection c : pastConnections) {
+                if (c.equals(connection)) {
+                    count++;
+                    if (count >= RECENT_CONNECTION_LIMIT) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // ---------------------------------------------------------------------
+        // Fallback helpers
+        // ---------------------------------------------------------------------
+
+        private BlockPos bestEffortTowardDestination(BlockPos current) {
+            List<MovementConnection> outgoing = cache.outgoing(current);
+            BlockPos best = null;
+            double bestScore = Double.POSITIVE_INFINITY;
+
+            for (MovementConnection c : outgoing) {
+                if (!cache.accessible(c.end)) continue;
+                double score = euclidean(c.end, destination);
+                if (cache.terrainProximity(c.end) == 2) score += 0.35;
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = c.end;
+                }
+            }
+
+            return best;
+        }
+
+        private BlockPos findNearestReachableAndReturnable(BlockPos center, int radius) {
+            if (center == null) return null;
+            PathingCell cell = cache.cell(center);
+            if (cell.reachable && cell.possibleToGetBackFrom) return center;
+
+            for (int r = 1; r <= radius; r++) {
+                for (int dx = -r; dx <= r; dx++) {
+                    for (int dy = -r; dy <= r; dy++) {
+                        for (int dz = -r; dz <= r; dz++) {
+                            if (Math.abs(dx) != r && Math.abs(dy) != r && Math.abs(dz) != r) continue;
+                            BlockPos q = center.add(dx, dy, dz);
+                            if (!cache.inBounds(q)) continue;
+                            PathingCell qc = cache.cell(q);
+                            if (qc.reachable && qc.possibleToGetBackFrom) {
+                                return q;
+                            }
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+    }
+
+    // =========================================================================
+    // Static convenience API
+    // =========================================================================
+
+    public static Search beginSearch(World world, BlockPos start, BlockPos destination, int maxRange) {
+        return new Search(world, start, destination, maxRange);
+    }
+
+    public static List<BlockPos> findPath(World world, BlockPos start, BlockPos destination, int maxRange, int maxTicks) {
+        Search search = beginSearch(world, start, destination, maxRange);
+        int ticks = Math.max(1, maxTicks);
+
+        for (int i = 0; i < ticks && !search.isFinished(); i++) {
+            search.update(DEFAULT_ACCESSIBILITY_STEPS, DEFAULT_PATH_STEPS);
+        }
+
+        BlockPos adjustedStart = search.getStart();
+        return search.reconstructCurrentBestPath(adjustedStart, Math.max(16, maxRange * 3));
     }
 
     /**
-     * Compute terrain proximity for a position.
-     * 0 = solid (not accessible)
-     * 1 = directly adjacent to solid (preferred for crawling)
-     * 2 = one block away from solid (still accessible but less preferred)
-     * 3+ = open air (not accessible to centipede)
-     *
-     * Mirrors C# AImap.getTerrainProximity().
+     * Follow helper that mirrors Rain World's style better than "closest waypoint in a static path":
+     * choose the next block directly from the reverse pathfield.
      */
-    public static int getTerrainProximity(World world, BlockPos pos) {
-        BlockState state = world.getBlockState(pos);
-        if (state.blocksMovement()) return 0;
+    public static BlockPos followPathfield(Search search, Vec3d currentPos) {
+        if (search == null || !search.isAccessibilityFinished()) return null;
 
-        // Check direct neighbors
+        BlockPos current = BlockPos.ofFloored(currentPos);
+        return search.chooseNextStep(current, true);
+    }
+
+    /**
+     * A debug/helper version if you still want a waypoint to aim for.
+     * It simply walks a few steps through the local pathfield and returns the lookahead node.
+     */
+    public static BlockPos followPathfieldLookAhead(Search search, Vec3d currentPos, int lookAhead) {
+        if (search == null || !search.isAccessibilityFinished()) return null;
+
+        BlockPos cur = BlockPos.ofFloored(currentPos);
+        int steps = Math.max(1, lookAhead);
+        for (int i = 0; i < steps; i++) {
+            BlockPos next = search.chooseNextStep(cur, false);
+            if (next == null) return cur;
+            if (next.equals(cur)) return cur;
+            cur = next;
+        }
+        return cur;
+    }
+
+    public static boolean tileClosestToGoal(Search search, BlockPos a, BlockPos b) {
+        if (search == null) return false;
+        return search.tileClosestToGoal(a, b);
+    }
+
+    /**
+     * Validity is now based on search state, not just "is each waypoint still air".
+     */
+    public static boolean isSearchStillUseful(Search search, Vec3d creaturePos, Vec3d goalPos) {
+        if (search == null) return false;
+
+        BlockPos creature = BlockPos.ofFloored(creaturePos);
+        BlockPos goal = BlockPos.ofFloored(goalPos);
+
+        if (creature.getManhattanDistance(search.getStart()) > search.maxRange + 4) return false;
+        return goal.getManhattanDistance(search.getDestination()) <= 3;
+    }
+
+    // =========================================================================
+    // World helpers
+    // =========================================================================
+
+    public static boolean isOccupiable(World world, BlockPos pos) {
+        return !world.getBlockState(pos).blocksMovement();
+    }
+
+    public static int getTerrainProximity(World world, BlockPos pos) {
+        if (!isOccupiable(world, pos)) return 0;
+
         for (Direction dir : Direction.values()) {
-            BlockPos neighbor = pos.offset(dir);
-            if (world.getBlockState(neighbor).blocksMovement()) {
+            if (world.getBlockState(pos.offset(dir)).blocksMovement()) {
                 return 1;
             }
         }
 
-        // Check 2-block radius for any solid
         for (int dx = -1; dx <= 1; dx++) {
             for (int dy = -1; dy <= 1; dy++) {
                 for (int dz = -1; dz <= 1; dz++) {
                     if (dx == 0 && dy == 0 && dz == 0) continue;
-                    BlockPos check = pos.add(dx, dy, dz);
-                    if (world.getBlockState(check).blocksMovement()) {
+                    if (world.getBlockState(pos.add(dx, dy, dz)).blocksMovement()) {
                         return 2;
                     }
                 }
             }
         }
 
-        return 3; // Open air
+        return 3;
     }
 
-    /**
-     * Check if a tile is climbable (centipede can traverse it).
-     * Mirrors C# ClimbableTile: wallbehind, beam, or terrainProximity < 2.
-     * For Minecraft: accessible if terrainProximity <= 2.
-     */
-    public static boolean isClimbable(World world, BlockPos pos) {
-        return getTerrainProximity(world, pos) >= 1 && getTerrainProximity(world, pos) <= 2;
+    public static boolean isAccessible(World world, BlockPos pos) {
+        int prox = getTerrainProximity(world, pos);
+        return prox >= 1 && prox <= 2;
     }
 
-    // =========================================================================
-    // Heuristic (mirrors C# StandardPather.HeuristicForCell)
-    // =========================================================================
-
-    /**
-     * Heuristic cost estimate from a position to the goal.
-     * Uses octile distance (3D generalization of Chebyshev/diagonal distance).
-     *
-     * C# StandardPather uses: costToGoal.resistance * heuristicCostFac + distance * heuristicDestFac
-     */
-    private static double heuristic(BlockPos from, BlockPos to) {
-        int dx = Math.abs(from.getX() - to.getX());
-        int dy = Math.abs(from.getY() - to.getY());
-        int dz = Math.abs(from.getZ() - to.getZ());
-
-        // Sort to get min, mid, max
-        int min, mid, max;
-        if (dx <= dy) {
-            if (dy <= dz) { min = dx; mid = dy; max = dz; }
-            else if (dx <= dz) { min = dx; mid = dz; max = dy; }
-            else { min = dz; mid = dx; max = dy; }
-        } else {
-            if (dx <= dz) { min = dy; mid = dx; max = dz; }
-            else if (dy <= dz) { min = dy; mid = dz; max = dx; }
-            else { min = dz; mid = dy; max = dx; }
-        }
-
-        // 3D octile distance
-        return (MOVE_COST_CORNER - MOVE_COST_EDGE) * min
-             + (MOVE_COST_EDGE - MOVE_COST_FACE) * mid
-             + MOVE_COST_FACE * max;
-    }
-
-    // =========================================================================
-    // Core A* pathfinding
-    // =========================================================================
-
-    /**
-     * Find a path from start to goal using A* on the 3D block grid.
-     *
-     * Mirrors the flow of:
-     * - C# PathFinder.CheckNeighbours() (A* expansion)
-     * - C# StandardPather.FollowPath() (path following)
-     * - C# CentipedePather accessibility rules
-     *
-     * @param world    The Minecraft world
-     * @param start    Starting block position (should be accessible)
-     * @param goal     Goal block position
-     * @param maxRange Maximum search radius in blocks
-     * @return List of BlockPos waypoints from start to goal, or empty if no path found.
-     *         If the exact goal is unreachable, returns path to the closest accessible
-     *         position found (mirrors C# "looking for impossible path" fallback).
-     */
-    public static List<BlockPos> findPath(World world, BlockPos start, BlockPos goal, int maxRange) {
-        // Clamp range
-        if (maxRange <= 0) maxRange = MAX_RANGE;
-
-        // If start is not accessible, try to find nearest accessible position
-        if (!isAccessible(world, start)) {
-            BlockPos adjusted = findNearestAccessible(world, start, 5);
-            if (adjusted == null) return Collections.emptyList();
-            start = adjusted;
-        }
-
-        // If goal is solid, find nearest accessible position to it
-        BlockPos adjustedGoal = goal;
-        if (!isAccessible(world, goal)) {
-            BlockPos nearest = findNearestAccessible(world, goal, 5);
-            if (nearest != null) {
-                adjustedGoal = nearest;
-            }
-            // If goal is totally unreachable, we'll still try and return closest path
-        }
-
-        // Quick check: if start == goal
-        if (start.equals(adjustedGoal)) {
-            return Collections.singletonList(start);
-        }
-
-        // Distance check
-        if (start.getManhattanDistance(adjustedGoal) > maxRange * 2) {
-            return Collections.emptyList();
-        }
-
-        // A* search
-        Map<BlockPos, PathNode> allNodes = new HashMap<>();
-        PriorityQueue<PathNode> openSet = new PriorityQueue<>();
-
-        PathNode startNode = new PathNode(start);
-        startNode.gCost = 0;
-        startNode.hCost = heuristic(start, adjustedGoal);
-        startNode.terrainProximity = getTerrainProximity(world, start);
-        allNodes.put(start, startNode);
-        openSet.add(startNode);
-
-        Set<BlockPos> closedSet = new HashSet<>();
-
-        // Track closest node to goal (for fallback partial path)
-        PathNode closestToGoal = startNode;
-        double closestDist = heuristic(start, adjustedGoal);
-
-        int nodesExpanded = 0;
-
-        while (!openSet.isEmpty() && nodesExpanded < MAX_NODES) {
-            PathNode current = openSet.poll();
-
-            // Skip if already processed
-            if (closedSet.contains(current.pos)) continue;
-            closedSet.add(current.pos);
-            nodesExpanded++;
-
-            // Goal reached!
-            if (current.pos.equals(adjustedGoal)) {
-                return reconstructPath(current);
-            }
-
-            // Check if this is closer to goal than previous best
-            double distToGoal = heuristic(current.pos, adjustedGoal);
-            if (distToGoal < closestDist) {
-                closestDist = distToGoal;
-                closestToGoal = current;
-            }
-
-            // Range check
-            if (current.pos.getManhattanDistance(start) > maxRange) continue;
-
-            // Expand neighbors — 6 face neighbors (always checked)
-            for (int[] offset : FACE_OFFSETS) {
-                expandNeighbor(world, current, offset, MOVE_COST_FACE,
-                        adjustedGoal, allNodes, openSet, closedSet);
-            }
-
-            // Expand edge-diagonal neighbors
-            for (int[] offset : EDGE_OFFSETS) {
-                // Only allow diagonal if at least one axis-aligned face toward the
-                // diagonal is passable (prevents cutting through solid corners)
-                BlockPos diag = current.pos.add(offset[0], offset[1], offset[2]);
-                if (canMoveDiagonalEdge(world, current.pos, offset)) {
-                    expandNeighbor(world, current, offset, MOVE_COST_EDGE,
-                            adjustedGoal, allNodes, openSet, closedSet);
-                }
-            }
-
-            // Expand corner-diagonal neighbors
-            for (int[] offset : CORNER_OFFSETS) {
-                if (canMoveDiagonalCorner(world, current.pos, offset)) {
-                    expandNeighbor(world, current, offset, MOVE_COST_CORNER,
-                            adjustedGoal, allNodes, openSet, closedSet);
-                }
-            }
-        }
-
-        // No exact path found — return partial path to closest node
-        if (closestToGoal != startNode) {
-            return reconstructPath(closestToGoal);
-        }
-
-        return Collections.emptyList();
-    }
-
-    /**
-     * Expand a neighbor node in the A* search.
-     */
-    private static void expandNeighbor(World world, PathNode current, int[] offset,
-                                        double moveCost, BlockPos goal,
-                                        Map<BlockPos, PathNode> allNodes,
-                                        PriorityQueue<PathNode> openSet,
-                                        Set<BlockPos> closedSet) {
-        BlockPos neighborPos = current.pos.add(offset[0], offset[1], offset[2]);
-
-        if (closedSet.contains(neighborPos)) return;
-        if (!isAccessible(world, neighborPos)) return;
-
-        // Compute terrain proximity cost modifier
-        // C# centipedes prefer terrainProximity == 1 (touching solid surface)
-        int proximity = getTerrainProximity(world, neighborPos);
-        double proximityCost = (proximity == 1) ? 0.0 : SURFACE_PREFERENCE;
-
-        double tentativeG = current.gCost + moveCost + proximityCost;
-
-        PathNode neighborNode = allNodes.get(neighborPos);
-        if (neighborNode == null) {
-            neighborNode = new PathNode(neighborPos);
-            neighborNode.terrainProximity = proximity;
-            allNodes.put(neighborPos, neighborNode);
-        }
-
-        if (tentativeG < neighborNode.gCost) {
-            neighborNode.parent = current;
-            neighborNode.gCost = tentativeG;
-            neighborNode.hCost = heuristic(neighborPos, goal);
-            openSet.add(neighborNode); // duplicate entries are OK — closedSet filters them
-        }
-    }
-
-    /**
-     * Check if edge-diagonal movement is valid (no cutting through solid corners).
-     * For a diagonal on 2 axes, at least one of the 2 face-adjacent blocks must be passable.
-     */
-    private static boolean canMoveDiagonalEdge(World world, BlockPos from, int[] offset) {
-        // Identify the two non-zero axes
-        int ax = offset[0], ay = offset[1], az = offset[2];
-
-        // Check the two "slide" positions — both intermediate face neighbors must not both be solid
-        // For a move (1,1,0): check (1,0,0) and (0,1,0)
-        boolean face1Blocked = world.getBlockState(from.add(ax, 0, 0)).blocksMovement()
-                            && world.getBlockState(from.add(0, ay, 0)).blocksMovement()
-                            && world.getBlockState(from.add(0, 0, az)).blocksMovement();
-
-        if (ax != 0 && ay != 0) {
-            return !world.getBlockState(from.add(ax, 0, 0)).blocksMovement()
-                || !world.getBlockState(from.add(0, ay, 0)).blocksMovement();
-        }
-        if (ax != 0 && az != 0) {
-            return !world.getBlockState(from.add(ax, 0, 0)).blocksMovement()
-                || !world.getBlockState(from.add(0, 0, az)).blocksMovement();
-        }
-        if (ay != 0 && az != 0) {
-            return !world.getBlockState(from.add(0, ay, 0)).blocksMovement()
-                || !world.getBlockState(from.add(0, 0, az)).blocksMovement();
-        }
-        return false;
-    }
-
-    /**
-     * Check if corner-diagonal movement is valid.
-     * At least 2 of the 3 face-adjacent blocks must be passable.
-     */
-    private static boolean canMoveDiagonalCorner(World world, BlockPos from, int[] offset) {
-        int passable = 0;
-        if (!world.getBlockState(from.add(offset[0], 0, 0)).blocksMovement()) passable++;
-        if (!world.getBlockState(from.add(0, offset[1], 0)).blocksMovement()) passable++;
-        if (!world.getBlockState(from.add(0, 0, offset[2])).blocksMovement()) passable++;
-        return passable >= 2;
-    }
-
-    // =========================================================================
-    // Path reconstruction & smoothing
-    // =========================================================================
-
-    /**
-     * Reconstruct path from goal node back to start by following parent pointers.
-     */
-    private static List<BlockPos> reconstructPath(PathNode goalNode) {
-        List<BlockPos> path = new ArrayList<>();
-        PathNode current = goalNode;
-        while (current != null) {
-            path.add(current.pos);
-            current = current.parent;
-        }
-        Collections.reverse(path);
-
-        // Smooth the raw A* path to remove unnecessary waypoints
-        return smoothPath(path);
-    }
-
-    /**
-     * Simple path smoothing: remove intermediate waypoints when a straight line
-     * between two non-adjacent waypoints is clear.
-     * This produces much smoother centipede movement.
-     */
-    private static List<BlockPos> smoothPath(List<BlockPos> rawPath) {
-        if (rawPath.size() <= 2) return rawPath;
-
-        List<BlockPos> smoothed = new ArrayList<>();
-        smoothed.add(rawPath.get(0));
-
-        int current = 0;
-        while (current < rawPath.size() - 1) {
-            // Try to skip as far ahead as possible while maintaining line-of-sight
-            int farthest = current + 1;
-            for (int test = rawPath.size() - 1; test > current + 1; test--) {
-                // Simple check: all intermediate points should be roughly in line
-                // (we don't do full raycasting, just check that the path doesn't
-                // jump too far between consecutive skipped nodes)
-                if (rawPath.get(current).getManhattanDistance(rawPath.get(test))
-                        <= (test - current) * 2) {
-                    farthest = test;
-                    break;
-                }
-            }
-            current = farthest;
-            smoothed.add(rawPath.get(current));
-        }
-
-        return smoothed;
-    }
-
-    // =========================================================================
-    // Utility: find nearest accessible position
-    // =========================================================================
-
-    /**
-     * Find the nearest accessible block position within the given radius.
-     * Searches in expanding shells from the center.
-     */
-    public static BlockPos findNearestAccessible(World world, BlockPos center, int radius) {
-        if (isAccessible(world, center)) return center;
+    public static BlockPos findNearestAccessible(World world, BlockPos center, int radius, int maxRangeFromCenter) {
+        if (isAccessible(world, center)) return center.toImmutable();
 
         for (int r = 1; r <= radius; r++) {
+            BlockPos best = null;
+            double bestScore = Double.POSITIVE_INFINITY;
+
             for (int dx = -r; dx <= r; dx++) {
                 for (int dy = -r; dy <= r; dy++) {
                     for (int dz = -r; dz <= r; dz++) {
-                        // Only check the shell at distance r
                         if (Math.abs(dx) != r && Math.abs(dy) != r && Math.abs(dz) != r) continue;
 
-                        BlockPos check = center.add(dx, dy, dz);
-                        if (isAccessible(world, check)) return check;
+                        BlockPos q = center.add(dx, dy, dz);
+                        if (!isAccessible(world, q)) continue;
+                        if (Math.abs(q.getX() - center.getX()) > maxRangeFromCenter
+                            || Math.abs(q.getY() - center.getY()) > maxRangeFromCenter
+                            || Math.abs(q.getZ() - center.getZ()) > maxRangeFromCenter) {
+                            continue;
+                        }
+
+                        double score = euclidean(center, q);
+                        if (getTerrainProximity(world, q) == 1) score -= 0.2;
+                        if (score < bestScore) {
+                            bestScore = score;
+                            best = q.toImmutable();
+                        }
                     }
                 }
             }
+
+            if (best != null) return best;
         }
+
         return null;
     }
 
-    // =========================================================================
-    // TileClosestToGoal (from C# CentipedePather)
-    // =========================================================================
-
-    /**
-     * Compare two positions to determine which is "closer" to the goal,
-     * taking into account path accessibility and cost.
-     *
-     * Mirrors C# CentipedePather.TileClosestToGoal():
-     * - Prefer reachable + get-back-able positions
-     * - Then prefer lower cost-to-goal
-     * - Then prefer lower distance
-     *
-     * @param world The world
-     * @param a     First position to compare
-     * @param b     Second position to compare
-     * @param goal  The target goal position
-     * @return true if A is closer to goal than B
-     */
-    public static boolean tileClosestToGoal(World world, BlockPos a, BlockPos b, BlockPos goal) {
-        boolean aAccessible = isAccessible(world, a);
-        boolean bAccessible = isAccessible(world, b);
-
-        // Prefer accessible positions (mirrors CoordinateReachableAndGetbackable check)
-        if (aAccessible && !bAccessible) return true;
-        if (bAccessible && !aAccessible) return false;
-
-        // Prefer positions with lower terrain proximity (closer to surface)
-        int aProx = getTerrainProximity(world, a);
-        int bProx = getTerrainProximity(world, b);
-        if (aProx < bProx) return true;
-        if (bProx < aProx) return false;
-
-        // Prefer closer to goal (straight-line distance)
-        double aDist = heuristic(a, goal);
-        double bDist = heuristic(b, goal);
-        return aDist < bDist;
+    public static BlockPos findNearestAccessible(World world, BlockPos center, int radius) {
+        return findNearestAccessible(world, center, radius, DEFAULT_MAX_RANGE);
     }
 
     // =========================================================================
-    // Incremental pathfinder (spread across ticks like C# PathFinder.Update)
+    // Math helpers
     // =========================================================================
 
-    /**
-     * An incremental version of the pathfinder that processes a limited number
-     * of nodes per tick, mirroring C# PathFinder.Update() with stepsPerFrame.
-     *
-     * Usage:
-     *   IncrementalSearch search = new IncrementalSearch(world, start, goal, maxRange);
-     *   // Each tick:
-     *   search.step(stepsPerTick);
-     *   if (search.isFinished()) {
-     *       List<BlockPos> path = search.getPath();
-     *   }
-     */
-    public static class IncrementalSearch {
-        private final World world;
-        private final BlockPos start;
-        private final BlockPos goal;
-        private final int maxRange;
-
-        private final Map<BlockPos, PathNode> allNodes = new HashMap<>();
-        private final PriorityQueue<PathNode> openSet = new PriorityQueue<>();
-        private final Set<BlockPos> closedSet = new HashSet<>();
-
-        private PathNode closestToGoal;
-        private double closestDist;
-        private int nodesExpanded = 0;
-        private boolean finished = false;
-        private List<BlockPos> result = null;
-
-        public IncrementalSearch(World world, BlockPos start, BlockPos goal, int maxRange) {
-            this.world = world;
-            this.maxRange = maxRange > 0 ? maxRange : MAX_RANGE;
-
-            // Adjust start if not accessible
-            BlockPos adjustedStart = start;
-            if (!isAccessible(world, start)) {
-                BlockPos nearest = findNearestAccessible(world, start, 5);
-                if (nearest != null) adjustedStart = nearest;
-            }
-            this.start = adjustedStart;
-
-            // Adjust goal if not accessible
-            BlockPos adjustedGoal = goal;
-            if (!isAccessible(world, goal)) {
-                BlockPos nearest = findNearestAccessible(world, goal, 5);
-                if (nearest != null) adjustedGoal = nearest;
-            }
-            this.goal = adjustedGoal;
-
-            // Initialize start node
-            PathNode startNode = new PathNode(this.start);
-            startNode.gCost = 0;
-            startNode.hCost = heuristic(this.start, this.goal);
-            startNode.terrainProximity = getTerrainProximity(world, this.start);
-            allNodes.put(this.start, startNode);
-            openSet.add(startNode);
-
-            closestToGoal = startNode;
-            closestDist = startNode.hCost;
-
-            // Quick finish if start == goal
-            if (this.start.equals(this.goal)) {
-                result = Collections.singletonList(this.start);
-                finished = true;
-            }
-        }
-
-        /**
-         * Process up to `steps` nodes. Mirrors C# PathFinder.Update loop.
-         */
-        public void step(int steps) {
-            if (finished) return;
-
-            for (int i = 0; i < steps && !openSet.isEmpty() && nodesExpanded < MAX_NODES; i++) {
-                PathNode current = openSet.poll();
-
-                if (closedSet.contains(current.pos)) continue;
-                closedSet.add(current.pos);
-                nodesExpanded++;
-
-                // Goal reached
-                if (current.pos.equals(goal)) {
-                    result = reconstructPath(current);
-                    finished = true;
-                    return;
-                }
-
-                // Track closest to goal
-                double distToGoal = heuristic(current.pos, goal);
-                if (distToGoal < closestDist) {
-                    closestDist = distToGoal;
-                    closestToGoal = current;
-                }
-
-                // Range check
-                if (current.pos.getManhattanDistance(start) > maxRange) continue;
-
-                // Expand face neighbors
-                for (int[] offset : FACE_OFFSETS) {
-                    expandNeighbor(world, current, offset, MOVE_COST_FACE,
-                            goal, allNodes, openSet, closedSet);
-                }
-
-                // Expand edge-diagonals
-                for (int[] offset : EDGE_OFFSETS) {
-                    if (canMoveDiagonalEdge(world, current.pos, offset)) {
-                        expandNeighbor(world, current, offset, MOVE_COST_EDGE,
-                                goal, allNodes, openSet, closedSet);
-                    }
-                }
-
-                // Expand corner-diagonals
-                for (int[] offset : CORNER_OFFSETS) {
-                    if (canMoveDiagonalCorner(world, current.pos, offset)) {
-                        expandNeighbor(world, current, offset, MOVE_COST_CORNER,
-                                goal, allNodes, openSet, closedSet);
-                    }
-                }
-            }
-
-            // Check if search is exhausted
-            if (openSet.isEmpty() || nodesExpanded >= MAX_NODES) {
-                // Return partial path to closest point
-                if (closestToGoal != null && closestToGoal.parent != null) {
-                    result = reconstructPath(closestToGoal);
-                } else {
-                    result = Collections.emptyList();
-                }
-                finished = true;
-            }
-        }
-
-        public boolean isFinished() { return finished; }
-
-        public List<BlockPos> getPath() { return result != null ? result : Collections.emptyList(); }
-
-        public BlockPos getGoal() { return goal; }
+    private static double euclidean(BlockPos a, BlockPos b) {
+        double dx = a.getX() - b.getX();
+        double dy = a.getY() - b.getY();
+        double dz = a.getZ() - b.getZ();
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 
-    // =========================================================================
-    // Path following helper (mirrors C# StandardPather.FollowPath)
-    // =========================================================================
-
-    /**
-     * Given a path and the current position, find the next waypoint to move toward.
-     *
-     * Mirrors C# StandardPather.FollowPath(): find current position in the path,
-     * return the next connection toward the goal.
-     *
-     * @param path       The computed path waypoints
-     * @param currentPos Current entity position (will snap to nearest waypoint)
-     * @param lookAhead  How many waypoints ahead to target (for smoother movement)
-     * @return The block position to move toward, or null if path is exhausted
-     */
-    public static BlockPos followPath(List<BlockPos> path, Vec3d currentPos, int lookAhead) {
-        if (path == null || path.isEmpty()) return null;
-
-        // Find the closest waypoint to current position
-        int closestIndex = 0;
-        double closestDist = Double.MAX_VALUE;
-        for (int i = 0; i < path.size(); i++) {
-            double dist = currentPos.squaredDistanceTo(
-                    path.get(i).getX() + 0.5,
-                    path.get(i).getY() + 0.5,
-                    path.get(i).getZ() + 0.5);
-            if (dist < closestDist) {
-                closestDist = dist;
-                closestIndex = i;
-            }
-        }
-
-        // Target a waypoint ahead of the closest one for smoother movement
-        int targetIndex = Math.min(closestIndex + lookAhead, path.size() - 1);
-        return path.get(targetIndex);
-    }
-
-    /**
-     * Check if a path is still valid (no blocked waypoints).
-     * Only checks a sample of waypoints for performance.
-     */
-    public static boolean isPathValid(World world, List<BlockPos> path) {
-        if (path == null || path.isEmpty()) return false;
-
-        // Check every 3rd waypoint for accessibility
-        for (int i = 0; i < path.size(); i += 3) {
-            if (!isAccessible(world, path.get(i))) return false;
-        }
-        // Always check last waypoint
-        if (!isAccessible(world, path.get(path.size() - 1))) return false;
-
-        return true;
+    private static BlockPos midpoint(BlockPos a, BlockPos b) {
+        return new BlockPos(
+            (a.getX() + b.getX()) >> 1,
+            (a.getY() + b.getY()) >> 1,
+            (a.getZ() + b.getZ()) >> 1
+        );
     }
 }

@@ -61,13 +61,8 @@ public class CentipedeBodyRenderer extends GeoEntityRenderer<CentipedeBodyEntity
         // Compute chain direction for this body segment (average of neighbors)
         Vec3d dir = getChainDirection(entity, partialTick);
 
-        // Compute the interpolated surface normal for roll
-        float snX = MathHelper.lerp(partialTick, entity.prevSurfaceNormalX, entity.surfaceNormalX);
-        float snY = MathHelper.lerp(partialTick, entity.prevSurfaceNormalY, entity.surfaceNormalY);
-        float snZ = MathHelper.lerp(partialTick, entity.prevSurfaceNormalZ, entity.surfaceNormalZ);
-        Vector3f surfaceUp = new Vector3f(snX, snY, snZ);
-        if (surfaceUp.lengthSquared() < 0.001f) surfaceUp.set(0, 1, 0);
-        surfaceUp.normalize();
+        // Compute the interpolated surface normal for roll, averaged with neighbors
+        Vector3f surfaceUp = getSmoothedSurfaceNormal(entity, partialTick);
 
         // Build a full orientation from chain forward direction + surface normal (up)
         // Forward = chain direction (normalized)
@@ -102,6 +97,43 @@ public class CentipedeBodyRenderer extends GeoEntityRenderer<CentipedeBodyEntity
             float scaleFactor = radius / parentCtrl.getMaxRadius();
             poseStack.scale(scaleFactor, scaleFactor, scaleFactor);
         }
+    }
+
+    /**
+     * Average this segment's interpolated surface normal with its neighbors for smooth roll.
+     */
+    private Vector3f getSmoothedSurfaceNormal(CentipedeBodyEntity entity, float partialTick) {
+        float snX = MathHelper.lerp(partialTick, entity.prevSurfaceNormalX, entity.surfaceNormalX);
+        float snY = MathHelper.lerp(partialTick, entity.prevSurfaceNormalY, entity.surfaceNormalY);
+        float snZ = MathHelper.lerp(partialTick, entity.prevSurfaceNormalZ, entity.surfaceNormalZ);
+
+        CentipedeController parent = entity.getParentCentipede();
+        CentipedeSegmentEntity[] segs = parent != null ? parent.getSegments() : null;
+        int idx = entity.getSegmentIndex();
+
+        if (segs != null && idx >= 0 && idx < segs.length) {
+            int count = 1;
+            if (idx > 0 && segs[idx - 1] != null) {
+                snX += MathHelper.lerp(partialTick, segs[idx - 1].prevSurfaceNormalX, segs[idx - 1].surfaceNormalX);
+                snY += MathHelper.lerp(partialTick, segs[idx - 1].prevSurfaceNormalY, segs[idx - 1].surfaceNormalY);
+                snZ += MathHelper.lerp(partialTick, segs[idx - 1].prevSurfaceNormalZ, segs[idx - 1].surfaceNormalZ);
+                count++;
+            }
+            if (idx < segs.length - 1 && segs[idx + 1] != null) {
+                snX += MathHelper.lerp(partialTick, segs[idx + 1].prevSurfaceNormalX, segs[idx + 1].surfaceNormalX);
+                snY += MathHelper.lerp(partialTick, segs[idx + 1].prevSurfaceNormalY, segs[idx + 1].surfaceNormalY);
+                snZ += MathHelper.lerp(partialTick, segs[idx + 1].prevSurfaceNormalZ, segs[idx + 1].surfaceNormalZ);
+                count++;
+            }
+            snX /= count;
+            snY /= count;
+            snZ /= count;
+        }
+
+        Vector3f result = new Vector3f(snX, snY, snZ);
+        if (result.lengthSquared() < 0.001f) result.set(0, 1, 0);
+        result.normalize();
+        return result;
     }
 
     /**

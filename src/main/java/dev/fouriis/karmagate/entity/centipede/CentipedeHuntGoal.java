@@ -27,8 +27,11 @@ public class CentipedeHuntGoal<T extends HostileEntity & CentipedeController> ex
 
     @Override
     public boolean canStart() {
+        if (centipede.isForcedPathing()) return false;
         LivingEntity t = centipede.getTarget();
         if (t == null || !t.isAlive()) return false;
+        // ignore other centipedes
+        if (t instanceof CentipedeEntity) return false;
         // Ignore players not in survival mode
         if (t instanceof PlayerEntity player) {
             if (player.isCreative() || player.isSpectator()) return false;
@@ -39,6 +42,7 @@ public class CentipedeHuntGoal<T extends HostileEntity & CentipedeController> ex
 
     @Override
     public boolean shouldContinue() {
+        if (centipede.isForcedPathing()) return false;
         if (target == null || !target.isAlive()) return false;
         if (target.isRemoved()) return false;
         return centipede.squaredDistanceTo(target) < 48 * 48;

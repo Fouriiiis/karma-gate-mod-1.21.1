@@ -30,8 +30,11 @@ public class CentiwingHuntGoal<T extends HostileEntity & CentipedeController> ex
 
     @Override
     public boolean canStart() {
+        if (centipede.isForcedPathing()) return false;
         LivingEntity t = centipede.getTarget();
         if (t == null || !t.isAlive()) return false;
+        // ignore other centipedes
+        if (t instanceof CentipedeEntity) return false;
         if (t instanceof PlayerEntity player) {
             if (player.isCreative() || player.isSpectator()) return false;
         }
@@ -43,6 +46,7 @@ public class CentiwingHuntGoal<T extends HostileEntity & CentipedeController> ex
     public boolean shouldContinue() {
         if (target == null || !target.isAlive()) return false;
         if (target.isRemoved()) return false;
+        if (centipede.isForcedPathing()) return false;
         // Centiwings have a larger pursuit range than normal centipedes
         if (centipede.squaredDistanceTo(target) > 64 * 64) return false;
         // C# lower prey tracking — more likely to give up

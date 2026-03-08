@@ -51,20 +51,14 @@ public class CentipedeHeadRenderer extends GeoEntityRenderer<CentipedeHeadEntity
     protected void applyRotations(CentipedeHeadEntity entity, MatrixStack poseStack,
                                    float ageInTicks, float rotationYaw, float partialTick, float nativeScale) {
         // Compute chain direction for this head segment
+        // getChainDirection already returns the outward-facing direction for each head:
+        //   front head (idx 0):   seg[0] - seg[1]   → points forward
+        //   rear head  (idx N-1): seg[N-1] - seg[N-2] → points backward
+        // Both point AWAY from the body, which is correct for both head models.
         Vec3d dir = getChainDirection(entity, partialTick);
 
-        // Rear head should face the other way
-        if (!entity.isFrontHead()) {
-            dir = dir.negate();
-        }
-
-        // Compute the interpolated surface normal for roll
-        float snX = MathHelper.lerp(partialTick, entity.prevSurfaceNormalX, entity.surfaceNormalX);
-        float snY = MathHelper.lerp(partialTick, entity.prevSurfaceNormalY, entity.surfaceNormalY);
-        float snZ = MathHelper.lerp(partialTick, entity.prevSurfaceNormalZ, entity.surfaceNormalZ);
-        Vector3f surfaceUp = new Vector3f(snX, snY, snZ);
-        if (surfaceUp.lengthSquared() < 0.001f) surfaceUp.set(0, 1, 0);
-        surfaceUp.normalize();
+        // Compute the interpolated surface normal for roll, averaged with neighbors
+        Vector3f surfaceUp = getSmoothedSurfaceNormal(entity, partialTick);
 
         // Build a full orientation from chain forward direction + surface normal (up)
         Vector3f forward = new Vector3f((float) dir.x, (float) dir.y, (float) dir.z);
@@ -95,6 +89,37 @@ public class CentipedeHeadRenderer extends GeoEntityRenderer<CentipedeHeadEntity
             float hs = parentCtrl.getHeadScaleFactor();
             if (hs != 1.0f) poseStack.scale(hs, hs, hs);
         }
+    }
+
+    /**
+     * Average this head's interpolated surface normal with its adjacent segment for smooth roll.
+     */
+    private Vector3f getSmoothedSurfaceNormal(CentipedeHeadEntity entity, float partialTick) {
+        float snX = MathHelper.lerp(partialTick, entity.prevSurfaceNormalX, entity.surfaceNormalX);
+        float snY = MathHelper.lerp(partialTick, entity.prevSurfaceNormalY, entity.surfaceNormalY);
+        float snZ = MathHelper.lerp(partialTick, entity.prevSurfaceNormalZ, entity.surfaceNormalZ);
+
+        CentipedeController parent = entity.getParentCentipede();
+        CentipedeSegmentEntity[] segs = parent != null ? parent.getSegments() : null;
+        int idx = entity.getSegmentIndex();
+
+        if (segs != null && idx >= 0 && idx < segs.length) {
+            // Heads only have one neighbor (the adjacent body segment)
+            int neighborIdx = (idx == 0) ? 1 : idx - 1;
+            if (neighborIdx >= 0 && neighborIdx < segs.length && segs[neighborIdx] != null) {
+                snX += MathHelper.lerp(partialTick, segs[neighborIdx].prevSurfaceNormalX, segs[neighborIdx].surfaceNormalX);
+                snY += MathHelper.lerp(partialTick, segs[neighborIdx].prevSurfaceNormalY, segs[neighborIdx].surfaceNormalY);
+                snZ += MathHelper.lerp(partialTick, segs[neighborIdx].prevSurfaceNormalZ, segs[neighborIdx].surfaceNormalZ);
+                snX /= 2f;
+                snY /= 2f;
+                snZ /= 2f;
+            }
+        }
+
+        Vector3f result = new Vector3f(snX, snY, snZ);
+        if (result.lengthSquared() < 0.001f) result.set(0, 1, 0);
+        result.normalize();
+        return result;
     }
 
     /**

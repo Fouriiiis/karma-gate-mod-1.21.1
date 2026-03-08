@@ -1,5 +1,6 @@
 package dev.fouriis.karmagate.entity.centipede;
 
+import net.minecraft.block.BlockState;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.LivingEntity;
@@ -13,6 +14,8 @@ import net.minecraft.entity.data.TrackedDataHandlerRegistry;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import software.bernie.geckolib.animatable.GeoAnimatable;
@@ -221,6 +224,48 @@ public abstract class CentipedeSegmentEntity extends MobEntity implements GeoAni
             if (parent != null) {
                 parent.registerClientSegment(this);
             }
+            // Client: compute surface normal locally for renderer roll alignment.
+            // The server sets these fields but they aren't synced via tracked data,
+            // so the client must derive them from nearby blocks.
+            computeClientSurfaceNormal();
+        }
+    }
+
+    /**
+     * Compute the surface normal on the client side by probing nearby blocks.
+     * Mirrors the server-side computeSurfaceNormal() in CentipedeEntity.
+     */
+    private void computeClientSurfaceNormal() {
+        World world = this.getWorld();
+        Vec3d center = this.getBoundingBox().getCenter();
+        Vec3d normal = Vec3d.ZERO;
+        int count = 0;
+
+        double[] distances = {0.55, 0.8};
+        for (double d : distances) {
+            for (Direction dir : Direction.values()) {
+                BlockPos probePos = BlockPos.ofFloored(
+                        center.x + dir.getOffsetX() * d,
+                        center.y + dir.getOffsetY() * d,
+                        center.z + dir.getOffsetZ() * d
+                );
+                if (world.getBlockState(probePos).isSolidBlock(world, probePos)) {
+                    normal = normal.add(-dir.getOffsetX(), -dir.getOffsetY(), -dir.getOffsetZ());
+                    count++;
+                }
+            }
+        }
+
+        if (count > 0 && normal.lengthSquared() > 0.001) {
+            Vec3d n = normal.normalize();
+            this.surfaceNormalX = (float) n.x;
+            this.surfaceNormalY = (float) n.y;
+            this.surfaceNormalZ = (float) n.z;
+        } else {
+            // Not near a surface — decay toward default (0, 1, 0)
+            this.surfaceNormalX *= 0.9f;
+            this.surfaceNormalY *= 0.9f;
+            this.surfaceNormalZ *= 0.9f;
         }
     }
 

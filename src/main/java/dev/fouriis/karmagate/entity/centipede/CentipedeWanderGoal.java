@@ -29,13 +29,13 @@ public class CentipedeWanderGoal<T extends HostileEntity & CentipedeController> 
 
     @Override
     public boolean canStart() {
-        // Only wander if no hunt target
-        return centipede.getTarget() == null && centipede.areSegmentsSpawned();
+        // Only wander if no hunt target and not in forced pathing mode
+        return !centipede.isForcedPathing() && centipede.getTarget() == null && centipede.areSegmentsSpawned();
     }
 
     @Override
     public boolean shouldContinue() {
-        return centipede.getTarget() == null;
+        return !centipede.isForcedPathing() && centipede.getTarget() == null;
     }
 
     @Override

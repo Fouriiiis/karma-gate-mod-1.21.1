@@ -14,7 +14,6 @@ import net.minecraft.entity.data.DataTracker;
 import net.minecraft.entity.data.TrackedData;
 import net.minecraft.entity.data.TrackedDataHandlerRegistry;
 import net.minecraft.entity.mob.HostileEntity;
-import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.particle.ParticleTypes;
@@ -96,10 +95,12 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
     // --- AI behavior ---
     protected LivingEntity huntTarget = null;
 
+    // --- Forced pathing (debug command) ---
+    protected boolean forcedPathing = false;
+    protected BlockPos forcedPathTarget = null;
+
     // --- Pathfinding ---
-    protected CentipedePathfinder.IncrementalSearch currentSearch = null;
-    protected List<BlockPos> currentPath = null;
-    protected int pathIndex = 0;
+    protected CentipedePathfinder.Search currentSearch = null;
     protected int pathRecalcTimer = 0;
     protected BlockPos lastPathGoal = null;
     protected static final int PATH_STEPS_PER_TICK = 80;
@@ -107,18 +108,18 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
     protected static final int PATH_LOOK_AHEAD = 3;
     protected static final double WAYPOINT_REACH_DIST = 1.5;
 
-    // --- Orange shell colors ---
-    // C# HSL(0.07, 0.9, 0.5) ≈ RGB(242, 109, 13)
-    private static final int SHELL_COLOR = (242 << 16) | (109 << 8) | 13;
-    // C# HSL(0.07, 0.9, 0.3) ≈ RGB(145, 66, 8)
-    private static final int SECONDARY_SHELL_COLOR = (145 << 16) | (66 << 8) | 8;
+    // --- Stall detection ---
+    protected Vec3d lastHeadProgressPos = Vec3d.ZERO;
+    protected int stuckTicks = 0;
+
+    // CentipedeEntity.java
+private static final int SHELL_COLOR = (242 << 16) | (109 << 8) | 13;
+private static final int SECONDARY_SHELL_COLOR = (145 << 16) | (66 << 8) | 8;
 
     public CentipedeEntity(EntityType<? extends HostileEntity> type, World world) {
         super(type, world);
         this.noClip = true;
         this.setNoGravity(true);
-        // Default size; server will compute the real size and sync via tracked data.
-        // Don't compute from UUID here — the client UUID may differ at construction time.
         recalcSizeDerivedFields();
     }
 
@@ -156,17 +157,12 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
     }
 
     protected void recalcSizeDerivedFields() {
-        // C#: bodyChunks.Length = (int)Lerp(7, 17, size)
         this.totalSegments = (int) MathHelper.lerp(size, 7f, 17f);
-        if (this.totalSegments < 3) this.totalSegments = 3; // minimum: 2 heads + 1 body
+        if (this.totalSegments < 3) this.totalSegments = 3;
         this.bodySegmentCount = this.totalSegments - 2;
 
-        // Max radius at the fattest point (middle segment at this size)
-        // C# formula: lerp(lerp(2,3.5,size), lerp(4,6.5,size), pow(sin(PI*0.5), lerp(0.7,0.3,size)))
-        // At ratio=0.5, sin(PI*0.5)=1, so pow(1,x)=1, result = lerp(4,6.5,size)
         this.maxRadius = MathHelper.lerp(size, 4f, 6.5f);
 
-        // Initialize arrays
         this.segmentIds = new int[totalSegments];
         this.segments = new CentipedeSegmentEntity[totalSegments];
         java.util.Arrays.fill(segmentIds, -1);
@@ -313,7 +309,6 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
     @Override
     public void registerClientSegment(CentipedeSegmentEntity seg) {
         int idx = seg.getSegmentIndex();
-        // If the segment index is beyond our current array, grow to fit
         if (idx >= totalSegments) {
             totalSegments = idx + 1;
             bodySegmentCount = totalSegments - 2;
@@ -340,11 +335,6 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         return segmentsSpawned;
     }
 
-    /**
-     * Compute the C# body chunk radius for a normal centipede segment.
-     * C# formula (no Red bonus):
-     *   radius = lerp(lerp(2,3.5,size), lerp(4,6.5,size), pow(clamp(sin(PI*segRatio),0,1), lerp(0.7,0.3,size)))
-     */
     @Override
     public float computeSegmentRadius(int segIndex) {
         float segRatio = (float) segIndex / (float) (totalSegments - 1);
@@ -384,22 +374,43 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         super.tick();
 
         if (!this.getWorld().isClient) {
-            if (!segmentsSpawned) {
-                computeSizeFromSeed();
-                spawnSegments();
-                return;
-            }
-
-            resolveSegments();
-            updatePathfinding();
-            updateChainPhysics();
-            updateSegmentRotations();
-            updateGrabs();
-            updateShockCharge();
-            syncTrackedData();
+            tickServer();
         } else {
             readTrackedDataFromClient();
         }
+    }
+
+    /**
+     * Server-side tick logic. Subclasses (e.g. CentiwingEntity) can override
+     * this to replace crawling physics with flight physics.
+     */
+    protected void tickServer() {
+        if (!segmentsSpawned) {
+            computeSizeFromSeed();
+            spawnSegments();
+            return;
+        }
+
+        resolveSegments();
+
+        // Auto-clear forced pathing when close to target
+        if (forcedPathing && forcedPathTarget != null) {
+            CentipedeHeadEntity head = getLeadingHead();
+            if (head != null && !head.isRemoved()) {
+                double dist = head.getPos().squaredDistanceTo(Vec3d.ofCenter(forcedPathTarget));
+                if (dist < 4.0) {
+                    forcedPathing = false;
+                    forcedPathTarget = null;
+                }
+            }
+        }
+
+        updatePathfinding();
+        updateChainPhysics();
+        updateSegmentRotations();
+        updateGrabs();
+        updateShockCharge();
+        syncTrackedData();
     }
 
     @Override
@@ -443,7 +454,6 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
             bodyWave += (bodyDirection ? -1f : 1f) * 0.1f;
         }
 
-        // Crawl propulsion
         if (moving) {
             for (int i = 1; i < totalSegments - 1; i++) {
                 if (segments[i] == null || segments[i].isRemoved()) continue;
@@ -455,7 +465,6 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
                 if (ahead >= 0 && ahead < totalSegments && segments[ahead] != null && !segments[ahead].isRemoved()) {
                     if (isNearSurface(segments[ahead])) {
                         Vec3d toAhead = segments[ahead].getPos().subtract(segments[i].getPos()).normalize();
-                        // No Red speed boost (1.25), use size-dependent speed
                         segments[i].segmentVelocity = segments[i].segmentVelocity.add(toAhead.multiply(0.068 * MathHelper.lerp(size, 0.5f, 1.5f)));
                     }
                 }
@@ -467,8 +476,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
             }
         }
 
-        // Stiffness
-        float stiffnessForce = (float)(MathHelper.lerp(shockCharge, 1.0, 6.0) * MathHelper.lerp(size, 1.0, 2.0));
+        float stiffnessForce = (float) (MathHelper.lerp(shockCharge, 1.0, 6.0) * MathHelper.lerp(size, 1.0, 2.0));
         float stiffnessMC = stiffnessForce * 0.015f;
         for (int i = 0; i < totalSegments - 2; i++) {
             if (segments[i] == null || segments[i + 2] == null) continue;
@@ -483,7 +491,6 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
             }
         }
 
-        // Apply velocity, gravity, surface adhesion
         for (int i = 0; i < totalSegments; i++) {
             if (segments[i] == null || segments[i].isRemoved()) continue;
 
@@ -512,7 +519,6 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
             segments[i].segmentVelocity = segments[i].getPos().subtract(oldPos);
         }
 
-        // Chain constraints
         for (int iter = 0; iter < 3; iter++) {
             for (int i = 0; i < totalSegments - 1; i++) {
                 enforceSpacing(i, i + 1);
@@ -590,17 +596,24 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
 
     private Vec3d computeSurfaceNormal(Entity entity) {
         World world = entity.getWorld();
-        Box probeBox = entity.getBoundingBox().expand(0.2);
-        Vec3d center = probeBox.getCenter();
+        Vec3d center = entity.getBoundingBox().getCenter();
         Vec3d normal = Vec3d.ZERO;
         int count = 0;
 
-        for (Direction dir : Direction.values()) {
-            Vec3d probe = center.add(dir.getOffsetX() * 0.55, dir.getOffsetY() * 0.55, dir.getOffsetZ() * 0.55);
-            BlockPos neighbor = BlockPos.ofFloored(probe);
-            if (world.getBlockState(neighbor).isSolidBlock(world, neighbor)) {
-                normal = normal.add(-dir.getOffsetX(), -dir.getOffsetY(), -dir.getOffsetZ());
-                count++;
+        double[] distances = {0.55, 0.8};
+
+        for (double d : distances) {
+            for (Direction dir : Direction.values()) {
+                BlockPos probePos = BlockPos.ofFloored(
+                        center.x + dir.getOffsetX() * d,
+                        center.y + dir.getOffsetY() * d,
+                        center.z + dir.getOffsetZ() * d
+                );
+
+                if (world.getBlockState(probePos).isSolidBlock(world, probePos)) {
+                    normal = normal.add(-dir.getOffsetX(), -dir.getOffsetY(), -dir.getOffsetZ());
+                    count++;
+                }
             }
         }
 
@@ -611,48 +624,161 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
     }
 
     private Vec3d getSurfaceAlignedMove(CentipedeSegmentEntity segment, Vec3d desiredDir, double speed) {
-        Vec3d surfaceNormal = computeSurfaceNormal(segment);
-        Vec3d move = desiredDir.normalize().multiply(speed);
+    World world = segment.getWorld();
+    Vec3d surfaceNormal = computeSurfaceNormal(segment);
+    Vec3d move = desiredDir.normalize().multiply(speed);
 
-        if (surfaceNormal.lengthSquared() > 0.001) {
-            Vec3d tangent = move.subtract(surfaceNormal.multiply(move.dotProduct(surfaceNormal)));
-            if (tangent.lengthSquared() > 1.0E-4) {
-                move = tangent.normalize().multiply(speed);
-            }
-
-            Direction approachDir = Direction.getFacing(desiredDir.x, desiredDir.y, desiredDir.z);
-            BlockPos approachPos = segment.getBlockPos().offset(approachDir);
-            BlockState approachState = this.getWorld().getBlockState(approachPos);
-            if (approachState.isSolidBlock(this.getWorld(), approachPos)) {
-                Vec3d wallNormal = new Vec3d(-approachDir.getOffsetX(), -approachDir.getOffsetY(), -approachDir.getOffsetZ());
-                Vec3d wallTangent = desiredDir.subtract(wallNormal.multiply(desiredDir.dotProduct(wallNormal)));
-                if (wallTangent.lengthSquared() > 1.0E-4) {
-                    move = wallTangent.normalize().multiply(speed);
-                }
-
-                double cling = Math.max(0.03, speed * 0.45);
-                move = move.add(wallNormal.multiply(-cling));
-            }
-        }
-
-        return move;
+    BlockPos basePos = segment.getBlockPos();
+    Direction horizontalDir = Direction.getFacing(desiredDir.x, 0, desiredDir.z);
+    if (horizontalDir.getAxis().isVertical()) {
+        horizontalDir = segment.getHorizontalFacing();
     }
 
+    BlockPos front = basePos.offset(horizontalDir);
+    BlockPos frontUp = front.up();
+    BlockPos up = basePos.up();
+    BlockPos upForward = up.offset(horizontalDir);
+    BlockPos topSurfaceAhead = basePos.add(horizontalDir.getOffsetX(), 1, horizontalDir.getOffsetZ());
+
+    boolean wallAhead = world.getBlockState(front).isSolidBlock(world, front);
+    boolean wallAheadUp = world.getBlockState(frontUp).isSolidBlock(world, frontUp);
+    boolean ceilingUp = world.getBlockState(up).isSolidBlock(world, up);
+
+    boolean openUp = !world.getBlockState(up).isSolidBlock(world, up);
+    boolean openFrontUp = !world.getBlockState(frontUp).isSolidBlock(world, frontUp);
+    boolean openUpForward = !world.getBlockState(upForward).isSolidBlock(world, upForward);
+    boolean openTopSurfaceAhead = !world.getBlockState(topSurfaceAhead).isSolidBlock(world, topSurfaceAhead);
+
+    if (surfaceNormal.lengthSquared() > 0.001) {
+        Vec3d tangent = move.subtract(surfaceNormal.multiply(move.dotProduct(surfaceNormal)));
+        if (tangent.lengthSquared() > 1.0E-4) {
+            move = tangent.normalize().multiply(speed);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Floor -> wall transition
+    // ---------------------------------------------------------------------
+    if (desiredDir.y > 0.12 && wallAhead) {
+        Vec3d climb = new Vec3d(0, 1, 0).multiply(speed * 0.95);
+        Vec3d towardWall = new Vec3d(horizontalDir.getOffsetX(), 0, horizontalDir.getOffsetZ()).multiply(speed * 0.30);
+        move = move.add(climb).add(towardWall);
+    }
+
+    // ---------------------------------------------------------------------
+    // Wall -> top transition (the lip problem)
+    // Strong forward/upward bias when the cell above the lip is open.
+    // ---------------------------------------------------------------------
+    boolean cresting =
+            desiredDir.y > 0.05 &&
+            wallAhead &&
+            !wallAheadUp &&
+            openFrontUp &&
+            openUpForward;
+
+    if (cresting) {
+        Vec3d overLip = new Vec3d(horizontalDir.getOffsetX(), 0, horizontalDir.getOffsetZ()).multiply(speed * 0.90);
+        Vec3d lift = new Vec3d(0, 1, 0).multiply(speed * 0.75);
+        move = move.add(overLip).add(lift);
+    }
+
+    // If we are already near the top edge and there is open space above-forward,
+    // prefer moving onto the top rather than continuing to stick to the wall.
+    boolean topOut =
+            !wallAheadUp &&
+            openUp &&
+            openFrontUp &&
+            openTopSurfaceAhead &&
+            desiredDir.y >= -0.05;
+
+    if (topOut) {
+        Vec3d ontoTop = new Vec3d(horizontalDir.getOffsetX(), 0.55, horizontalDir.getOffsetZ()).normalize().multiply(speed * 1.00);
+        move = move.add(ontoTop);
+    }
+
+    // ---------------------------------------------------------------------
+    // Ceiling / upper-surface assist
+    // ---------------------------------------------------------------------
+    if (desiredDir.y > 0.12 && ceilingUp) {
+        move = move.add(0, speed * 0.25, 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // Wall cling: weaker during cresting so it can peel off the wall
+    // ---------------------------------------------------------------------
+    if (wallAhead) {
+        double clingStrength = cresting || topOut ? speed * 0.10 : speed * 0.35;
+        Vec3d wallNormal = new Vec3d(-horizontalDir.getOffsetX(), 0, -horizontalDir.getOffsetZ());
+        move = move.add(wallNormal.multiply(clingStrength));
+    }
+
+    // Mild downward stabilization when moving across a top surface
+    if (!wallAhead && openUp && desiredDir.y < 0.15) {
+        move = move.add(0, -speed * 0.08, 0);
+    }
+
+    return move;
+}
+
     private void applyHeadPathingForce(CentipedeHeadEntity head, Vec3d targetPos, double speed) {
-        Vec3d dir = targetPos.subtract(head.getPos());
-        double dist = dir.length();
-        if (dist < 0.1) return;
+    Vec3d dir = targetPos.subtract(head.getPos());
+    double dist = dir.length();
+    if (dist < 0.1) return;
 
-        Vec3d desiredDir = dir.normalize();
-        Vec3d move = getSurfaceAlignedMove(head, desiredDir, speed);
+    Vec3d desiredDir = dir.normalize();
+    Vec3d move = getSurfaceAlignedMove(head, desiredDir, speed);
 
-        if (!isNearSurface(head)) {
-            move = desiredDir.multiply(speed * 0.3);
-        } else if (targetPos.y > head.getY() + 0.25) {
-            move = move.add(0, Math.min(speed * 0.45, targetPos.y - head.getY()), 0);
+    if (!isNearSurface(head)) {
+        move = desiredDir.multiply(speed * 0.50);
+    }
+
+    double dy = targetPos.y - head.getY();
+
+    // Stronger upward assist for ledge topping.
+    if (dy > 0.10) {
+        move = move.add(0, Math.min(speed * 1.05, dy * 0.40), 0);
+    }
+
+    // Slight forward bonus helps the head commit over the lip.
+    Vec3d horizontal = new Vec3d(desiredDir.x, 0, desiredDir.z);
+    if (horizontal.lengthSquared() > 1.0E-4) {
+        move = move.add(horizontal.normalize().multiply(speed * 0.12));
+    }
+
+    head.segmentVelocity = head.segmentVelocity.add(move);
+}
+
+    private Vec3d getWaypointAnchor(BlockPos waypoint, Vec3d headPos) {
+        Vec3d center = new Vec3d(waypoint.getX() + 0.5, waypoint.getY() + 0.5, waypoint.getZ() + 0.5);
+
+        Direction bestSurface = null;
+        double bestDist = Double.MAX_VALUE;
+
+        for (Direction dir : Direction.values()) {
+            BlockPos adj = waypoint.offset(dir);
+            if (this.getWorld().getBlockState(adj).isSolidBlock(this.getWorld(), adj)) {
+                Vec3d anchor = center.add(
+                        -dir.getOffsetX() * 0.35,
+                        -dir.getOffsetY() * 0.35,
+                        -dir.getOffsetZ() * 0.35
+                );
+                double d = headPos.squaredDistanceTo(anchor);
+                if (d < bestDist) {
+                    bestDist = d;
+                    bestSurface = dir;
+                }
+            }
         }
 
-        head.segmentVelocity = head.segmentVelocity.add(move);
+        if (bestSurface != null) {
+            return center.add(
+                    -bestSurface.getOffsetX() * 0.35,
+                    -bestSurface.getOffsetY() * 0.35,
+                    -bestSurface.getOffsetZ() * 0.35
+            );
+        }
+
+        return center;
     }
 
     // =========================================================================
@@ -668,7 +794,6 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
     @Override
     public void stopMoving() {
         this.moving = false;
-        this.currentPath = null;
         this.currentSearch = null;
     }
 
@@ -689,8 +814,13 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         if (head == null || head.isRemoved()) return;
 
         BlockPos start = head.getBlockPos();
-        currentSearch = new CentipedePathfinder.IncrementalSearch(
-                this.getWorld(), start, goal, (int) this.getAttributeValue(EntityAttributes.GENERIC_FOLLOW_RANGE));
+        currentSearch = CentipedePathfinder.beginSearch(
+                this.getWorld(),
+                start,
+                goal,
+                (int) this.getAttributeValue(EntityAttributes.GENERIC_FOLLOW_RANGE)
+        );
+
         lastPathGoal = goal;
         pathRecalcTimer = PATH_RECALC_INTERVAL;
     }
@@ -702,13 +832,10 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
 
     protected void updatePathfinding() {
         if (currentSearch != null && !currentSearch.isFinished()) {
-            currentSearch.step(PATH_STEPS_PER_TICK);
-
-            if (currentSearch.isFinished()) {
-                currentPath = currentSearch.getPath();
-                pathIndex = 0;
-                currentSearch = null;
-            }
+            currentSearch.update(
+                    CentipedePathfinder.DEFAULT_ACCESSIBILITY_STEPS,
+                    PATH_STEPS_PER_TICK
+            );
         }
 
         if (pathRecalcTimer > 0) {
@@ -718,22 +845,55 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
 
     @Override
     public boolean needsPathRecalc(Vec3d goalPos) {
-        if (currentPath == null || currentPath.isEmpty()) return true;
+        if (currentSearch == null) return true;
         if (pathRecalcTimer > 0) return false;
 
-        if (lastPathGoal != null) {
-            BlockPos newGoal = BlockPos.ofFloored(goalPos.x, goalPos.y, goalPos.z);
-            if (newGoal.getManhattanDistance(lastPathGoal) > 3) return true;
+        BlockPos newGoal = BlockPos.ofFloored(goalPos.x, goalPos.y, goalPos.z);
+
+        if (lastPathGoal != null && newGoal.getManhattanDistance(lastPathGoal) > 3) {
+            return true;
         }
 
-        if (!CentipedePathfinder.isPathValid(this.getWorld(), currentPath)) return true;
+        return !CentipedePathfinder.isSearchStillUseful(currentSearch, this.getPos(), goalPos);
+    }
 
-        return false;
+    private boolean canHeadReachForPath(BlockPos target) {
+        CentipedeHeadEntity head = getLeadingHead();
+        if (head == null || head.isRemoved()) return false;
+
+        Vec3d headPos = head.getPos();
+
+        // Hard limit: don't let the head chase waypoints too far above itself.
+        double maxVerticalStep = 1.35;
+        if (target.getY() + 0.5 > headPos.y + maxVerticalStep) {
+            return false;
+        }
+
+        // Require some nearby body support behind the head.
+        int supportSegments = 0;
+        int checkCount = Math.min(4, totalSegments);
+
+        for (int i = 0; i < checkCount; i++) {
+            int idx = bodyDirection ? (totalSegments - 1 - i) : i;
+            if (idx < 0 || idx >= totalSegments) continue;
+            if (segments[idx] == null || segments[idx].isRemoved()) continue;
+
+            if (isNearSurface(segments[idx])) {
+                supportSegments++;
+            }
+        }
+
+        // If the front of the body is not well supported, don't keep climbing higher.
+        if (supportSegments < 2 && target.getY() > head.getBlockPos().getY()) {
+            return false;
+        }
+
+        return true;
     }
 
     @Override
     public void followCurrentPath() {
-        if (currentPath == null || currentPath.isEmpty()) {
+        if (currentSearch == null) {
             driveTowardTarget();
             return;
         }
@@ -743,30 +903,46 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
 
         Vec3d headPos = head.getPos();
 
-        BlockPos nextWaypoint = CentipedePathfinder.followPath(
-                currentPath, headPos, PATH_LOOK_AHEAD);
+        // Clamp lookahead while climbing: if the next step is above the head, use lookahead 1.
+        BlockPos probeWaypoint = CentipedePathfinder.followPathfieldLookAhead(currentSearch, headPos, 1);
+        int lookAhead = PATH_LOOK_AHEAD;
+
+        if (probeWaypoint != null && probeWaypoint.getY() > head.getBlockPos().getY()) {
+            lookAhead = 1;
+        }
+
+        BlockPos nextWaypoint = CentipedePathfinder.followPathfieldLookAhead(
+                currentSearch,
+                headPos,
+                lookAhead
+        );
 
         if (nextWaypoint == null) {
-            currentPath = null;
-            moving = false;
+            driveTowardTarget();
             return;
         }
 
-        BlockPos lastWaypoint = currentPath.get(currentPath.size() - 1);
+        // Reject waypoints the head can't realistically reach.
+        if (!canHeadReachForPath(nextWaypoint)) {
+            requestPath(currentSearch.getDestination());
+            return;
+        }
+
+        BlockPos goal = currentSearch.getDestination();
         double distToEnd = headPos.squaredDistanceTo(
-                lastWaypoint.getX() + 0.5, lastWaypoint.getY() + 0.5, lastWaypoint.getZ() + 0.5);
+                goal.getX() + 0.5,
+                goal.getY() + 0.5,
+                goal.getZ() + 0.5
+        );
+
         if (distToEnd < WAYPOINT_REACH_DIST * WAYPOINT_REACH_DIST) {
-            currentPath = null;
+            currentSearch = null;
             moving = false;
             return;
         }
 
-        Vec3d waypointCenter = new Vec3d(
-                nextWaypoint.getX() + 0.5,
-                nextWaypoint.getY() + 0.5,
-                nextWaypoint.getZ() + 0.5);
+        Vec3d waypointCenter = getWaypointAnchor(nextWaypoint, headPos);
 
-        // No Red 1.25 speed boost; size-dependent speed
         double speed = 0.14 * MathHelper.lerp(size, 0.5f, 1.5f);
         applyHeadPathingForce(head, waypointCenter, speed);
 
@@ -780,6 +956,23 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
 
             Vec3d towardFront = segments[inFront].getPos().subtract(segments[i].getPos()).normalize();
             segments[i].segmentVelocity = segments[i].segmentVelocity.add(towardFront.multiply(0.05));
+        }
+
+        // Stall detection: if the head hasn't moved, force a repath.
+        Vec3d newHeadPos = head.getPos();
+        if (lastHeadProgressPos != Vec3d.ZERO) {
+            double moved = newHeadPos.squaredDistanceTo(lastHeadProgressPos);
+            if (moved < 0.0025) {
+                stuckTicks++;
+            } else {
+                stuckTicks = 0;
+            }
+        }
+        lastHeadProgressPos = newHeadPos;
+
+        if (stuckTicks > 12) {
+            requestPath(currentSearch.getDestination());
+            stuckTicks = 0;
         }
     }
 
@@ -795,8 +988,6 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
             moving = false;
             return;
         }
-
-        dir = dir.normalize();
 
         double speed = 0.14 * MathHelper.lerp(size, 0.5f, 1.5f);
         applyHeadPathingForce(head, moveTarget, speed);
@@ -828,8 +1019,9 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         CentipedeHeadEntity rear = getRearHead();
         if (front == null || rear == null) return;
 
-        boolean rearIsCloser = CentipedePathfinder.tileClosestToGoal(
-                this.getWorld(), rear.getBlockPos(), front.getBlockPos(), targetBlock);
+        boolean rearIsCloser = currentSearch != null
+                ? CentipedePathfinder.tileClosestToGoal(currentSearch, rear.getBlockPos(), front.getBlockPos())
+                : rear.getBlockPos().getSquaredDistance(targetBlock) < front.getBlockPos().getSquaredDistance(targetBlock);
 
         if (rearIsCloser) {
             changeDirCounter++;
@@ -837,9 +1029,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
                 bodyDirection = !bodyDirection;
                 directionChangeBlock = 40;
                 changeDirCounter = 0;
-                if (currentPath != null) {
-                    requestPath(targetBlock);
-                }
+                requestPath(targetBlock);
             }
         } else {
             changeDirCounter = 0;
@@ -862,9 +1052,11 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
             CentipedeHeadEntity freeHead = null;
 
             if (head0.isGrabbing() && !head1.isGrabbing()) {
-                grabbingHead = head0; freeHead = head1;
+                grabbingHead = head0;
+                freeHead = head1;
             } else if (head1.isGrabbing() && !head0.isGrabbing()) {
-                grabbingHead = head1; freeHead = head0;
+                grabbingHead = head1;
+                freeHead = head0;
             }
 
             if (grabbingHead != null && freeHead != null) {
@@ -977,10 +1169,7 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
             }
 
             if (sameTarget || headsCloseToTarget) {
-                // C#: shockCharge += 1/Lerp(100,5,size)
-                // For normal centipedes, charge time varies with size
                 float chargeRate = 1.0f / MathHelper.lerp(size, 100f, 5f);
-                // Scale for 20tps MC (C# runs at ~40fps)
                 shockCharge += chargeRate * 2f;
 
                 if (shockCharge >= 1.0f) {
@@ -993,10 +1182,10 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
             }
         } else if (head0Grab || head1Grab) {
             CentipedeHeadEntity grabbing = head0Grab ? head0 : head1;
-            CentipedeHeadEntity free = head0Grab ? head1 : head0;
             LivingEntity grabbed = grabbing.getGrabbedEntity();
 
             if (grabbed != null) {
+                CentipedeHeadEntity free = head0Grab ? head1 : head0;
                 double dist = free.getPos().distanceTo(grabbed.getPos());
                 if (dist < grabbed.getWidth() + 2.5) {
                     float chargeRate = 1.0f / MathHelper.lerp(size, 100f, 5f);
@@ -1041,7 +1230,6 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
         }
 
         float centipedeMass = totalSegments * 2.0f;
-        // Smaller centipedes deal less damage
         float shockDamage = MathHelper.lerp(size, 4f, 20f);
         if (victim.getWidth() * victim.getHeight() * 10 < centipedeMass) {
             victim.damage(this.getDamageSources().mobAttack(this), Float.MAX_VALUE);
@@ -1066,6 +1254,26 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
     @Override
     public LivingEntity getHuntTarget() {
         return huntTarget;
+    }
+
+    @Override
+    public boolean isForcedPathing() {
+        return forcedPathing;
+    }
+
+    @Override
+    public void setForcedPathTarget(BlockPos target) {
+        if (target == null) {
+            this.forcedPathing = false;
+            this.forcedPathTarget = null;
+            return;
+        }
+        this.forcedPathing = true;
+        this.forcedPathTarget = target;
+        this.huntTarget = null;
+        this.setTarget(null);
+        this.requestPath(target);
+        this.setMoveTarget(Vec3d.ofCenter(target));
     }
 
     // =========================================================================
@@ -1126,7 +1334,6 @@ public class CentipedeEntity extends HostileEntity implements GeoAnimatable, Cen
 
         if (nbt.contains("SegmentIds")) {
             int[] ids = nbt.getIntArray("SegmentIds");
-            // Reinitialize arrays if needed (size may have changed on load)
             if (segmentIds == null || segmentIds.length != totalSegments) {
                 segmentIds = new int[totalSegments];
                 segments = new CentipedeSegmentEntity[totalSegments];

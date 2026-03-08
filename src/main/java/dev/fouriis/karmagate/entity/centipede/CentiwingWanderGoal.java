@@ -31,12 +31,12 @@ public class CentiwingWanderGoal<T extends HostileEntity & CentipedeController> 
 
     @Override
     public boolean canStart() {
-        return centipede.getTarget() == null && centipede.areSegmentsSpawned();
+        return !centipede.isForcedPathing() && centipede.getTarget() == null && centipede.areSegmentsSpawned();
     }
 
     @Override
     public boolean shouldContinue() {
-        return centipede.getTarget() == null;
+        return !centipede.isForcedPathing() && centipede.getTarget() == null;
     }
 
     @Override
