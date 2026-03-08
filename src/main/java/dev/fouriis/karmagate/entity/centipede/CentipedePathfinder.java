@@ -123,6 +123,11 @@ public final class CentipedePathfinder {
         }
     }
 
+    @FunctionalInterface
+    public interface TravelPreference {
+        PathCost adjust(BlockPos startPos, BlockPos endPos, MovementConnection conn, PathCost currentCost);
+    }
+
     // =========================================================================
     // Local graph
     // =========================================================================
@@ -276,7 +281,6 @@ public final class CentipedePathfinder {
                             moveType = MoveType.CORNER_DIAGONAL;
                         }
 
-                        // Surface transfer detection: still allowed, but may be marked unwanted by cost.
                         if (terrainProximity(from) == 1 && terrainProximity(to) == 2) {
                             moveType = MoveType.OFF_SURFACE_TRANSFER;
                         }
@@ -328,7 +332,6 @@ public final class CentipedePathfinder {
         }
 
         private boolean canMoveDiagonalEdge(BlockPos from, int dx, int dy, int dz) {
-            // At least one of the relevant face slides must remain occupiable.
             if (dx != 0 && dy != 0 && dz == 0) {
                 return occupiable(from.add(dx, 0, 0)) || occupiable(from.add(0, dy, 0));
             }
@@ -360,6 +363,7 @@ public final class CentipedePathfinder {
         private BlockPos destination;
         private final int maxRange;
         private final LocalCache cache;
+        private final TravelPreference travelPreference;
 
         private final List<PathingCell> open = new ArrayList<>();
         private final Deque<BlockPos> accQueueReachable = new ArrayDeque<>();
@@ -377,8 +381,13 @@ public final class CentipedePathfinder {
         private PathingCell closestCellToDestinationFromStart = null;
 
         public Search(World world, BlockPos creatureStart, BlockPos rawDestination, int maxRange) {
+            this(world, creatureStart, rawDestination, maxRange, null);
+        }
+
+        public Search(World world, BlockPos creatureStart, BlockPos rawDestination, int maxRange, TravelPreference travelPreference) {
             this.world = world;
             this.maxRange = maxRange > 0 ? maxRange : DEFAULT_MAX_RANGE;
+            this.travelPreference = travelPreference;
 
             BlockPos adjustedStart = findNearestAccessible(world, creatureStart, 6, this.maxRange);
             if (adjustedStart == null) adjustedStart = creatureStart;
@@ -399,6 +408,10 @@ public final class CentipedePathfinder {
 
         public BlockPos getDestination() {
             return destination;
+        }
+
+        public int getMaxRange() {
+            return maxRange;
         }
 
         public boolean isAccessibilityFinished() {
@@ -438,10 +451,6 @@ public final class CentipedePathfinder {
             }
         }
 
-        // ---------------------------------------------------------------------
-        // Accessibility mapping
-        // ---------------------------------------------------------------------
-
         private void beginAccessibilityMapping() {
             mappingFinished = false;
             pathFinished = false;
@@ -470,7 +479,6 @@ public final class CentipedePathfinder {
         private void stepAccessibility(int steps) {
             int visitedCount = 0;
 
-            // Phase 1: reachable flood
             while (steps > 0 && !accQueueReachable.isEmpty() && visitedCount < MAX_ACCESSIBILITY_VISITED) {
                 BlockPos cur = accQueueReachable.pollFirst();
                 visitedCount++;
@@ -488,7 +496,6 @@ public final class CentipedePathfinder {
                 return;
             }
 
-            // Start returnability phase once reachable fill is done.
             if (accQueueReturnable.isEmpty() && retVisited.isEmpty()) {
                 if (cache.accessible(start)) {
                     cache.cell(start).possibleToGetBackFrom = true;
@@ -516,26 +523,22 @@ public final class CentipedePathfinder {
             }
         }
 
-        // ---------------------------------------------------------------------
-        // Reverse pathfield
-        // ---------------------------------------------------------------------
-
         private void seedDestination() {
-    open.clear();
+            open.clear();
 
-    PathingCell destCell = cache.cell(destination);
-    lookingForImpossiblePath = !(destCell.reachable);
+            PathingCell destCell = cache.cell(destination);
+            lookingForImpossiblePath = !destCell.reachable;
 
-    PathCost destLegality = coordinateLegality(destination);
+            PathCost destLegality = coordinateLegality(destination);
 
-    destCell.generation = generation;
-    destCell.costToGoal = new PathCost(0.0, destLegality.legality);
-    destCell.heuristicValue = new PathCost(0.0, destLegality.legality);
-    destCell.inOpen = true;
-    addToOpen(destCell);
+            destCell.generation = generation;
+            destCell.costToGoal = new PathCost(0.0, destLegality.legality);
+            destCell.heuristicValue = new PathCost(0.0, destLegality.legality);
+            destCell.inOpen = true;
+            addToOpen(destCell);
 
-    closestCellToDestinationFromStart = destCell;
-}
+            closestCellToDestinationFromStart = destCell;
+        }
 
         private void stepPathfield(int steps) {
             int visited = 0;
@@ -613,10 +616,6 @@ public final class CentipedePathfinder {
             open.add(cell);
         }
 
-        // ---------------------------------------------------------------------
-        // Following
-        // ---------------------------------------------------------------------
-
         /**
          * Mirror of StandardPather.FollowPath:
          * choose the best immediate outgoing move from the current local position
@@ -628,7 +627,6 @@ public final class CentipedePathfinder {
 
             PathingCell currentCell = cache.cell(current);
             if (!currentCell.reachable || !currentCell.possibleToGetBackFrom) {
-                // Equivalent spirit to OutOfElement: best effort fallback.
                 BlockPos rescue = findNearestReachableAndReturnable(current, 4);
                 if (rescue != null) current = rescue;
             }
@@ -726,10 +724,6 @@ public final class CentipedePathfinder {
             return ca.costToGoal.resistance < cb.costToGoal.resistance;
         }
 
-        // ---------------------------------------------------------------------
-        // Cost / heuristic
-        // ---------------------------------------------------------------------
-
         private PathCost heuristicForCell(BlockPos cell, PathCost costToGoal) {
             if (lookingForImpossiblePath && !cache.cell(cell).reachable) {
                 return costToGoal;
@@ -780,21 +774,22 @@ public final class CentipedePathfinder {
                 .plus(coordCost)
                 .plus(new PathCost(0.0, startCoordCost.legality));
 
-            // Approximate point-of-no-return logic:
             if (cache.cell(endPos).reachable && !cache.cell(endPos).possibleToGetBackFrom) {
                 result = result.plus(new PathCost(0.0, Legality.UNALLOWED));
             }
 
-            // Moves that reduce surface attachment are allowed but unwanted.
             int startProx = cache.terrainProximity(startPos);
             int endProx = cache.terrainProximity(endPos);
             if (startProx == 1 && endProx == 2) {
                 result = result.plus(new PathCost(UNWANTED_MOVE_PENALTY, Legality.UNWANTED));
             }
 
-            // Penalize upward moves that lack wall support at the destination.
             if (endPos.getY() > startPos.getY() && !hasStrongWallSupport(endPos)) {
                 result = result.plus(new PathCost(2.0, Legality.UNWANTED));
+            }
+
+            if (travelPreference != null) {
+                result = travelPreference.adjust(startPos, endPos, conn, result);
             }
 
             return result;
@@ -813,10 +808,6 @@ public final class CentipedePathfinder {
 
             return solidSides >= 1;
         }
-
-        // ---------------------------------------------------------------------
-        // Recent connection memory
-        // ---------------------------------------------------------------------
 
         private void rememberConnection(MovementConnection connection) {
             if (!pastConnections.isEmpty() && pastConnections.peekFirst().equals(connection)) {
@@ -840,10 +831,6 @@ public final class CentipedePathfinder {
             }
             return false;
         }
-
-        // ---------------------------------------------------------------------
-        // Fallback helpers
-        // ---------------------------------------------------------------------
 
         private BlockPos bestEffortTowardDestination(BlockPos current) {
             List<MovementConnection> outgoing = cache.outgoing(current);
@@ -892,11 +879,27 @@ public final class CentipedePathfinder {
     // =========================================================================
 
     public static Search beginSearch(World world, BlockPos start, BlockPos destination, int maxRange) {
-        return new Search(world, start, destination, maxRange);
+        return new Search(world, start, destination, maxRange, null);
+    }
+
+    public static Search beginSearch(World world, BlockPos start, BlockPos destination, int maxRange, TravelPreference travelPreference) {
+        return new Search(world, start, destination, maxRange, travelPreference);
     }
 
     public static List<BlockPos> findPath(World world, BlockPos start, BlockPos destination, int maxRange, int maxTicks) {
         Search search = beginSearch(world, start, destination, maxRange);
+        int ticks = Math.max(1, maxTicks);
+
+        for (int i = 0; i < ticks && !search.isFinished(); i++) {
+            search.update(DEFAULT_ACCESSIBILITY_STEPS, DEFAULT_PATH_STEPS);
+        }
+
+        BlockPos adjustedStart = search.getStart();
+        return search.reconstructCurrentBestPath(adjustedStart, Math.max(16, maxRange * 3));
+    }
+
+    public static List<BlockPos> findPath(World world, BlockPos start, BlockPos destination, int maxRange, int maxTicks, TravelPreference travelPreference) {
+        Search search = beginSearch(world, start, destination, maxRange, travelPreference);
         int ticks = Math.max(1, maxTicks);
 
         for (int i = 0; i < ticks && !search.isFinished(); i++) {
@@ -950,7 +953,7 @@ public final class CentipedePathfinder {
         BlockPos creature = BlockPos.ofFloored(creaturePos);
         BlockPos goal = BlockPos.ofFloored(goalPos);
 
-        if (creature.getManhattanDistance(search.getStart()) > search.maxRange + 4) return false;
+        if (creature.getManhattanDistance(search.getStart()) > search.getMaxRange() + 4) return false;
         return goal.getManhattanDistance(search.getDestination()) <= 3;
     }
 

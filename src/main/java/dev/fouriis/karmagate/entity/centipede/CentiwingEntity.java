@@ -28,18 +28,15 @@ import java.util.Random;
 /**
  * Centiwing = winged centipede.
  *
- * Important fixes vs the broken version:
- * - does NOT shadow the parent centipede fields (size, segments, pathfinder state, etc.)
- * - reuses the parent's crawling/pathfinding/grab/shock code when not flying
- * - uses direct flight steering when flying
- * - keeps the Rain World-ish "rather climb than fly" behavior as a public helper for goals
- * - removes the dead old waypoint/currentPath API remnants
+ * Rain World parity goals:
+ * - Prefer flying over crawling.
+ * - Only settle into crawling when very clearly operating on nearby terrain.
+ * - When crawling, strongly avoid open-air route tiles.
+ * - When flying, prefer open air away from terrain.
  */
 public class CentiwingEntity extends CentipedeEntity {
-    // C# pixel scale
     private static final float PX = 0.025f;
 
-    // Extra tracked data for centiwings only
     private static final TrackedData<Boolean> IS_FLYING = DataTracker.registerData(
             CentiwingEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
     private static final TrackedData<Float> WINGS_STARTED_UP = DataTracker.registerData(
@@ -47,7 +44,6 @@ public class CentiwingEntity extends CentipedeEntity {
     private static final TrackedData<Float> WING_FLAP_CYCLE = DataTracker.registerData(
             CentiwingEntity.class, TrackedDataHandlerRegistry.FLOAT);
 
-    // Flying state
     protected boolean flying = true;
     protected boolean wantToFly = true;
     protected int flyModeCounter = 100;
@@ -57,7 +53,6 @@ public class CentiwingEntity extends CentipedeEntity {
     protected float wingsFolded = 0f;
     protected float lastWingsFolded = 0f;
 
-    // Wing visuals
     protected float[] wingLengths;
 
     public CentiwingEntity(EntityType<? extends HostileEntity> type, World world) {
@@ -67,9 +62,6 @@ public class CentiwingEntity extends CentipedeEntity {
         recalcSizeDerivedFields();
     }
 
-    /**
-     * C# Centiwing size range: lerp(0.5, 0.65, random)
-     */
     @Override
     protected void computeSizeFromSeed() {
         long seed = this.getUuid().getLeastSignificantBits();
@@ -89,11 +81,8 @@ public class CentiwingEntity extends CentipedeEntity {
         java.util.Arrays.fill(segmentIds, -1);
 
         this.wingLengths = new float[totalSegments];
-
-        // Centiwing body is thinner than a normal centipede.
         this.maxRadius = computeSegmentRadius(Math.max(0, totalSegments / 2));
 
-        // C#-inspired wing lengths
         for (int j = 0; j < totalSegments; j++) {
             float num = totalSegments > 1 ? (float) j / (float) (totalSegments - 1) : 0.5f;
 
@@ -154,10 +143,6 @@ public class CentiwingEntity extends CentipedeEntity {
                         && entity.getType().getSpawnGroup().isPeaceful()));
     }
 
-    // =========================================================================
-    // Wing interface / public helpers for AI
-    // =========================================================================
-
     @Override
     public boolean hasWings() {
         return true;
@@ -213,10 +198,39 @@ public class CentiwingEntity extends CentipedeEntity {
 
     /**
      * C# RatherClimbThanFly:
-     * prefer crawling when very near terrain.
+     * prefer crawling only when very near terrain.
      */
     public boolean ratherClimbThanFly(BlockPos pos) {
         return CentipedePathfinder.getTerrainProximity(this.getWorld(), pos) < 2;
+    }
+
+    /**
+     * Stronger flight bias:
+     * only crawl if both current position and target are terrain-adjacent
+     * and the target is reasonably close.
+     */
+    private boolean shouldPreferCrawling(BlockPos current, BlockPos target, double targetDist) {
+        boolean currentNearSurface = ratherClimbThanFly(current);
+        boolean targetNearSurface = ratherClimbThanFly(target);
+
+        if (!currentNearSurface || !targetNearSurface) {
+            return false;
+        }
+
+        if (huntTarget != null && !huntTarget.isRemoved()) {
+            BlockPos preyPos = huntTarget.getBlockPos();
+
+            // If prey is not clearly terrain-bound, keep flying.
+            if (!ratherClimbThanFly(preyPos)) {
+                return false;
+            }
+
+            // Even for terrain-bound prey, only settle into crawling when close.
+            return targetDist < 8.0;
+        }
+
+        // Non-hunt movement: only settle if clearly operating on nearby surface.
+        return targetDist < 7.0;
     }
 
     private BlockPos adjustCrawlGoal(BlockPos goal) {
@@ -226,7 +240,6 @@ public class CentiwingEntity extends CentipedeEntity {
             return goal;
         }
 
-        // Find a nearby surface-adjacent position to crawl toward instead of open air.
         BlockPos best = null;
         double bestDist = Double.MAX_VALUE;
 
@@ -250,12 +263,94 @@ public class CentiwingEntity extends CentipedeEntity {
             }
         }
 
-        return best != null ? best : goal;
+        return best != null ? best : findNearestSurfaceAdjacent(goal, 8);
     }
 
-    // =========================================================================
-    // Tick
-    // =========================================================================
+    private BlockPos findNearestSurfaceAdjacent(BlockPos center, int radius) {
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+
+        for (int r = 1; r <= radius; r++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dy = -r; dy <= r; dy++) {
+                    for (int dz = -r; dz <= r; dz++) {
+                        if (Math.abs(dx) != r && Math.abs(dy) != r && Math.abs(dz) != r) continue;
+
+                        BlockPos p = center.add(dx, dy, dz);
+                        if (!CentipedePathfinder.isAccessible(this.getWorld(), p)) continue;
+                        if (!ratherClimbThanFly(p)) continue;
+
+                        double d = p.getSquaredDistance(center);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            best = p.toImmutable();
+                        }
+                    }
+                }
+            }
+        }
+
+        return best != null ? best : center;
+    }
+
+    private double csharpFlyingTerrainPenalty(BlockPos pos) {
+        int prox = CentipedePathfinder.getTerrainProximity(this.getWorld(), pos);
+        if (prox < 2) {
+            return 0.0;
+        }
+
+        double t = MathHelper.clamp((prox - 1.0) / 5.0, 0.0, 1.0);
+        return MathHelper.lerp((float) t, 500.0f, 0.0f);
+    }
+
+    private CentipedePathfinder.PathCost centiwingTravelPreference(
+            BlockPos startPos,
+            BlockPos endPos,
+            CentipedePathfinder.MovementConnection conn,
+            CentipedePathfinder.PathCost baseCost
+    ) {
+        if (!baseCost.considerable()) {
+            return baseCost;
+        }
+
+        if (!this.flying) {
+            if (!ratherClimbThanFly(endPos)) {
+                return new CentipedePathfinder.PathCost(
+                        baseCost.resistance + 1000.0,
+                        baseCost.legality
+                );
+            }
+            return baseCost;
+        }
+
+        return new CentipedePathfinder.PathCost(
+                baseCost.resistance + csharpFlyingTerrainPenalty(endPos),
+                baseCost.legality
+        );
+    }
+
+    private BlockPos getPathSearchOrigin() {
+        CentipedeHeadEntity head = getLeadingHead();
+        if (head != null && !head.isRemoved()) {
+            return head.getBlockPos();
+        }
+        return this.getBlockPos();
+    }
+
+    private void rebuildCrawlSearch(BlockPos goal) {
+        if (goal == null) return;
+
+        BlockPos crawlGoal = adjustCrawlGoal(goal);
+        BlockPos start = getPathSearchOrigin();
+
+        this.currentSearch = CentipedePathfinder.beginSearch(
+                this.getWorld(),
+                start,
+                crawlGoal,
+                CentipedePathfinder.DEFAULT_MAX_RANGE,
+                this::centiwingTravelPreference
+        );
+    }
 
     @Override
     public void tick() {
@@ -313,56 +408,69 @@ public class CentiwingEntity extends CentipedeEntity {
     }
 
     /**
-     * Decide fly vs crawl based on terrain proximity, then update wing animation.
-     * Matches C# feel: fly in open spaces, climb near surfaces.
+     * Strongly flight-biased state update.
+     *
+     * Compared with the previous version:
+     * - defaults toward flying
+     * - only settles into crawling in a narrow close-to-surface case
+     * - while hunting, continues to prefer flight unless prey is clearly on terrain
      */
     private void updateFlyState() {
         CentipedeHeadEntity head = getLeadingHead();
         if (head != null && !head.isRemoved()) {
-            boolean nearSurface = ratherClimbThanFly(head.getBlockPos());
+            BlockPos currentBlock = head.getBlockPos();
             BlockPos targetBlock = BlockPos.ofFloored(moveTarget);
-            boolean targetNearSurface = ratherClimbThanFly(targetBlock);
-
             double targetDist = head.getPos().distanceTo(moveTarget);
 
-            // Match C# feel:
-            // - if both current pos and target are near terrain, prefer crawl
-            // - if target is far / in open air, prefer flying
-            // - if very close to the target and near terrain, settle onto crawl
-            if (nearSurface && targetNearSurface && targetDist < 12.0) {
+            // Default bias: fly.
+            wantToFly = true;
+
+            // Only switch toward crawling in a very narrow near-surface case.
+            if (shouldPreferCrawling(currentBlock, targetBlock, targetDist)) {
                 wantToFly = false;
-            } else {
-                wantToFly = true;
             }
 
-            // Hunting prey above a chasm/open area should strongly favor flying
-            if (huntTarget != null) {
-                int prox = CentipedePathfinder.getTerrainProximity(this.getWorld(), huntTarget.getBlockPos());
-                if (prox >= 2) {
+            // Keep airborne when pursuing anything not clearly terrain-bound.
+            if (huntTarget != null && !huntTarget.isRemoved()) {
+                BlockPos preyPos = huntTarget.getBlockPos();
+                if (!ratherClimbThanFly(preyPos)) {
                     wantToFly = true;
                 }
             }
+
+            // If already airborne and the goal isn't strongly surface-bound, stay airborne.
+            if (flying && !ratherClimbThanFly(targetBlock)) {
+                wantToFly = true;
+            }
+
+            // If airborne and target is not extremely close, favor remaining in flight.
+            if (flying && targetDist > 4.0) {
+                wantToFly = true;
+            }
+        } else {
+            wantToFly = true;
         }
 
+        // Faster startup into flying, slower drop into crawling.
         if (wantToFly) {
-            if (flyModeCounter == 100) {
+            flyModeCounter = Math.min(100, flyModeCounter + 2);
+            if (flyModeCounter >= 85) {
                 flying = true;
             }
-            flyModeCounter = Math.min(100, flyModeCounter + 1);
         } else {
-            if (flyModeCounter < 90) {
+            flyModeCounter = Math.max(0, flyModeCounter - 1);
+            if (flyModeCounter <= 35) {
                 flying = false;
             }
-            flyModeCounter = Math.max(0, flyModeCounter - 1);
         }
 
-        float target = MathHelper.clamp((flyModeCounter - 80f) / 20f, 0f, 1f);
+        float target = MathHelper.clamp((flyModeCounter - 55f) / 45f, 0f, 1f);
         if (wingsStartedUp < target) {
-            wingsStartedUp = Math.min(1f, wingsStartedUp + 0.025f);
+            wingsStartedUp = Math.min(1f, wingsStartedUp + 0.035f);
         } else {
-            wingsStartedUp = Math.max(0f, wingsStartedUp - 0.025f);
+            wingsStartedUp = Math.max(0f, wingsStartedUp - 0.02f);
         }
-        wingsStartedUp = MathHelper.lerp(0.05f, wingsStartedUp, target);
+        wingsStartedUp = MathHelper.lerp(0.08f, wingsStartedUp, target);
 
         lastWingFlapCycle = wingFlapCycle;
         wingFlapCycle += (float) Math.pow(wingsStartedUp, 3f);
@@ -370,10 +478,6 @@ public class CentiwingEntity extends CentipedeEntity {
         lastWingsFolded = wingsFolded;
         wingsFolded = 1f - wingsStartedUp;
     }
-
-    // =========================================================================
-    // Air steering helpers
-    // =========================================================================
 
     private Vec3d computeAirAvoidance(Vec3d pos, Vec3d desiredDir) {
         World world = this.getWorld();
@@ -418,23 +522,25 @@ public class CentiwingEntity extends CentipedeEntity {
         Vec3d toTarget = moveTarget.subtract(headPos);
 
         Vec3d desiredDir = toTarget.lengthSquared() > 1.0E-4 ? toTarget.normalize() : new Vec3d(0, 0, 1);
+        Vec3d avoidance = computeAirAvoidance(headPos, desiredDir).multiply(1.45);
 
-        Vec3d avoidance = computeAirAvoidance(headPos, desiredDir).multiply(1.35);
-
-        // C# TravelPreference equivalent:
-        // while flying, centiwings prefer cells farther from terrain
         Vec3d openAirBias = Vec3d.ZERO;
+        double biasStrength = 0.0;
+
         for (Direction dir : Direction.values()) {
             BlockPos adj = head.getBlockPos().offset(dir);
             if (this.getWorld().getBlockState(adj).isSolidBlock(this.getWorld(), adj)) {
                 openAirBias = openAirBias.add(-dir.getOffsetX(), -dir.getOffsetY(), -dir.getOffsetZ());
+                biasStrength += 1.0;
             }
         }
+
         if (openAirBias.lengthSquared() > 1.0E-4) {
-            openAirBias = openAirBias.normalize().multiply(1.1);
+            openAirBias = openAirBias.normalize().multiply(1.1 + 0.45 * biasStrength);
         }
 
         Vec3d steer = desiredDir
+                .multiply(0.9)
                 .add(avoidance)
                 .add(openAirBias);
 
@@ -444,13 +550,6 @@ public class CentiwingEntity extends CentipedeEntity {
         return steer.normalize();
     }
 
-    // =========================================================================
-    // Flying physics
-    // =========================================================================
-
-    /**
-     * Rain World-inspired "swimming through air".
-     */
     protected void updateFlyPhysics() {
         bodyWave += 1f;
         moving = true;
@@ -526,14 +625,14 @@ public class CentiwingEntity extends CentipedeEntity {
                 desired = new Vec3d(0, 0, 1);
             }
 
-            Vec3d steerDir = computeAirSwimTarget(head).multiply(0.65).add(desired.multiply(0.35));
+            Vec3d steerDir = computeAirSwimTarget(head).multiply(0.72).add(desired.multiply(0.28));
             if (steerDir.lengthSquared() > 1.0E-4) {
                 steerDir = steerDir.normalize();
             } else {
                 steerDir = desired;
             }
 
-            double speed = 0.1 * MathHelper.lerp(size, 0.7f, 1.3f);
+            double speed = 0.115 * MathHelper.lerp(size, 0.7f, 1.3f);
             head.segmentVelocity = head.segmentVelocity.add(steerDir.multiply(speed));
 
             this.setPosition(head.getPos());
@@ -580,10 +679,6 @@ public class CentiwingEntity extends CentipedeEntity {
         }
     }
 
-    // =========================================================================
-    // Movement / pathfinding overrides
-    // =========================================================================
-
     @Override
     public void stopMoving() {
         this.moving = false;
@@ -599,7 +694,8 @@ public class CentiwingEntity extends CentipedeEntity {
 
         Vec3d targetCenter = Vec3d.ofCenter(goal);
 
-        if (flying) {
+        // Strong flight bias: direct air motion is the default.
+        if (flying || !shouldPreferCrawling(getPathSearchOrigin(), goal, this.getPos().distanceTo(targetCenter))) {
             this.moveTarget = targetCenter;
             this.moving = true;
             this.currentSearch = null;
@@ -607,21 +703,30 @@ public class CentiwingEntity extends CentipedeEntity {
         }
 
         BlockPos crawlGoal = adjustCrawlGoal(goal);
-        super.requestPath(crawlGoal);
+        this.moveTarget = Vec3d.ofCenter(crawlGoal);
+        this.moving = true;
+        rebuildCrawlSearch(crawlGoal);
     }
 
     @Override
     public void requestPathTo(Vec3d target) {
-        if (flying) {
+        BlockPos rawGoal = BlockPos.ofFloored(target);
+
+        if (flying || !shouldPreferCrawling(getPathSearchOrigin(), rawGoal, this.getPos().distanceTo(target))) {
             this.moveTarget = target;
             this.moving = true;
             this.currentSearch = null;
-            this.lastPathGoal = BlockPos.ofFloored(target);
+            this.lastPathGoal = rawGoal;
             this.pathRecalcTimer = PATH_RECALC_INTERVAL;
             return;
         }
 
-        super.requestPathTo(target);
+        BlockPos crawlGoal = adjustCrawlGoal(rawGoal);
+        this.lastPathGoal = crawlGoal;
+        this.pathRecalcTimer = PATH_RECALC_INTERVAL;
+        this.moveTarget = Vec3d.ofCenter(crawlGoal);
+        this.moving = true;
+        rebuildCrawlSearch(crawlGoal);
     }
 
     @Override
@@ -632,7 +737,40 @@ public class CentiwingEntity extends CentipedeEntity {
             }
             return;
         }
-        super.updatePathfinding();
+
+        if (!moving) {
+            return;
+        }
+
+        BlockPos desiredGoal = lastPathGoal != null ? lastPathGoal : BlockPos.ofFloored(moveTarget);
+        BlockPos crawlGoal = adjustCrawlGoal(desiredGoal);
+
+        if (currentSearch == null
+                || !CentipedePathfinder.isSearchStillUseful(currentSearch, this.getPos(), Vec3d.ofCenter(crawlGoal))
+                || needsPathRecalc(Vec3d.ofCenter(crawlGoal))) {
+            rebuildCrawlSearch(crawlGoal);
+            pathRecalcTimer = PATH_RECALC_INTERVAL;
+        } else if (pathRecalcTimer > 0) {
+            pathRecalcTimer--;
+        }
+
+        if (currentSearch != null) {
+            currentSearch.update(
+                    CentipedePathfinder.DEFAULT_ACCESSIBILITY_STEPS,
+                    CentipedePathfinder.DEFAULT_PATH_STEPS
+            );
+
+            if (currentSearch.isAccessibilityFinished()) {
+                BlockPos next = CentipedePathfinder.followPathfieldLookAhead(
+                        currentSearch,
+                        this.getPos(),
+                        CentipedePathfinder.DEFAULT_FOLLOW_LOOK_RADIUS
+                );
+                if (next != null) {
+                    this.moveTarget = Vec3d.ofCenter(next);
+                }
+            }
+        }
     }
 
     @Override
@@ -645,7 +783,11 @@ public class CentiwingEntity extends CentipedeEntity {
             return newGoal.getManhattanDistance(lastPathGoal) > 3;
         }
 
-        return super.needsPathRecalc(goalPos);
+        if (pathRecalcTimer > 0) return false;
+        if (lastPathGoal == null) return true;
+
+        BlockPos adjusted = adjustCrawlGoal(BlockPos.ofFloored(goalPos));
+        return adjusted.getManhattanDistance(lastPathGoal) > 2;
     }
 
     @Override
@@ -694,10 +836,6 @@ public class CentiwingEntity extends CentipedeEntity {
 
         super.updateDirectionChange();
     }
-
-    // =========================================================================
-    // General overrides
-    // =========================================================================
 
     @Override
     public boolean isInsideWall() {
