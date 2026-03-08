@@ -1,7 +1,6 @@
 package dev.fouriis.karmagate.entity.centipede;
 
 import net.minecraft.entity.LivingEntity;
-import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -87,10 +86,4 @@ public interface CentipedeController {
     default void setForcedPathTarget(BlockPos target) { }
     CentipedeHeadEntity getFrontHead();
     CentipedeHeadEntity getRearHead();
-
-    // --- Lifecycle (satisfied by Entity/LivingEntity superclass) ---
-    boolean isRemoved();
-    boolean isDead();
-    boolean damage(DamageSource source, float amount);
-    int getId();
 }

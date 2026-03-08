@@ -31,7 +31,7 @@ public final class CentipedeLegRenderer {
     private static FAtlasElement legBSprite = null;
 
     // Scale: 1 C# pixel ≈ 0.025 MC blocks
-    private static final float PX = 0.025f;
+    private static final float PX = 0.05f;
 
     // Body radius for attach point offset (C#: bodyChunks[j].rad ≈ 5-6 px)
     private static final float BODY_RADIUS = 5f * PX;
@@ -46,6 +46,9 @@ public final class CentipedeLegRenderer {
     private static final int UPPER_R = 9, UPPER_G = 7, UPPER_B = 6;
     // LegB (lower) bottom: blackColor — same for all variants
     private static final int LOWER_BOT_R = 9, LOWER_BOT_G = 7, LOWER_BOT_B = 6;
+
+    // Debug rendering toggle
+    private static final boolean debug = false;
 
     private CentipedeLegRenderer() {}
 
@@ -141,8 +144,10 @@ public final class CentipedeLegRenderer {
                     LOWER_BOT_R, LOWER_BOT_G, LOWER_BOT_B);
 
             // Debug: bright blue = bone A (upper), cyan-blue = bone B (lower)
-            renderDebugLine(matrices, vcProvider, attachLocal, kneeLocal, 50, 50, 255);
-            renderDebugLine(matrices, vcProvider, kneeLocal, footLocal, 80, 200, 255);
+            if (debug) {
+                renderDebugLine(matrices, vcProvider, attachLocal, kneeLocal, 50, 50, 255);
+                renderDebugLine(matrices, vcProvider, kneeLocal, footLocal, 80, 200, 255);
+            }
         }
     }
 
@@ -397,7 +402,7 @@ public final class CentipedeLegRenderer {
 
     /** Chain direction for tick update (no interpolation needed). */
     private static Vec3d computeChainDirectionTick(CentipedeSegmentEntity[] segs, int idx) {
-        if (idx < 0 || idx >= segs.length) return new Vec3d(0, 0, 1);
+        if (idx < 0 || idx >= segs.length || segs[idx] == null) return new Vec3d(0, 0, 1);
         Vec3d dir = Vec3d.ZERO;
         int count = 0;
         if (idx > 0 && segs[idx - 1] != null && !segs[idx - 1].isRemoved()) {
@@ -414,7 +419,7 @@ public final class CentipedeLegRenderer {
 
     /** Chain direction for render with interpolation. */
     private static Vec3d computeChainDirection(CentipedeSegmentEntity[] segs, int idx, float tickDelta) {
-        if (idx < 0 || idx >= segs.length) return new Vec3d(0, 0, 1);
+        if (idx < 0 || idx >= segs.length || segs[idx] == null) return new Vec3d(0, 0, 1);
         Vec3d dir = Vec3d.ZERO;
         int count = 0;
         if (idx > 0 && segs[idx - 1] != null && !segs[idx - 1].isRemoved()) {

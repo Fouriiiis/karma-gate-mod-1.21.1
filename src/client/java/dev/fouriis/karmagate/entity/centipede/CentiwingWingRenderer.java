@@ -27,13 +27,16 @@ public final class CentiwingWingRenderer {
     private static FAtlasElement wingSprite = null;
 
     // Scale: 1 C# pixel ≈ 0.025 MC blocks
-    private static final float PX = 0.025f;
+    private static final float PX = 0.05f;
 
     // Wing width along the chain direction (C#: num17 = 2f pixels)
     private static final float WING_HALF_WIDTH = 2f * PX;
 
     // Black body color (C#: palette.blackColor ≈ very dark)
     private static final int BLACK_R = 9, BLACK_G = 7, BLACK_B = 6;
+
+    // Debug rendering toggle
+    private static final boolean debug = false;
 
     private CentiwingWingRenderer() {}
 
@@ -178,7 +181,9 @@ public final class CentiwingWingRenderer {
                     baseR, baseG, baseB, 255);
 
             // Debug: green = wing (attach → tip)
-            renderDebugLine(matrices, vcProvider, attachLocal, tipLocal, 50, 255, 80);
+            if (debug) {
+                renderDebugLine(matrices, vcProvider, attachLocal, tipLocal, 50, 255, 80);
+            }
         }
     }
 
