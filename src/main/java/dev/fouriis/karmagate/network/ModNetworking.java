@@ -1,13 +1,21 @@
 package dev.fouriis.karmagate.network;
 
+import dev.fouriis.karmagate.CoralNeuronEntity;
 import dev.fouriis.karmagate.KarmaGateMod;
+import dev.fouriis.karmagate.coralneuron.CoralNeuronData;
+import dev.fouriis.karmagate.coralneuron.CoralNeuronManager;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
+import dev.fouriis.karmagate.gridproject.ProjectionZoneData;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneManager;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+
+import java.util.Optional;
 
 /**
  * Handles server-side networking for projection zones.
@@ -41,7 +49,26 @@ public class ModNetworking {
             DeleteGraffitiPayload.CODEC
         );
 
-        // Handle graffiti spawn requests from clients
+        PayloadTypeRegistry.playC2S().register(
+            CreateCoralNeuronPayload.ID,
+            CreateCoralNeuronPayload.CODEC
+        );
+
+        PayloadTypeRegistry.playC2S().register(
+            DeleteCoralNeuronPayload.ID,
+            DeleteCoralNeuronPayload.CODEC
+        );
+
+        PayloadTypeRegistry.playC2S().register(
+            CreateProjectionZonePayload.ID,
+            CreateProjectionZonePayload.CODEC
+        );
+
+        PayloadTypeRegistry.playC2S().register(
+            DeleteProjectionZonePayload.ID,
+            DeleteProjectionZonePayload.CODEC
+        );
+
         ServerPlayNetworking.registerGlobalReceiver(SpawnGraffitiPayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
             context.server().execute(() -> {
@@ -100,6 +127,92 @@ public class ModNetworking {
                 graffiti.discard();
                 KarmaGateMod.LOGGER.info("Deleted graffiti entity {} for player {}",
                     payload.entityId(), player.getName().getString());
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(CreateCoralNeuronPayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            if (!player.hasPermissionLevel(2)) return;
+            context.server().execute(() -> {
+                CoralNeuronManager manager = CoralNeuronManager.get(context.server());
+                ServerWorld world = player.getServerWorld();
+
+                Vec3d anchorA = new Vec3d(payload.x1(), payload.y1(), payload.z1());
+                Vec3d anchorB = new Vec3d(payload.x2(), payload.y2(), payload.z2());
+
+                if (manager.hasNeuron(payload.name())) {
+                    Optional<CoralNeuronData> existing = manager.removeNeuron(payload.name());
+                    existing.flatMap(d -> manager.findEntity(context.server(), d.entityUuid()))
+                            .ifPresent(CoralNeuronEntity::discard);
+                }
+
+                CoralNeuronEntity entity = new CoralNeuronEntity(
+                        KarmaGateMod.VINE_ENTITY_TYPE,
+                        world,
+                        anchorA,
+                        anchorB,
+                        payload.anchoredA(),
+                        payload.anchoredB()
+                );
+                world.spawnEntity(entity);
+
+                CoralNeuronData data = CoralNeuronData.of(
+                        payload.name(),
+                        entity.getUuid(),
+                        payload.x1(), payload.y1(), payload.z1(),
+                        payload.x2(), payload.y2(), payload.z2(),
+                        payload.anchoredA(),
+                        payload.anchoredB()
+                );
+                manager.addNeuron(data);
+
+                KarmaGateMod.LOGGER.info("Tool created CoralNeuron '{}' for player {}",
+                        payload.name(), player.getName().getString());
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(DeleteCoralNeuronPayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            if (!player.hasPermissionLevel(2)) return;
+            context.server().execute(() -> {
+                CoralNeuronManager manager = CoralNeuronManager.get(context.server());
+                Optional<CoralNeuronData> removed = manager.removeNeuron(payload.name());
+                removed.flatMap(d -> manager.findEntity(context.server(), d.entityUuid()))
+                        .ifPresent(CoralNeuronEntity::discard);
+                KarmaGateMod.LOGGER.info("Tool deleted CoralNeuron '{}' for player {}",
+                        payload.name(), player.getName().getString());
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(CreateProjectionZonePayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            if (!player.hasPermissionLevel(2)) return;
+            context.server().execute(() -> {
+                ProjectionZoneManager manager = ProjectionZoneManager.get(context.server());
+                ProjectionZoneData zone = ProjectionZoneData.of(
+                        payload.name(),
+                        payload.x1(), payload.y1(), payload.z1(),
+                        payload.x2(), payload.y2(), payload.z2(),
+                        payload.swarmerCount(),
+                        payload.drawCircles(),
+                        payload.drawGrid()
+                );
+                manager.addZone(zone);
+                syncToAll(context.server());
+                KarmaGateMod.LOGGER.info("Tool created ProjectionZone '{}' for player {}",
+                        payload.name(), player.getName().getString());
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(DeleteProjectionZonePayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            if (!player.hasPermissionLevel(2)) return;
+            context.server().execute(() -> {
+                ProjectionZoneManager manager = ProjectionZoneManager.get(context.server());
+                manager.removeZone(payload.name());
+                syncToAll(context.server());
+                KarmaGateMod.LOGGER.info("Tool deleted ProjectionZone '{}' for player {}",
+                        payload.name(), player.getName().getString());
             });
         });
     }

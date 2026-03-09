@@ -250,9 +250,31 @@ public class GraffitiCornerHandler {
 
     private static void drawCornerMarker(VertexConsumer buffer, Matrix4f mat, Vec3d pos, float size,
                                          float r, float g, float b) {
-        drawLine(buffer, mat, pos.add(-size, 0, 0), pos.add(size, 0, 0), r, g, b, 1f);
-        drawLine(buffer, mat, pos.add(0, -size, 0), pos.add(0, size, 0), r, g, b, 1f);
-        drawLine(buffer, mat, pos.add(0, 0, -size), pos.add(0, 0, size), r, g, b, 1f);
+        Vec3d p000 = pos.add(-size, -size, -size);
+        Vec3d p001 = pos.add(-size, -size,  size);
+        Vec3d p010 = pos.add(-size,  size, -size);
+        Vec3d p011 = pos.add(-size,  size,  size);
+        Vec3d p100 = pos.add( size, -size, -size);
+        Vec3d p101 = pos.add( size, -size,  size);
+        Vec3d p110 = pos.add( size,  size, -size);
+        Vec3d p111 = pos.add( size,  size,  size);
+
+        drawLine(buffer, mat, p000, p001, r, g, b, 1f);
+        drawLine(buffer, mat, p000, p010, r, g, b, 1f);
+        drawLine(buffer, mat, p000, p100, r, g, b, 1f);
+
+        drawLine(buffer, mat, p111, p110, r, g, b, 1f);
+        drawLine(buffer, mat, p111, p101, r, g, b, 1f);
+        drawLine(buffer, mat, p111, p011, r, g, b, 1f);
+
+        drawLine(buffer, mat, p001, p101, r, g, b, 1f);
+        drawLine(buffer, mat, p001, p011, r, g, b, 1f);
+
+        drawLine(buffer, mat, p010, p110, r, g, b, 1f);
+        drawLine(buffer, mat, p010, p011, r, g, b, 1f);
+
+        drawLine(buffer, mat, p100, p110, r, g, b, 1f);
+        drawLine(buffer, mat, p100, p101, r, g, b, 1f);
     }
 
     // Getters

@@ -17,9 +17,12 @@ import dev.fouriis.karmagate.entity.garbworm.GarbageWormEntity;
 import dev.fouriis.karmagate.entity.spider.SpiderEntity;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugEntity;
 import dev.fouriis.karmagate.item.ModItems;
+import dev.fouriis.karmagate.item.tool.CoralNeuronDefinition;
+import dev.fouriis.karmagate.item.tool.ProjectionZoneDefinition;
 import dev.fouriis.karmagate.network.ModNetworking;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.ModSounds;
+import net.brickcraftdream.librainworldmc.tool.api.SelectionToolRegistry;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
@@ -172,7 +175,9 @@ public class KarmaGateMod implements ModInitializer {
         ModItems.registerModItems();
         ModParticles.register();
         ModSounds.registerModSounds();
-        
+        SelectionToolRegistry.register(CoralNeuronDefinition.INSTANCE);
+        SelectionToolRegistry.register(ProjectionZoneDefinition.INSTANCE);
+
         // Register entity attributes
         FabricDefaultAttributeRegistry.register(STOWAWAY_BUG_ENTITY_TYPE, StowawayBugEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(CENTIPEDE_HEAD_ENTITY_TYPE, CentipedeSegmentEntity.createSegmentAttributes());

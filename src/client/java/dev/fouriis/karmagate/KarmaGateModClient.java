@@ -25,6 +25,9 @@ import dev.fouriis.karmagate.entity.spider.SpiderEntityRenderer;
 import dev.fouriis.karmagate.item.KarmaGateItemGeoRenderer;
 import dev.fouriis.karmagate.entity.client.HeatCoilItemModel;
 import dev.fouriis.karmagate.entity.client.GateLightItemModel;
+import dev.fouriis.karmagate.item.tool.CoralNeuronClientDefinition;
+import dev.fouriis.karmagate.item.tool.ProjectionZoneClientDefinition;
+import net.brickcraftdream.librainworldmc.tool.api.SelectionToolRegistry;
 import software.bernie.geckolib.renderer.GeoItemRenderer;
 import dev.fouriis.karmagate.hologram.HologramProjectorRenderer;
 import dev.fouriis.karmagate.particle.ModParticles;
@@ -64,6 +67,8 @@ public class KarmaGateModClient implements ClientModInitializer {
 	@Override
 	public void onInitializeClient() {
 		// This entrypoint is suitable for setting up client-specific logic, such as rendering.
+		SelectionToolRegistry.upgradeDefinition(CoralNeuronClientDefinition.INSTANCE);
+		SelectionToolRegistry.upgradeDefinition(ProjectionZoneClientDefinition.INSTANCE);
 
 		// Register client networking
 		ClientNetworking.register();

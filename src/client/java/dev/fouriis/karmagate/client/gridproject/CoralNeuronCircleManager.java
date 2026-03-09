@@ -96,7 +96,7 @@ public class CoralNeuronCircleManager {
             
             // Debug: log entity count
             if (!entities.isEmpty()) {
-                KarmaGateMod.LOGGER.info("[CoralNeuronCircle] Found {} CoralNeuronEntity in zone {}", entities.size(), zoneName);
+                //KarmaGateMod.LOGGER.info("[CoralNeuronCircle] Found {} CoralNeuronEntity in zone {}", entities.size(), zoneName);
             }
             
             // Process each entity's endpoints
@@ -205,10 +205,10 @@ public class CoralNeuronCircleManager {
             if (!hasCircle && random.nextFloat() < CIRCLE_SPAWN_CHANCE) {
                 // Spawn a new circle for this endpoint
                 boolean spawned = circleManager.spawnCircleForOwner(zoneName, owner);
-                if (spawned) {
-                    KarmaGateMod.LOGGER.info("[CoralNeuronCircle] Spawned circle for owner {} at position {}", 
-                        owner.getKey(), owner.getCirclePosition());
-                }
+                //if (spawned) {
+                //    KarmaGateMod.LOGGER.info("[CoralNeuronCircle] Spawned circle for owner {} at position {}",
+                //        owner.getKey(), owner.getCirclePosition());
+                //}
             }
         }
     }
