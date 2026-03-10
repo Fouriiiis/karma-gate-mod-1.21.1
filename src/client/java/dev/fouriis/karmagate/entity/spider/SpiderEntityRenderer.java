@@ -3,7 +3,6 @@ package dev.fouriis.karmagate.entity.spider;
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasManager;
-import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
 import net.minecraft.client.render.VertexConsumer;
@@ -18,40 +17,26 @@ import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import org.joml.Matrix4f;
-import org.joml.Quaternionf;
-import org.joml.Vector3f;
 
 /**
  * Procedural renderer for Rain World coalmine spiders.
- * 
- * Ports SpiderGraphics.cs rendering:
- * - Body sprite as a billboard quad
- * - 8 legs (4 pairs) with 2-bone IK, each rendered as billboarded sprite quads
- * - Per-tick limb simulation with surface grip (FindGrip)
- * - Walk cycle animations with alternating leg phases
- * 
- * Uses FAtlasManager from librainworldmc for sprites, specifically the "tinyStar"
- * element as the body sprite (per user request).
+ *
+ * Main fixes:
+ * - No camera billboarding
+ * - Body sprite is rendered on the top of the hitbox
+ * - Legs connect to the raised body sprite, not the entity origin
+ * - Front legs angle upward / forward, rear legs angle downward / backward
+ * - Fixed-plane 3D sprite rendering like centipede leg renderer
  */
 public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
 
-    // Atlas sprites (lazily resolved)
     private static FAtlasManager atlasManager = null;
     private static FAtlasElement bodySprite = null;
-    // Per-leg-pair sprites: legSprites[legIdx][segment] where segment 0=A (upper), 1=B (lower)
     private static final FAtlasElement[][] legSprites = new FAtlasElement[4][2];
     private static boolean spritesLoaded = false;
 
-    // Scale: 1 C# pixel ≈ 0.025 MC blocks
+    // 1 C# pixel ≈ MC blocks
     private static final float PX = 0.025f;
-
-    // C# legSpriteSizes: native sprite dimensions for angle calculations
-    private static final float[][] LEG_SPRITE_SIZES = {
-            {19f, 20f},
-            {26f, 20f},
-            {21f, 23f},
-            {26f, 17f}
-    };
 
     // C# limbLengths: proportional lengths per leg pair
     private static final float[][] LIMB_LENGTHS = {
@@ -61,11 +46,11 @@ public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
             {0.9f, 0.65f}
     };
 
-    // Spider body/leg colors (dark, matches Rain World palette)
+    // Colors
     private static final int BODY_R = 15, BODY_G = 12, BODY_B = 10;
     private static final int LEG_R = 20, LEG_G = 18, LEG_B = 15;
 
-    // Sprite width aspect ratios for leg bones
+    // Sprite width aspect ratios
     private static final float ASPECT_UPPER = 0.25f;
     private static final float ASPECT_LOWER = 0.28f;
 
@@ -76,60 +61,31 @@ public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
 
     @Override
     public Identifier getTexture(SpiderEntity entity) {
-        // We use atlas sprites, not a single texture
         return Identifier.of("karma-gate-mod", "textures/entity/spider_fallback.png");
     }
 
     @Override
     public void render(SpiderEntity entity, float yaw, float tickDelta,
                        MatrixStack matrices, VertexConsumerProvider vcProvider, int light) {
-        // Lazily load atlas sprites
-        if (!spritesLoaded) {
-            atlasManager = LibrainworldmcClient.getAtlasManager();
-            if (atlasManager == null) return;
-            // Body sprite: "SpiderBody" as referenced in C# InitiateSprites
-            bodySprite = atlasManager.getElementWithName("SpiderBody");
-            // Fallback to tinyStar if SpiderBody not found
-            if (bodySprite == null) bodySprite = atlasManager.getElementWithName("tinyStar");
-            if (bodySprite == null) return;
-            // Per-leg sprites: "SpiderLeg0A", "SpiderLeg0B", ..., "SpiderLeg3A", "SpiderLeg3B"
-            for (int i = 0; i < 4; i++) {
-                legSprites[i][0] = atlasManager.getElementWithName("SpiderLeg" + i + "A");
-                if (legSprites[i][0] == null) legSprites[i][0] = bodySprite;
-                legSprites[i][1] = atlasManager.getElementWithName("SpiderLeg" + i + "B");
-                if (legSprites[i][1] == null) legSprites[i][1] = bodySprite;
-            }
-            spritesLoaded = true;
-        }
+        ensureSpritesLoaded();
         if (bodySprite == null) return;
 
         float size = entity.getSizeFactor();
         float limbLength = MathHelper.lerp(size, 10f, 40f) * PX;
 
-        // --- Per-tick limb simulation ---
+        // Per-tick limb simulation
         boolean newTick = (entity.legUpdateAge != entity.age);
         if (newTick) {
             entity.legUpdateAge = entity.age;
             updateLegs(entity, limbLength, size);
         }
 
-        // Camera billboard basis
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.gameRenderer == null) return;
-        Quaternionf camRot = new Quaternionf(client.gameRenderer.getCamera().getRotation());
-        Vector3f billRight = camRot.transform(new Vector3f(1f, 0f, 0f));
-        Vector3f billUp = camRot.transform(new Vector3f(0f, 1f, 0f));
-        Vector3f billNorm = camRot.transform(new Vector3f(0f, 0f, 1f));
-
-        // Entity position (interpolated)
         Vec3d entityPos = new Vec3d(
                 MathHelper.lerp(tickDelta, entity.prevTickPos.x, entity.getPos().x),
                 MathHelper.lerp(tickDelta, entity.prevTickPos.y, entity.getPos().y),
-                MathHelper.lerp(tickDelta, entity.prevTickPos.z, entity.getPos().z));
+                MathHelper.lerp(tickDelta, entity.prevTickPos.z, entity.getPos().z)
+        );
 
-        matrices.push();
-
-        // --- Compute body direction ---
         Vec3d velocity = entity.getVelocity();
         Vec3d bodyDir;
         if (velocity.horizontalLengthSquared() > 0.001) {
@@ -137,81 +93,132 @@ public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
         } else {
             bodyDir = entity.direction;
         }
-        Vec3d perpDir = bodyDir.crossProduct(new Vec3d(0, 1, 0));
-        if (perpDir.lengthSquared() < 0.001) {
-            perpDir = bodyDir.crossProduct(new Vec3d(1, 0, 0));
-        }
-        if (perpDir.lengthSquared() > 0.001) {
-            perpDir = perpDir.normalize();
-        }
+        if (bodyDir.lengthSquared() < 0.001) bodyDir = new Vec3d(0, 0, 1);
+        bodyDir = bodyDir.normalize();
 
-        // --- Render body with rotation matching bodyDir (C# DrawSprites) ---
-        // C# body scale: Lerp(0.2, 1.0, size)
+        Vec3d surfaceNormal = getInterpolatedSurfaceNormal(entity, tickDelta);
+
+        Vec3d sideDir = bodyDir.crossProduct(surfaceNormal);
+        if (sideDir.lengthSquared() < 0.001) {
+            sideDir = bodyDir.crossProduct(new Vec3d(0, 1, 0));
+            if (sideDir.lengthSquared() < 0.001) {
+                sideDir = bodyDir.crossProduct(new Vec3d(1, 0, 0));
+            }
+        }
+        sideDir = sideDir.normalize();
+
+        // Reproject forward axis onto the crawl plane
+        bodyDir = surfaceNormal.crossProduct(sideDir);
+        if (bodyDir.lengthSquared() < 0.001) bodyDir = new Vec3d(0, 0, 1);
+        bodyDir = bodyDir.normalize();
+
+        matrices.push();
+
+        // Put the body on top of the hitbox along the crawl-surface normal
         float bodyScale = MathHelper.lerp(size, 0.2f, 1.0f);
-        float bodySize = bodyScale * 0.06f; // map to MC world units
-        // Project bodyDir onto billboard plane to get rotation angle
-        float bodyDirOnRight = (float)(bodyDir.x * billRight.x + bodyDir.y * billRight.y + bodyDir.z * billRight.z);
-        float bodyDirOnUp = (float)(bodyDir.x * billUp.x + bodyDir.y * billUp.y + bodyDir.z * billUp.z);
-        float bodyAngle = (float) Math.atan2(bodyDirOnRight, bodyDirOnUp);
-        renderRotatedBillboardQuad(matrices, vcProvider, light, bodySprite,
-                Vec3d.ZERO, bodySize, bodySize, bodyAngle,
-                billRight, billUp, billNorm,
-                BODY_R, BODY_G, BODY_B);
+        float bodyHalfW = bodyScale * 0.06f;
+        float bodyHalfH = bodyScale * 0.06f;
+        Vec3d bodyCenterLocal = surfaceNormal.multiply((entity.getHeight() * 0.5f) - 0.02f);
 
-        // --- Walk cycle ---
-        float moveSpeed = (float) velocity.horizontalLength();
+        renderPlanarQuad(
+                matrices, vcProvider, light,
+                bodySprite,
+                bodyCenterLocal,
+                sideDir,
+                bodyDir,
+                bodyHalfW,
+                bodyHalfH,
+                surfaceNormal,
+                BODY_R, BODY_G, BODY_B
+        );
 
-        // --- Render legs ---
+        // Legs connect to the raised body
         for (int legIdx = 0; legIdx < 4; legIdx++) {
             for (int side = 0; side < 2; side++) {
                 int limbIndex = legIdx + side * 4;
+                float sideSign = (side == 0) ? -1f : 1f;
 
-                // Interpolated foot position relative to entity
                 Vec3d footWorld = new Vec3d(
                         MathHelper.lerp(tickDelta, entity.legLastPos[limbIndex].x, entity.legPos[limbIndex].x),
                         MathHelper.lerp(tickDelta, entity.legLastPos[limbIndex].y, entity.legPos[limbIndex].y),
-                        MathHelper.lerp(tickDelta, entity.legLastPos[limbIndex].z, entity.legPos[limbIndex].z));
+                        MathHelper.lerp(tickDelta, entity.legLastPos[limbIndex].z, entity.legPos[limbIndex].z)
+                );
                 Vec3d footLocal = footWorld.subtract(entityPos);
 
-                // Attach point on body
-                float sideSign = (side == 0) ? -1f : 1f;
-                Vec3d attachOffset = bodyDir.multiply((7f - legIdx * 0.5f - ((legIdx == 3) ? 1.5f : 0f)) * size * PX)
-                        .add(perpDir.multiply((3f + legIdx * 0.5f - ((legIdx == 3) ? 5.5f : 0f)) * sideSign * size * PX));
+                Vec3d attachOffset = computeBodyAttachOffset(
+                        bodyCenterLocal, bodyDir, sideDir, surfaceNormal, size, legIdx, sideSign
+                );
 
-                // Bone lengths
+                float totalLegLen = LIMB_LENGTHS[legIdx][0] * limbLength;
                 float upperLen = LIMB_LENGTHS[legIdx][0] * LIMB_LENGTHS[legIdx][1] * limbLength;
                 float lowerLen = LIMB_LENGTHS[legIdx][0] * (1f - LIMB_LENGTHS[legIdx][1]) * limbLength;
 
-                // IK bend factor
-                float bendFactor = ((legIdx < 3) ? 1f : -1f) * sideSign;
+                // Clamp the displayed foot so the visual rig never stretches too far from the body
+                Vec3d toFoot = footLocal.subtract(attachOffset);
+                double dist = toFoot.length();
+                if (dist > totalLegLen && dist > 1e-5) {
+                    footLocal = attachOffset.add(toFoot.normalize().multiply(totalLegLen));
+                }
 
-                // Inverse kinematics for knee position
-                Vec3d kneeLocal = inverseKinematics3D(attachOffset, footLocal,
-                        upperLen, lowerLen, bendFactor, perpDir);
+                float bendFactor = ((legIdx < 2) ? 1f : -1f) * sideSign;
+                Vec3d pole = computeSpiderLegPole(bodyDir, sideDir.multiply(sideSign), surfaceNormal, bendFactor, legIdx);
 
-                // C# scaleX: ((j == 0) ? 1 : -1) * Lerp(0.45, 0.65, size)
+                Vec3d kneeLocal = solveKnee3DWithMinimumBend(
+                        attachOffset,
+                        footLocal,
+                        upperLen,
+                        lowerLen,
+                        pole,
+                        0.18f
+                );
+
                 float scaleX = MathHelper.lerp(size, 0.45f, 0.65f);
 
-                // Render upper leg bone (SpiderLeg{legIdx}A)
-                float halfWidthA = (float)(attachOffset.distanceTo(kneeLocal) * ASPECT_UPPER * 0.5f) * scaleX;
-                renderLegSprite(matrices, vcProvider, light,
+                float halfWidthA = (float) (attachOffset.distanceTo(kneeLocal) * ASPECT_UPPER * 0.5f) * scaleX;
+                renderBoneSprite(
+                        matrices, vcProvider, light,
                         attachOffset, kneeLocal, halfWidthA,
-                        legSprites[legIdx][0], billRight, billUp, billNorm,
-                        LEG_R, LEG_G, LEG_B, LEG_R, LEG_G, LEG_B);
+                        legSprites[legIdx][0],
+                        surfaceNormal,
+                        LEG_R, LEG_G, LEG_B,
+                        LEG_R, LEG_G, LEG_B
+                );
 
-                // Render lower leg bone (SpiderLeg{legIdx}B)
-                float halfWidthB = (float)(kneeLocal.distanceTo(footLocal) * ASPECT_LOWER * 0.5f) * scaleX;
-                renderLegSprite(matrices, vcProvider, light,
+                float halfWidthB = (float) (kneeLocal.distanceTo(footLocal) * ASPECT_LOWER * 0.5f) * scaleX;
+                renderBoneSprite(
+                        matrices, vcProvider, light,
                         kneeLocal, footLocal, halfWidthB,
-                        legSprites[legIdx][1], billRight, billUp, billNorm,
+                        legSprites[legIdx][1],
+                        surfaceNormal,
                         LEG_R + 5, LEG_G + 3, LEG_B + 2,
-                        LEG_R - 2, LEG_G - 2, LEG_B - 2);
+                        LEG_R - 2, LEG_G - 2, LEG_B - 2
+                );
             }
         }
 
         matrices.pop();
-
         super.render(entity, yaw, tickDelta, matrices, vcProvider, light);
+    }
+
+    private static void ensureSpritesLoaded() {
+        if (spritesLoaded) return;
+
+        atlasManager = LibrainworldmcClient.getAtlasManager();
+        if (atlasManager == null) return;
+
+        bodySprite = atlasManager.getElementWithName("SpiderBody");
+        if (bodySprite == null) bodySprite = atlasManager.getElementWithName("tinyStar");
+        if (bodySprite == null) return;
+
+        for (int i = 0; i < 4; i++) {
+            legSprites[i][0] = atlasManager.getElementWithName("SpiderLeg" + i + "A");
+            if (legSprites[i][0] == null) legSprites[i][0] = bodySprite;
+
+            legSprites[i][1] = atlasManager.getElementWithName("SpiderLeg" + i + "B");
+            if (legSprites[i][1] == null) legSprites[i][1] = bodySprite;
+        }
+
+        spritesLoaded = true;
     }
 
     // =========================================================================
@@ -229,69 +236,65 @@ public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
         } else {
             bodyDir = entity.direction;
         }
+        if (bodyDir.lengthSquared() < 0.001) bodyDir = new Vec3d(0, 0, 1);
+        bodyDir = bodyDir.normalize();
 
-        Vec3d perpDir = bodyDir.crossProduct(new Vec3d(0, 1, 0));
-        if (perpDir.lengthSquared() < 0.001) {
-            perpDir = bodyDir.crossProduct(new Vec3d(1, 0, 0));
+        Vec3d surfaceNormal = new Vec3d(entity.surfaceNormalX, entity.surfaceNormalY, entity.surfaceNormalZ);
+        if (surfaceNormal.lengthSquared() < 0.001) surfaceNormal = new Vec3d(0, 1, 0);
+        surfaceNormal = surfaceNormal.normalize();
+
+        Vec3d sideDir = bodyDir.crossProduct(surfaceNormal);
+        if (sideDir.lengthSquared() < 0.001) {
+            sideDir = bodyDir.crossProduct(new Vec3d(0, 1, 0));
+            if (sideDir.lengthSquared() < 0.001) {
+                sideDir = bodyDir.crossProduct(new Vec3d(1, 0, 0));
+            }
         }
-        if (perpDir.lengthSquared() > 0.001) perpDir = perpDir.normalize();
+        sideDir = sideDir.normalize();
 
-        // Update direction for rendering
+        bodyDir = surfaceNormal.crossProduct(sideDir);
+        if (bodyDir.lengthSquared() < 0.001) bodyDir = new Vec3d(0, 0, 1);
+        bodyDir = bodyDir.normalize();
+
         if (velocity.horizontalLengthSquared() > 0.001) {
             entity.direction = bodyDir;
         }
 
-        float moveSpeed = (float)velocity.horizontalLength();
+        float moveSpeed = (float) velocity.horizontalLength();
         boolean isMoving = moveSpeed > 0.01f;
-
         float walkCycle = entity.age * 0.15f * moveSpeed;
-
-        // Metachronal wave for 4 legs per side
         final float SWING_FRAC = 0.35f;
+
+        Vec3d bodyCenterWorld = entityPos.add(surfaceNormal.multiply((entity.getHeight() * 0.5f) - 0.02f));
 
         for (int legIdx = 0; legIdx < 4; legIdx++) {
             for (int side = 0; side < 2; side++) {
                 int limbIndex = legIdx + side * 4;
                 float sideSign = (side == 0) ? -1f : 1f;
 
-                // Save last position
                 entity.legLastPos[limbIndex] = entity.legPos[limbIndex];
-
-                // Apply velocity
                 entity.legPos[limbIndex] = entity.legPos[limbIndex].add(entity.legVel[limbIndex]);
 
-                // Attach point
-                Vec3d attachPt = entityPos.add(
-                        bodyDir.multiply((7f - legIdx * 0.5f - ((legIdx == 3) ? 1.5f : 0f)) * size * PX))
-                        .add(perpDir.multiply((3f + legIdx * 0.5f - ((legIdx == 3) ? 5.5f : 0f)) * sideSign * size * PX));
+                Vec3d attachPt = bodyCenterWorld.add(
+                        computeBodyAttachOffset(Vec3d.ZERO, bodyDir, sideDir, surfaceNormal, size, legIdx, sideSign)
+                );
 
                 float totalLegLen = LIMB_LENGTHS[legIdx][0] * limbLength;
 
-                // Constrain to max leg length
                 Vec3d toFoot = entity.legPos[limbIndex].subtract(attachPt);
                 double dist = toFoot.length();
-                if (dist > totalLegLen) {
+                if (dist > totalLegLen && dist > 1e-5) {
                     entity.legPos[limbIndex] = attachPt.add(toFoot.normalize().multiply(totalLegLen));
                 }
 
-                // Friction + body momentum transfer
                 entity.legVel[limbIndex] = entity.legVel[limbIndex].add(velocity.multiply(0.06));
                 entity.legVel[limbIndex] = entity.legVel[limbIndex].multiply(0.78);
 
-                // Ideal foot direction (C# SpiderGraphics leg angles)
-                float angleDeg = MathHelper.lerp(legIdx / 3f, 30f, 140f) + 20f * entity.getLegsPosition();
-                if (legIdx == 3) angleDeg += 20f;
-                double angleRad = Math.toRadians(angleDeg * sideSign);
-
-                // Rotate bodyDir by angle
-                double cos = Math.cos(angleRad);
-                double sin = Math.sin(angleRad);
-                Vec3d idealDir = bodyDir.multiply(cos).add(perpDir.multiply(sin));
-                if (idealDir.lengthSquared() > 0.001) idealDir = idealDir.normalize();
-
+                Vec3d idealDir = computeIdealSpiderLegDirection(
+                        bodyDir, sideDir, surfaceNormal, legIdx, sideSign, entity.getLegsPosition()
+                );
                 Vec3d idealFoot = attachPt.add(idealDir.multiply(totalLegLen * 0.85));
 
-                // First-tick initialization
                 if (!entity.legsInitialized) {
                     Vec3d grip = findGrip(world, attachPt, idealFoot, totalLegLen * 1.5);
                     entity.legPos[limbIndex] = (grip != null) ? grip : idealFoot;
@@ -302,7 +305,6 @@ public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
                     continue;
                 }
 
-                // Phase for walk cycle (alternating pairs)
                 float sideOffset = (side == 0) ? 0f : 0.5f;
                 float segOffset = legIdx / 4f;
                 float rawPhase = walkCycle + segOffset + sideOffset;
@@ -311,19 +313,17 @@ public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
                 float swingT = inSwing ? (phase / SWING_FRAC) : 0f;
 
                 if (inSwing) {
-                    // Swing phase: lift and arc forward
                     if (entity.legGripped[limbIndex]) {
                         entity.legGripped[limbIndex] = false;
                         entity.legGripTarget[limbIndex] = null;
-                        entity.legVel[limbIndex] = entity.legVel[limbIndex].add(
-                                new Vec3d(0, 6f * PX, 0));
+                        entity.legVel[limbIndex] = entity.legVel[limbIndex].add(surfaceNormal.multiply(6f * PX));
                     }
 
                     if (swingT < 0.6f) {
                         Vec3d toIdeal = idealFoot.subtract(entity.legPos[limbIndex]);
                         entity.legVel[limbIndex] = entity.legVel[limbIndex].add(toIdeal.multiply(0.2));
-                        float arcY = (float) Math.sin(swingT / 0.6f * Math.PI) * 4f * PX;
-                        entity.legVel[limbIndex] = entity.legVel[limbIndex].add(new Vec3d(0, arcY, 0));
+                        float arc = (float) Math.sin(swingT / 0.6f * Math.PI) * 4f * PX;
+                        entity.legVel[limbIndex] = entity.legVel[limbIndex].add(surfaceNormal.multiply(arc));
                     } else {
                         Vec3d grip = findGrip(world, attachPt, idealFoot, totalLegLen * 1.5);
                         if (grip != null) {
@@ -336,7 +336,8 @@ public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
                                 entity.legVel[limbIndex] = Vec3d.ZERO;
                             } else {
                                 entity.legVel[limbIndex] = entity.legVel[limbIndex].add(
-                                        toGrip.normalize().multiply(Math.min(toGripDist * 0.5, 0.15)));
+                                        toGrip.normalize().multiply(Math.min(toGripDist * 0.5, 0.15))
+                                );
                             }
                         } else {
                             Vec3d toIdeal = idealFoot.subtract(entity.legPos[limbIndex]);
@@ -344,7 +345,6 @@ public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
                         }
                     }
                 } else {
-                    // Stance phase: keep planted
                     if (entity.legGripped[limbIndex] && entity.legGripTarget[limbIndex] != null) {
                         double attachToGrip = attachPt.distanceTo(entity.legGripTarget[limbIndex]);
                         if (attachToGrip > totalLegLen * 1.7) {
@@ -376,7 +376,122 @@ public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
     }
 
     // =========================================================================
-    // FindGrip: search for terrain surface near idealFoot
+    // Pose helpers
+    // =========================================================================
+
+    private static Vec3d getInterpolatedSurfaceNormal(SpiderEntity entity, float tickDelta) {
+        Vec3d n = new Vec3d(
+                MathHelper.lerp(tickDelta, entity.prevSurfaceNormalX, entity.surfaceNormalX),
+                MathHelper.lerp(tickDelta, entity.prevSurfaceNormalY, entity.surfaceNormalY),
+                MathHelper.lerp(tickDelta, entity.prevSurfaceNormalZ, entity.surfaceNormalZ)
+        );
+        if (n.lengthSquared() < 0.001) return new Vec3d(0, 1, 0);
+        return n.normalize();
+    }
+
+    /**
+     * Leg root positions around the raised body plane.
+     * Front legs mount slightly higher, rear legs mount lower.
+     */
+    private static Vec3d computeBodyAttachOffset(Vec3d bodyCenterLocal,
+                                                 Vec3d bodyDir,
+                                                 Vec3d sideDir,
+                                                 Vec3d surfaceNormal,
+                                                 float size,
+                                                 int legIdx,
+                                                 float sideSign) {
+        float[] forwardOffsets = { 0.13f, 0.05f, -0.03f, -0.10f };
+        float[] sideOffsets = { 0.09f, 0.11f, 0.11f, 0.09f };
+        float[] verticalOffsets = { 0.01f, -0.01f, -0.03f, -0.05f };
+
+        return bodyCenterLocal
+                .add(bodyDir.multiply(forwardOffsets[legIdx] * size))
+                .add(sideDir.multiply(sideOffsets[legIdx] * sideSign * size))
+                .add(surfaceNormal.multiply(verticalOffsets[legIdx] * size));
+    }
+
+    /**
+     * Traditional spider feel:
+     * front legs up and forward, rear legs down and backward.
+     */
+    private static Vec3d computeIdealSpiderLegDirection(Vec3d bodyDir,
+                                                        Vec3d sideDir,
+                                                        Vec3d surfaceNormal,
+                                                        int legIdx,
+                                                        float sideSign,
+                                                        float legsPosition) {
+        float[] forwardBias = { 0.85f, 0.35f, -0.25f, -0.75f };
+        float[] outwardBias = { 1.10f, 1.00f, 0.95f, 0.85f };
+        float[] verticalBias = { 0.35f, 0.05f, -0.18f, -0.35f };
+
+        Vec3d dir = bodyDir.multiply(forwardBias[legIdx])
+                .add(sideDir.multiply(outwardBias[legIdx] * sideSign))
+                .add(surfaceNormal.multiply(verticalBias[legIdx]))
+                .add(bodyDir.multiply(0.15f * legsPosition * sideSign));
+
+        if (dir.lengthSquared() < 0.001) dir = sideDir.multiply(sideSign);
+        return dir.normalize();
+    }
+
+    private static Vec3d computeSpiderLegPole(Vec3d bodyDir,
+                                              Vec3d outward,
+                                              Vec3d surfaceNormal,
+                                              float bendFactor,
+                                              int legIdx) {
+        float[] upBias =   { 0.55f, 0.18f, -0.15f, -0.35f };
+        float[] foreBias = { 0.45f, 0.18f, -0.18f, -0.40f };
+
+        Vec3d pole = outward.multiply(1.0)
+                .add(surfaceNormal.multiply(upBias[legIdx]))
+                .add(bodyDir.multiply(foreBias[legIdx] * Math.signum(bendFactor)));
+
+        if (pole.lengthSquared() < 0.001) pole = outward;
+        return pole.normalize();
+    }
+
+    // =========================================================================
+    // IK
+    // =========================================================================
+
+    private static Vec3d solveKnee3DWithMinimumBend(Vec3d start, Vec3d end,
+                                                    float len1, float len2,
+                                                    Vec3d poleVector,
+                                                    float minBendFraction) {
+        Vec3d diff = end.subtract(start);
+        double dist = diff.length();
+
+        if (dist < 1e-5) {
+            return start.add(poleVector.normalize().multiply(len1));
+        }
+
+        Vec3d dir = diff.normalize();
+        double maxReach = len1 + len2 - 1e-4;
+        double clampedDist = Math.min(dist, maxReach);
+
+        double cosA = ((clampedDist * clampedDist) + (len1 * len1) - (len2 * len2))
+                / (2.0 * clampedDist * len1);
+        cosA = MathHelper.clamp((float) cosA, -1f, 1f);
+
+        double along = cosA * len1;
+        double bend = Math.sqrt(Math.max(0.0, (len1 * len1) - (along * along)));
+
+        double minBend = Math.min(len1, len2) * minBendFraction;
+        bend = Math.max(bend, minBend);
+
+        Vec3d planePole = poleVector.subtract(dir.multiply(poleVector.dotProduct(dir)));
+        if (planePole.lengthSquared() < 0.001) {
+            planePole = dir.crossProduct(new Vec3d(0, 1, 0));
+            if (planePole.lengthSquared() < 0.001) {
+                planePole = dir.crossProduct(new Vec3d(1, 0, 0));
+            }
+        }
+        planePole = planePole.normalize();
+
+        return start.add(dir.multiply(along)).add(planePole.multiply(bend));
+    }
+
+    // =========================================================================
+    // Grip search
     // =========================================================================
 
     private static Vec3d findGrip(World world, Vec3d attachPt, Vec3d idealFoot, double maxReach) {
@@ -414,99 +529,105 @@ public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
     private static Vec3d surfacePointOnFace(BlockPos block, Direction face, Vec3d target) {
         double bx = block.getX(), by = block.getY(), bz = block.getZ();
         return switch (face) {
-            case UP -> new Vec3d(MathHelper.clamp(target.x, bx, bx + 1), by + 1.0, MathHelper.clamp(target.z, bz, bz + 1));
-            case DOWN -> new Vec3d(MathHelper.clamp(target.x, bx, bx + 1), by, MathHelper.clamp(target.z, bz, bz + 1));
-            case NORTH -> new Vec3d(MathHelper.clamp(target.x, bx, bx + 1), MathHelper.clamp(target.y, by, by + 1), bz);
-            case SOUTH -> new Vec3d(MathHelper.clamp(target.x, bx, bx + 1), MathHelper.clamp(target.y, by, by + 1), bz + 1.0);
-            case WEST -> new Vec3d(bx, MathHelper.clamp(target.y, by, by + 1), MathHelper.clamp(target.z, bz, bz + 1));
-            case EAST -> new Vec3d(bx + 1.0, MathHelper.clamp(target.y, by, by + 1), MathHelper.clamp(target.z, bz, bz + 1));
+            case UP -> new Vec3d(
+                    MathHelper.clamp(target.x, bx, bx + 1),
+                    by + 1.0,
+                    MathHelper.clamp(target.z, bz, bz + 1)
+            );
+            case DOWN -> new Vec3d(
+                    MathHelper.clamp(target.x, bx, bx + 1),
+                    by,
+                    MathHelper.clamp(target.z, bz, bz + 1)
+            );
+            case NORTH -> new Vec3d(
+                    MathHelper.clamp(target.x, bx, bx + 1),
+                    MathHelper.clamp(target.y, by, by + 1),
+                    bz
+            );
+            case SOUTH -> new Vec3d(
+                    MathHelper.clamp(target.x, bx, bx + 1),
+                    MathHelper.clamp(target.y, by, by + 1),
+                    bz + 1.0
+            );
+            case WEST -> new Vec3d(
+                    bx,
+                    MathHelper.clamp(target.y, by, by + 1),
+                    MathHelper.clamp(target.z, bz, bz + 1)
+            );
+            case EAST -> new Vec3d(
+                    bx + 1.0,
+                    MathHelper.clamp(target.y, by, by + 1),
+                    MathHelper.clamp(target.z, bz, bz + 1)
+            );
         };
     }
 
     // =========================================================================
-    // 3D Inverse Kinematics
-    // =========================================================================
-
-    private static Vec3d inverseKinematics3D(Vec3d start, Vec3d end,
-                                              float len1, float len2,
-                                              float sideFactor, Vec3d bendHint) {
-        Vec3d diff = end.subtract(start);
-        double dist = diff.length();
-        if (dist < 0.001 || dist >= len1 + len2) {
-            return start.add(end).multiply(0.5);
-        }
-        Vec3d dir = diff.normalize();
-        Vec3d perp = dir.crossProduct(bendHint);
-        if (perp.lengthSquared() < 0.001) perp = dir.crossProduct(new Vec3d(0, 1, 0));
-        if (perp.lengthSquared() < 0.001) perp = dir.crossProduct(new Vec3d(1, 0, 0));
-        perp = perp.normalize();
-
-        double cosA = (dist * dist + (double)(len1 * len1) - (double)(len2 * len2)) / (2.0 * dist * len1);
-        cosA = MathHelper.clamp((float) cosA, -1f, 1f);
-        double sinA = Math.sqrt(1.0 - cosA * cosA);
-
-        return start.add(dir.multiply(cosA * len1))
-                .add(perp.multiply(sinA * len1 * Math.signum(sideFactor)));
-    }
-
-    // =========================================================================
-    // Billboard quad rendering
+    // Rendering helpers
     // =========================================================================
 
     /**
-     * Render a billboard quad with rotation on the billboard plane.
-     * Matches C#'s body sprite rendering with AimFromOneVectorToAnother rotation.
+     * Body quad rendered in a fixed world/body plane.
      */
-    private static void renderRotatedBillboardQuad(MatrixStack matrices, VertexConsumerProvider vcProvider, int light,
-                                                    FAtlasElement sprite, Vec3d center, float halfW, float halfH,
-                                                    float angle,
-                                                    Vector3f billRight, Vector3f billUp, Vector3f billNorm,
-                                                    int r, int g, int b) {
-        float cosA = (float) Math.cos(angle);
-        float sinA = (float) Math.sin(angle);
-        // Rotate right/up axes on the billboard plane
-        float rotRX = cosA * billRight.x - sinA * billUp.x;
-        float rotRY = cosA * billRight.y - sinA * billUp.y;
-        float rotRZ = cosA * billRight.z - sinA * billUp.z;
-        float rotUX = sinA * billRight.x + cosA * billUp.x;
-        float rotUY = sinA * billRight.y + cosA * billUp.y;
-        float rotUZ = sinA * billRight.z + cosA * billUp.z;
+    private static void renderPlanarQuad(MatrixStack matrices, VertexConsumerProvider vcProvider, int light,
+                                         FAtlasElement sprite, Vec3d center,
+                                         Vec3d rightAxis, Vec3d upAxis,
+                                         float halfW, float halfH,
+                                         Vec3d faceNormal,
+                                         int r, int g, int b) {
+        Vec3d right = rightAxis.normalize();
+        Vec3d up = upAxis.normalize();
+        Vec3d normal = faceNormal.normalize();
 
         float cx = (float) center.x;
         float cy = (float) center.y;
         float cz = (float) center.z;
 
-        float blX = cx - rotRX * halfW - rotUX * halfH;
-        float blY = cy - rotRY * halfW - rotUY * halfH;
-        float blZ = cz - rotRZ * halfW - rotUZ * halfH;
-        float brX = cx + rotRX * halfW - rotUX * halfH;
-        float brY = cy + rotRY * halfW - rotUY * halfH;
-        float brZ = cz + rotRZ * halfW - rotUZ * halfH;
-        float trX = cx + rotRX * halfW + rotUX * halfH;
-        float trY = cy + rotRY * halfW + rotUY * halfH;
-        float trZ = cz + rotRZ * halfW + rotUZ * halfH;
-        float tlX = cx - rotRX * halfW + rotUX * halfH;
-        float tlY = cy - rotRY * halfW + rotUY * halfH;
-        float tlZ = cz - rotRZ * halfW + rotUZ * halfH;
+        float rx = (float) (right.x * halfW);
+        float ry = (float) (right.y * halfW);
+        float rz = (float) (right.z * halfW);
+
+        float ux = (float) (up.x * halfH);
+        float uy = (float) (up.y * halfH);
+        float uz = (float) (up.z * halfH);
+
+        float blX = cx - rx - ux;
+        float blY = cy - ry - uy;
+        float blZ = cz - rz - uz;
+        float brX = cx + rx - ux;
+        float brY = cy + ry - uy;
+        float brZ = cz + rz - uz;
+        float trX = cx + rx + ux;
+        float trY = cy + ry + uy;
+        float trZ = cz + rz + uz;
+        float tlX = cx - rx + ux;
+        float tlY = cy - ry + uy;
+        float tlZ = cz - rz + uz;
 
         Matrix4f mat = matrices.peek().getPositionMatrix();
-        VertexConsumer vc = vcProvider.getBuffer(
-                RenderLayer.getEntityCutoutNoCull(sprite.textureIdentifier));
+        VertexConsumer vc = vcProvider.getBuffer(RenderLayer.getEntityCutoutNoCull(sprite.textureIdentifier));
 
         vc.vertex(mat, blX, blY, blZ).color(r, g, b, 255)
-                .texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(billNorm.x, billNorm.y, billNorm.z);
+                .texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light)
+                .normal((float) normal.x, (float) normal.y, (float) normal.z);
         vc.vertex(mat, brX, brY, brZ).color(r, g, b, 255)
-                .texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(billNorm.x, billNorm.y, billNorm.z);
+                .texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light)
+                .normal((float) normal.x, (float) normal.y, (float) normal.z);
         vc.vertex(mat, trX, trY, trZ).color(r, g, b, 255)
-                .texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(billNorm.x, billNorm.y, billNorm.z);
+                .texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light)
+                .normal((float) normal.x, (float) normal.y, (float) normal.z);
         vc.vertex(mat, tlX, tlY, tlZ).color(r, g, b, 255)
-                .texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(billNorm.x, billNorm.y, billNorm.z);
+                .texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light)
+                .normal((float) normal.x, (float) normal.y, (float) normal.z);
     }
 
-    private static void renderLegSprite(MatrixStack matrices, VertexConsumerProvider vcProvider, int light,
+    /**
+     * Leg sprite rendered in a fixed plane like the centipede leg renderer.
+     */
+    private static void renderBoneSprite(MatrixStack matrices, VertexConsumerProvider vcProvider, int light,
                                          Vec3d startLocal, Vec3d endLocal, float halfWidth,
                                          FAtlasElement sprite,
-                                         Vector3f billRight, Vector3f billUp, Vector3f billNorm,
+                                         Vec3d faceHint,
                                          int topR, int topG, int topB,
                                          int botR, int botG, int botB) {
         Vec3d limbDir = endLocal.subtract(startLocal);
@@ -514,50 +635,49 @@ public class SpiderEntityRenderer extends EntityRenderer<SpiderEntity> {
         if (limbLen < 0.001) return;
 
         Vec3d tangent = limbDir.normalize();
-        float tRight = (float)(tangent.x * billRight.x + tangent.y * billRight.y + tangent.z * billRight.z);
-        float tUp = (float)(tangent.x * billUp.x + tangent.y * billUp.y + tangent.z * billUp.z);
-        float angle = (float) Math.atan2(tRight, tUp);
 
-        float cosA = (float) Math.cos(angle);
-        float sinA = (float) Math.sin(angle);
+        Vec3d face = faceHint.subtract(tangent.multiply(faceHint.dotProduct(tangent)));
+        if (face.lengthSquared() < 0.001) {
+            face = tangent.crossProduct(new Vec3d(0, 1, 0));
+            if (face.lengthSquared() < 0.001) {
+                face = tangent.crossProduct(new Vec3d(1, 0, 0));
+            }
+        }
+        face = face.normalize();
 
-        float rotUpX = cosA * billUp.x + sinA * billRight.x;
-        float rotUpY = cosA * billUp.y + sinA * billRight.y;
-        float rotUpZ = cosA * billUp.z + sinA * billRight.z;
-        float rotRightX = cosA * billRight.x - sinA * billUp.x;
-        float rotRightY = cosA * billRight.y - sinA * billUp.y;
-        float rotRightZ = cosA * billRight.z - sinA * billUp.z;
+        Vec3d widthDir = tangent.crossProduct(face);
+        if (widthDir.lengthSquared() < 0.001) {
+            widthDir = face;
+        } else {
+            widthDir = widthDir.normalize();
+        }
 
-        float cx = (float)((startLocal.x + endLocal.x) * 0.5);
-        float cy = (float)((startLocal.y + endLocal.y) * 0.5);
-        float cz = (float)((startLocal.z + endLocal.z) * 0.5);
-        float halfH = (float)(limbLen * 0.5);
+        float nfx = (float) face.x;
+        float nfy = (float) face.y;
+        float nfz = (float) face.z;
 
-        float blX = cx - rotRightX * halfWidth - rotUpX * halfH;
-        float blY = cy - rotRightY * halfWidth - rotUpY * halfH;
-        float blZ = cz - rotRightZ * halfWidth - rotUpZ * halfH;
-        float brX = cx + rotRightX * halfWidth - rotUpX * halfH;
-        float brY = cy + rotRightY * halfWidth - rotUpY * halfH;
-        float brZ = cz + rotRightZ * halfWidth - rotUpZ * halfH;
-        float trX = cx + rotRightX * halfWidth + rotUpX * halfH;
-        float trY = cy + rotRightY * halfWidth + rotUpY * halfH;
-        float trZ = cz + rotRightZ * halfWidth + rotUpZ * halfH;
-        float tlX = cx - rotRightX * halfWidth + rotUpX * halfH;
-        float tlY = cy - rotRightY * halfWidth + rotUpY * halfH;
-        float tlZ = cz - rotRightZ * halfWidth + rotUpZ * halfH;
+        float wdx = (float) (widthDir.x * halfWidth);
+        float wdy = (float) (widthDir.y * halfWidth);
+        float wdz = (float) (widthDir.z * halfWidth);
 
-        float nx = billNorm.x, ny = billNorm.y, nz = billNorm.z;
+        float s0x = (float) startLocal.x, s0y = (float) startLocal.y, s0z = (float) startLocal.z;
+        float s1x = (float) endLocal.x,   s1y = (float) endLocal.y,   s1z = (float) endLocal.z;
+
+        float blX = s0x - wdx, blY = s0y - wdy, blZ = s0z - wdz;
+        float brX = s0x + wdx, brY = s0y + wdy, brZ = s0z + wdz;
+        float trX = s1x + wdx, trY = s1y + wdy, trZ = s1z + wdz;
+        float tlX = s1x - wdx, tlY = s1y - wdy, tlZ = s1z - wdz;
+
         Matrix4f mat = matrices.peek().getPositionMatrix();
-        VertexConsumer vc = vcProvider.getBuffer(
-                RenderLayer.getEntityCutoutNoCull(sprite.textureIdentifier));
+        VertexConsumer vc = vcProvider.getBuffer(RenderLayer.getEntityCutoutNoCull(sprite.textureIdentifier));
 
         vc.vertex(mat, blX, blY, blZ).color(botR, botG, botB, 255)
-                .texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
+                .texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nfx, nfy, nfz);
         vc.vertex(mat, brX, brY, brZ).color(botR, botG, botB, 255)
-                .texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
+                .texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nfx, nfy, nfz);
         vc.vertex(mat, trX, trY, trZ).color(topR, topG, topB, 255)
-                .texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
+                .texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nfx, nfy, nfz);
         vc.vertex(mat, tlX, tlY, tlZ).color(topR, topG, topB, 255)
-                .texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
+                .texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nfx, nfy, nfz);
     }
 }
