@@ -168,14 +168,14 @@ public class RenderTentacle {
                 // Repulsion from look point to create organic "S" shape
                 // C#: vel += DirVec(lookPoint, chunk.pos) * sin(PI * pow(t,2)) * 0.1
                 Vec3d repulse = dirVec(goalPos, c.pos);
-                double repulseStr = Math.sin(Math.PI * Math.pow(t, 2.0)) * 0.005;
+                double repulseStr = Math.sin(Math.PI * Math.pow(t, 2.0)) * 0.008;
                 c.vel = c.vel.add(repulse.multiply(repulseStr));
 
-                // Chain stiffness (C#: vel += DirVec(prev-2, chunk) * 0.2, both ways)
+                // Chain stiffness (C#: vel += DirVec(prev-2, chunk) * 0.2, both ways → /20)
                 if (i > 1) {
                     Vec3d stiffDir = dirVec(chunks[i - 2].pos, c.pos);
-                    c.vel = c.vel.add(stiffDir.multiply(0.01));
-                    chunks[i - 2].vel = chunks[i - 2].vel.subtract(stiffDir.multiply(0.01));
+                    c.vel = c.vel.add(stiffDir.multiply(0.015));
+                    chunks[i - 2].vel = chunks[i - 2].vel.subtract(stiffDir.multiply(0.015));
                 }
             }
         }
