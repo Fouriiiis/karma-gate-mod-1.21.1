@@ -307,21 +307,25 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
                 .subtract(headFrame.right.multiply(eyeSide))
                 .add(headFrame.up.multiply(eyeUp));
 
-        emitOrientedBox(
-                vc, matrix,
-                leftEye,
-                headFrame.right, headFrame.up, headFrame.tangent,
-                eyeSize * 0.5f, eyeSize * 0.5f, eyeSize * 0.5f,
-                EYE_R, EYE_G, EYE_B, EYE_A, fullLight
-        );
+        int eyeR = entity.isShowAngry() ? 255 : 255;
+int eyeG = entity.isShowAngry() ? 0 : 255;
+int eyeB = entity.isShowAngry() ? 0 : 255;
 
-        emitOrientedBox(
-                vc, matrix,
-                rightEye,
-                headFrame.right, headFrame.up, headFrame.tangent,
-                eyeSize * 0.5f, eyeSize * 0.5f, eyeSize * 0.5f,
-                EYE_R, EYE_G, EYE_B, EYE_A, fullLight
-        );
+emitOrientedBox(
+        vc, matrix,
+        leftEye,
+        headFrame.right, headFrame.up, headFrame.tangent,
+        eyeSize * 0.5f, eyeSize * 0.5f, eyeSize * 0.5f,
+        eyeR, eyeG, eyeB, EYE_A, fullLight
+);
+
+emitOrientedBox(
+        vc, matrix,
+        rightEye,
+        headFrame.right, headFrame.up, headFrame.tangent,
+        eyeSize * 0.5f, eyeSize * 0.5f, eyeSize * 0.5f,
+        eyeR, eyeG, eyeB, EYE_A, fullLight
+);
 
         ItemStack stolen = entity.getStolenDisplayStack();
         if (!stolen.isEmpty()) {

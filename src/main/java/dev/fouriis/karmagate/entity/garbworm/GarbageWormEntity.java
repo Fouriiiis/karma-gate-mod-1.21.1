@@ -5,6 +5,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.entity.attribute.DefaultAttributeContainer;
 import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.data.DataTracker;
@@ -16,6 +17,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
@@ -25,6 +27,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Garbage Worm entity — Rain World faithful port.
@@ -37,6 +40,10 @@ import java.util.List;
  * - visual head aim uses the target's actual eye position
  * - if a player is holding an item, the worm will attempt to steal it
  * - stolen item is rendered on the head briefly while the worm retracts
+ * - worms cannot be damaged by weapons / normal attacks
+ * - hitting one alerts nearby worms and makes them hostile
+ * - hostile worms grab players and either fling them or drag/hold them underwater
+ * - /kill still removes them
  */
 public class GarbageWormEntity extends MobEntity {
 
@@ -97,6 +104,25 @@ public class GarbageWormEntity extends MobEntity {
     private static final double STEAL_REACH = 1.85;
     private static final int STOLEN_DISPLAY_TICKS = 40;
 
+    /** Hostility / harassment behavior. */
+    private static final double ALERT_RADIUS = 18.0;
+    private static final int HOSTILE_TICKS = 20 * 20;
+    private static final double HOSTILE_GRAB_REACH = 1.65;
+
+    /** Fling = grab, swing, then release with velocity. */
+    private static final int FLING_WINDUP_TICKS = 10;
+    private static final int FLING_SWING_TICKS = 10;
+    private static final double FLING_SWING_RADIUS = 2.4;
+    private static final double FLING_THROW_SPEED = 1.55;
+    private static final double FLING_THROW_UP_SPEED = 0.95;
+
+    /** Drown = grab, drag to nearby water, hold victim below surface. */
+    private static final int DROWN_HOLD_TICKS = 70;
+    private static final double DROWN_SEARCH_RADIUS = 10.0;
+    private static final double DROWN_PULL_STRENGTH = 0.34;
+    private static final double DROWN_VEL_CAP = 0.52;
+    private static final double DROWN_SUBMERGE_DEPTH = 0.35;
+
     // ── Server-side state ──────────────────────────────────────────────
     private Vec3d rootPos = Vec3d.ZERO;
     private float extended = 1f;
@@ -105,16 +131,10 @@ public class GarbageWormEntity extends MobEntity {
     private float stress = 0f;
     private boolean showAsAngry = false;
 
-    /**
-     * Tracked and exposed to renderer.
-     * This is the point the head should visually look at.
-     */
+    /** Tracked and exposed to renderer. */
     private Vec3d lookPoint = Vec3d.ZERO;
 
-    /**
-     * Server-side movement goal for the actual head position.
-     * This lets the worm hover around a target while still visually looking directly at it.
-     */
+    /** Actual movement goal for the head. */
     private Vec3d movementPoint = Vec3d.ZERO;
 
     /** True while the worm is actively closing distance to steal from a player. */
@@ -153,6 +173,23 @@ public class GarbageWormEntity extends MobEntity {
     /** Render-only stolen item state, synced to client. */
     private ItemStack stolenDisplayStack = ItemStack.EMPTY;
     private int stolenDisplayTicks = 0;
+
+    /** Hostility state. */
+    private UUID hostileTargetUuid;
+    private int hostileTicks = 0;
+    private LivingEntity hostileTarget;
+
+    /** Grab state. */
+    private LivingEntity grabbedTarget;
+    private int grabTicks = 0;
+    private HarassMode harassMode = HarassMode.FLING;
+    private Vec3d drownAnchor = Vec3d.ZERO;
+    private float flingYawOffset = 0f;
+
+    private enum HarassMode {
+        FLING,
+        DROWN
+    }
 
     public static DefaultAttributeContainer.Builder createAttributes() {
         return MobEntity.createMobAttributes()
@@ -213,6 +250,17 @@ public class GarbageWormEntity extends MobEntity {
         return false;
     }
 
+    @Override
+    public boolean damage(DamageSource source, float amount) {
+        Entity attacker = source.getAttacker();
+        if (!(attacker instanceof LivingEntity living)) {
+            return super.damage(source, amount);
+        }
+
+        alertNearbyWorms(living);
+        return false;
+    }
+
     private void serverTick() {
         if (!initialized) {
             initialize();
@@ -227,6 +275,23 @@ public class GarbageWormEntity extends MobEntity {
             }
         }
 
+        if (hostileTicks > 0) {
+            hostileTicks--;
+        } else {
+            hostileTarget = null;
+            hostileTargetUuid = null;
+        }
+
+        if (hostileTarget != null && !hostileTarget.isAlive()) {
+            hostileTarget = null;
+            hostileTargetUuid = null;
+            hostileTicks = 0;
+        }
+
+        if (grabbedTarget != null && !grabbedTarget.isAlive()) {
+            releaseGrabbedTarget();
+        }
+
         extended += retractSpeed;
         extended = MathHelper.clamp(extended, 0f, 1f);
         boolean currentlyExtended = extended > 0f;
@@ -234,6 +299,7 @@ public class GarbageWormEntity extends MobEntity {
         if (extended == 0f && lastExtended) {
             setPosition(rootPos.x, rootPos.y - 2.0, rootPos.z);
             headVel = Vec3d.ZERO;
+            releaseGrabbedTarget();
         }
 
         lastExtended = currentlyExtended;
@@ -248,6 +314,8 @@ public class GarbageWormEntity extends MobEntity {
             stealingItem = false;
             suckingBlock = false;
             suckTimer = 0;
+            releaseGrabbedTarget();
+
             if (retractCounter > 0) {
                 retractCounter--;
                 comeBackOutCounter = 0;
@@ -265,18 +333,17 @@ public class GarbageWormEntity extends MobEntity {
         if (debugLogTimer >= 60) {
             debugLogTimer = 0;
             String state = extended > 0f ? (retractSpeed >= 0 ? "EXTENDING" : "RETRACTING") : "RETRACTED";
-            LOGGER.info("[GarbageWorm id={}] state={} extended={} retractSpeed={} stress={} retractCounter={} comeBackOutCounter={} gracePeriod={} attackCounter={} suckingBlock={} stealingItem={} stolen={} rootPos=({},{},{}) headPos=({},{},{}) movePoint=({},{},{}) lookPoint=({},{},{})",
-                    getId(), state,
+            LOGGER.info("[GarbageWorm id={}] state={} extended={} hostileTicks={} stealingItem={} grabbed={} harassMode={} lookPoint=({},{},{})",
+                    getId(),
+                    state,
                     String.format("%.3f", extended),
-                    String.format("%.4f", retractSpeed),
-                    String.format("%.3f", stress),
-                    retractCounter, comeBackOutCounter,
-                    gracePeriod, attackCounter, suckingBlock, stealingItem,
-                    !stolenDisplayStack.isEmpty(),
-                    String.format("%.1f", rootPos.x), String.format("%.1f", rootPos.y), String.format("%.1f", rootPos.z),
-                    String.format("%.1f", getX()), String.format("%.1f", getY()), String.format("%.1f", getZ()),
-                    String.format("%.1f", movementPoint.x), String.format("%.1f", movementPoint.y), String.format("%.1f", movementPoint.z),
-                    String.format("%.1f", lookPoint.x), String.format("%.1f", lookPoint.y), String.format("%.1f", lookPoint.z));
+                    hostileTicks,
+                    stealingItem,
+                    grabbedTarget != null,
+                    harassMode,
+                    String.format("%.1f", lookPoint.x),
+                    String.format("%.1f", lookPoint.y),
+                    String.format("%.1f", lookPoint.z));
         }
     }
 
@@ -371,6 +438,10 @@ public class GarbageWormEntity extends MobEntity {
         stealingItem = false;
         watchPhase += 0.08f;
 
+        if (handleHostileBehavior()) {
+            return;
+        }
+
         if (attackCounter > 0) {
             attackCounter++;
             if (attackCounter > 180) {
@@ -425,7 +496,6 @@ public class GarbageWormEntity extends MobEntity {
                     return;
                 }
             } else {
-                stealingItem = false;
                 movementPoint = computeWatchPoint(bestInterest);
                 lookPoint = bestInterest.getEyePos();
                 searchCounter = 0;
@@ -451,9 +521,6 @@ public class GarbageWormEntity extends MobEntity {
                 retractCounter = 0;
             }
 
-            if (getAttacker() != null && getAttacker() == bestInterest) {
-                showAsAngry = true;
-            }
             return;
         }
 
@@ -491,6 +558,220 @@ public class GarbageWormEntity extends MobEntity {
         }
     }
 
+    private boolean handleHostileBehavior() {
+        if (hostileTicks <= 0 || hostileTarget == null || !hostileTarget.isAlive()) {
+            if (grabbedTarget != null) {
+                releaseGrabbedTarget();
+            }
+            return false;
+        }
+
+        showAsAngry = true;
+        watchedTarget = hostileTarget;
+        suckingBlock = false;
+        suckTimer = 0;
+
+        if (grabbedTarget != null) {
+            return updateGrabBehavior();
+        }
+
+        lookPoint = hostileTarget.getEyePos();
+        movementPoint = hostileTarget.getEyePos();
+
+        if (getPos().distanceTo(hostileTarget.getEyePos()) <= HOSTILE_GRAB_REACH) {
+            startGrab(hostileTarget);
+            return true;
+        }
+
+        return true;
+    }
+
+    private void startGrab(LivingEntity target) {
+        grabbedTarget = target;
+        grabTicks = 0;
+        lookPoint = target.getEyePos();
+        movementPoint = target.getEyePos();
+
+        Vec3d waterAnchor = findNearbyWaterAnchor();
+        if (waterAnchor != null && random.nextBoolean()) {
+            harassMode = HarassMode.DROWN;
+            drownAnchor = waterAnchor;
+        } else {
+            harassMode = HarassMode.FLING;
+            drownAnchor = Vec3d.ZERO;
+            flingYawOffset = random.nextBoolean() ? -1.35f : 1.35f;
+        }
+    }
+
+    private boolean updateGrabBehavior() {
+        if (grabbedTarget == null || !grabbedTarget.isAlive()) {
+            releaseGrabbedTarget();
+            return false;
+        }
+
+        showAsAngry = true;
+        lookPoint = grabbedTarget.getEyePos();
+        grabTicks++;
+
+        if (harassMode == HarassMode.FLING) {
+            Vec3d rootToTarget = grabbedTarget.getPos().subtract(rootPos);
+            Vec3d horizontal = new Vec3d(rootToTarget.x, 0.0, rootToTarget.z);
+
+            Vec3d baseDir;
+            if (horizontal.lengthSquared() < 1.0e-6) {
+                baseDir = new Vec3d(1, 0, 0);
+            } else {
+                baseDir = horizontal.normalize();
+            }
+
+            if (grabTicks <= FLING_WINDUP_TICKS) {
+                Vec3d pullPoint = rootPos.add(0.0, 1.2, 0.0);
+                movementPoint = pullPoint;
+                pullEntityToward(grabbedTarget, getPos(), 0.42, 0.90);
+                return true;
+            }
+
+            float swingT = MathHelper.clamp(
+                    (float) (grabTicks - FLING_WINDUP_TICKS) / (float) FLING_SWING_TICKS,
+                    0f,
+                    1f
+            );
+
+            float yaw = (float) Math.atan2(baseDir.z, baseDir.x) + flingYawOffset * swingT;
+            Vec3d arcDir = new Vec3d(Math.cos(yaw), 0.0, Math.sin(yaw));
+            Vec3d swingPos = rootPos
+                    .add(arcDir.multiply(FLING_SWING_RADIUS))
+                    .add(0.0, 1.4 + Math.sin(swingT * Math.PI) * 1.1, 0.0);
+
+            movementPoint = swingPos;
+            pullEntityToward(grabbedTarget, swingPos, 0.46, 1.05);
+
+            if (grabTicks >= FLING_WINDUP_TICKS + FLING_SWING_TICKS) {
+                Vec3d throwDir = swingPos.subtract(rootPos);
+                if (throwDir.lengthSquared() < 1.0e-6) {
+                    throwDir = arcDir;
+                } else {
+                    throwDir = new Vec3d(throwDir.x, 0.0, throwDir.z).normalize();
+                }
+
+                Vec3d throwVel = throwDir.multiply(FLING_THROW_SPEED).add(0.0, FLING_THROW_UP_SPEED, 0.0);
+                grabbedTarget.setVelocity(throwVel);
+                grabbedTarget.velocityModified = true;
+                releaseGrabbedTarget();
+            }
+            return true;
+        }
+
+        if (harassMode == HarassMode.DROWN) {
+            Vec3d anchor = drownAnchor.lengthSquared() > 1.0e-6 ? drownAnchor : rootPos.add(0, -1.0, 0);
+
+            movementPoint = anchor.add(0.0, 0.45, 0.0);
+
+            Vec3d submergedPoint = new Vec3d(
+                    anchor.x,
+                    anchor.y - DROWN_SUBMERGE_DEPTH,
+                    anchor.z
+            );
+
+            pullEntityToward(grabbedTarget, submergedPoint, DROWN_PULL_STRENGTH, DROWN_VEL_CAP);
+
+            Vec3d v = grabbedTarget.getVelocity();
+            grabbedTarget.setVelocity(v.x * 0.85, Math.min(v.y, -0.08), v.z * 0.85);
+            grabbedTarget.velocityModified = true;
+
+            if (grabTicks >= DROWN_HOLD_TICKS) {
+                releaseGrabbedTarget();
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    private void releaseGrabbedTarget() {
+        grabbedTarget = null;
+        grabTicks = 0;
+        drownAnchor = Vec3d.ZERO;
+        flingYawOffset = 0f;
+    }
+
+    private void pullEntityToward(LivingEntity target, Vec3d anchor, double strength, double cap) {
+        Vec3d toAnchor = anchor.subtract(target.getPos());
+        if (toAnchor.lengthSquared() > 1.0e-6) {
+            Vec3d vel = target.getVelocity().multiply(0.72).add(toAnchor.normalize().multiply(strength));
+            if (vel.length() > cap) {
+                vel = vel.normalize().multiply(cap);
+            }
+            target.setVelocity(vel);
+            target.velocityModified = true;
+        }
+    }
+
+    private Vec3d findNearbyWaterAnchor() {
+        BlockPos center = BlockPos.ofFloored(rootPos);
+        int r = (int) Math.ceil(DROWN_SEARCH_RADIUS);
+
+        Vec3d best = null;
+        double bestDistSq = Double.MAX_VALUE;
+
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dz = -r; dz <= r; dz++) {
+                for (int dy = 4; dy >= -6; dy--) {
+                    BlockPos pos = center.add(dx, dy, dz);
+                    BlockState state = getWorld().getBlockState(pos);
+                    if (!state.isOf(Blocks.WATER)) {
+                        continue;
+                    }
+
+                    if (!getWorld().getBlockState(pos.up()).isAir() && !getWorld().getBlockState(pos.up()).isOf(Blocks.WATER)) {
+                        continue;
+                    }
+
+                    Vec3d surface = new Vec3d(pos.getX() + 0.5, pos.getY() + 0.9, pos.getZ() + 0.5);
+                    double distSq = rootPos.squaredDistanceTo(surface);
+                    if (distSq < bestDistSq) {
+                        bestDistSq = distSq;
+                        best = surface;
+                    }
+                }
+            }
+        }
+
+        return best;
+    }
+
+    private void alertNearbyWorms(LivingEntity attacker) {
+        Box box = new Box(rootPos, rootPos).expand(ALERT_RADIUS);
+        List<GarbageWormEntity> worms = getWorld().getEntitiesByClass(
+                GarbageWormEntity.class,
+                box,
+                e -> e.isAlive()
+        );
+
+        for (GarbageWormEntity worm : worms) {
+            worm.becomeHostileTo(attacker);
+        }
+    }
+
+    public void becomeHostileTo(LivingEntity target) {
+        hostileTarget = target;
+        hostileTargetUuid = target.getUuid();
+        hostileTicks = HOSTILE_TICKS;
+
+        showAsAngry = true;
+        watchedTarget = target;
+        stealingItem = false;
+        suckingBlock = false;
+        suckTimer = 0;
+
+        if (grabbedTarget != null && grabbedTarget != target) {
+            releaseGrabbedTarget();
+        }
+
+        lookPoint = target.getEyePos();
+        movementPoint = target.getEyePos();
+    }
+
     private boolean canStealFrom(PlayerEntity player) {
         return !player.getMainHandStack().isEmpty() || !player.getOffHandStack().isEmpty();
     }
@@ -523,7 +804,6 @@ public class GarbageWormEntity extends MobEntity {
         stolenDisplayStack = stolenCopy;
         stolenDisplayTicks = STOLEN_DISPLAY_TICKS;
 
-        showAsAngry = true;
         watchedTarget = null;
         stealingItem = false;
         suckingBlock = false;
@@ -835,7 +1115,7 @@ public class GarbageWormEntity extends MobEntity {
                         headVel = headVel.add(0.0, -0.01 + 0.02 * Math.sin((age + suckTimer) * 0.6), 0.0);
                     }
                 }
-            } else if (!stealingItem && watchedTarget != null && watchedTarget.isAlive()) {
+            } else if (!stealingItem && hostileTarget == null && watchedTarget != null && watchedTarget.isAlive()) {
                 Vec3d targetPos = watchedTarget.getEyePos();
                 Vec3d fromTarget = headPos.subtract(targetPos);
                 double actualDist = fromTarget.length();
@@ -866,8 +1146,8 @@ public class GarbageWormEntity extends MobEntity {
 
         double speed = headVel.length();
         double speedCap = attackCounter > 0 ? 0.8 : (suckingBlock ? 0.38 : 0.5);
-        if (stealingItem) {
-            speedCap = 0.65;
+        if (stealingItem || hostileTarget != null) {
+            speedCap = 0.68;
         }
         if (speed > speedCap) {
             headVel = headVel.multiply(speedCap / speed);
@@ -926,6 +1206,10 @@ public class GarbageWormEntity extends MobEntity {
         lookPoint = rootPos.add(0, TENTACLE_LENGTH * bodySize * 0.4, 0);
         movementPoint = lookPoint;
         stealingItem = false;
+        hostileTarget = null;
+        hostileTargetUuid = null;
+        hostileTicks = 0;
+        releaseGrabbedTarget();
         setPosition(rootPos.x, rootPos.y + 0.5, rootPos.z);
         headVel = new Vec3d(0, 0.15, 0);
         stopSucking();
@@ -975,6 +1259,12 @@ public class GarbageWormEntity extends MobEntity {
         nbt.putDouble("MoveY", movementPoint.y);
         nbt.putDouble("MoveZ", movementPoint.z);
         nbt.putInt("StolenDisplayTicks", stolenDisplayTicks);
+        nbt.putInt("HostileTicks", hostileTicks);
+        nbt.putInt("GrabTicks", grabTicks);
+        nbt.putString("HarassMode", harassMode.name());
+        if (hostileTargetUuid != null) {
+            nbt.putUuid("HostileTarget", hostileTargetUuid);
+        }
         if (!stolenDisplayStack.isEmpty()) {
             nbt.put("StolenDisplayStack", stolenDisplayStack.encodeAllowEmpty(getRegistryManager()));
         }
@@ -982,6 +1272,11 @@ public class GarbageWormEntity extends MobEntity {
             nbt.putInt("SuckX", suckBlockPos.getX());
             nbt.putInt("SuckY", suckBlockPos.getY());
             nbt.putInt("SuckZ", suckBlockPos.getZ());
+        }
+        if (drownAnchor.lengthSquared() > 1.0e-6) {
+            nbt.putDouble("DrownX", drownAnchor.x);
+            nbt.putDouble("DrownY", drownAnchor.y);
+            nbt.putDouble("DrownZ", drownAnchor.z);
         }
     }
 
@@ -1009,12 +1304,31 @@ public class GarbageWormEntity extends MobEntity {
         if (nbt.contains("StolenDisplayTicks")) {
             stolenDisplayTicks = nbt.getInt("StolenDisplayTicks");
         }
+        if (nbt.contains("HostileTicks")) {
+            hostileTicks = nbt.getInt("HostileTicks");
+        }
+        if (nbt.containsUuid("HostileTarget")) {
+            hostileTargetUuid = nbt.getUuid("HostileTarget");
+        }
+        if (nbt.contains("GrabTicks")) {
+            grabTicks = nbt.getInt("GrabTicks");
+        }
+        if (nbt.contains("HarassMode")) {
+            try {
+                harassMode = HarassMode.valueOf(nbt.getString("HarassMode"));
+            } catch (IllegalArgumentException ignored) {
+                harassMode = HarassMode.FLING;
+            }
+        }
         if (nbt.contains("StolenDisplayStack")) {
             stolenDisplayStack = ItemStack.fromNbtOrEmpty(getRegistryManager(), nbt.getCompound("StolenDisplayStack"));
         }
         if (nbt.contains("SuckX")) {
             suckBlockPos = new BlockPos(nbt.getInt("SuckX"), nbt.getInt("SuckY"), nbt.getInt("SuckZ"));
             suckSurfacePos = new Vec3d(suckBlockPos.getX() + 0.5, suckBlockPos.getY() + 1.0 + SUCK_SURFACE_OFFSET, suckBlockPos.getZ() + 0.5);
+        }
+        if (nbt.contains("DrownX")) {
+            drownAnchor = new Vec3d(nbt.getDouble("DrownX"), nbt.getDouble("DrownY"), nbt.getDouble("DrownZ"));
         }
     }
 
