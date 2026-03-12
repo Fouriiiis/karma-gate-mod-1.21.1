@@ -10,9 +10,13 @@ import net.minecraft.client.render.VertexConsumer;
 import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.render.entity.EntityRenderer;
 import net.minecraft.client.render.entity.EntityRendererFactory;
+import net.minecraft.client.render.item.ItemRenderer;
+import net.minecraft.client.render.model.json.ModelTransformationMode;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.item.ItemStack;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.RotationAxis;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Matrix4f;
 
@@ -39,8 +43,10 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
     private static final float ENTITY_TENTACLE_LENGTH = 16.0f;
 
     /** Keep a wide neck limit, but do not persist head aim state. */
-private static final float HEAD_CONE_HALF_ANGLE_RADIANS = (float) (Math.PI * 0.5);
+    private static final float HEAD_CONE_HALF_ANGLE_RADIANS = (float) (Math.PI * 0.5);
+
     private final Map<Integer, WormAnimState> animStates = new HashMap<>();
+    private final ItemRenderer itemRenderer;
 
     private static class WormAnimState {
         float sinWave = 0f;
@@ -89,6 +95,7 @@ private static final float HEAD_CONE_HALF_ANGLE_RADIANS = (float) (Math.PI * 0.5
 
     public GarbageWormRenderer(EntityRendererFactory.Context context) {
         super(context);
+        this.itemRenderer = context.getItemRenderer();
     }
 
     @Override
@@ -111,7 +118,7 @@ private static final float HEAD_CONE_HALF_ANGLE_RADIANS = (float) (Math.PI * 0.5
         int atkCtr = entity.getAttackCtr();
         float bodySize = entity.getBodySizeValue();
 
-        if (ext <= 0f) {
+        if (ext <= 0f && entity.getStolenDisplayStack().isEmpty()) {
             return;
         }
 
@@ -254,8 +261,8 @@ private static final float HEAD_CONE_HALF_ANGLE_RADIANS = (float) (Math.PI * 0.5
 
         Vec3d[][] rings = new Vec3d[bodyCenters.length][];
         for (int i = 0; i < bodyCenters.length; i++) {
-float halfWidth = bodyRadii[i] * 0.82f;
-float halfHeight = Math.max(0.02f, bodyRadii[i] * 0.74f);
+            float halfWidth = bodyRadii[i] * 0.82f;
+            float halfHeight = Math.max(0.02f, bodyRadii[i] * 0.74f);
             rings[i] = buildSquareRing(bodyCenters[i], bodyFrames[i], halfWidth, halfHeight);
         }
 
@@ -269,7 +276,7 @@ float halfHeight = Math.max(0.02f, bodyRadii[i] * 0.74f);
         Vec3d headCenter = bodyCenters[bodyCenters.length - 1];
         Frame bodyTipFrame = bodyFrames[bodyFrames.length - 1];
 
-Frame headFrame = buildDirectHeadFrame(headCR, lookPointCR, bodyTipFrame);
+        Frame headFrame = buildDirectHeadFrame(headCR, lookPointCR, bodyTipFrame);
         float tipBodyWidth = bodyRadii[bodyRadii.length - 1];
 
         float headHalfW = tipBodyWidth * 1.25f;
@@ -286,21 +293,19 @@ Frame headFrame = buildDirectHeadFrame(headCR, lookPointCR, bodyTipFrame);
         );
 
         float eyeSize = tipBodyWidth * 1.15f;
+        float eyeForward = headHalfD * 0.45f;
+        float eyeSide = headHalfW * 1.02f;
+        float eyeUp = 0.0f;
 
-// On the side faces, but only in the forward quarter of the head
-float eyeForward = headHalfD * 0.45f;
-float eyeSide = headHalfW * 1.02f;
-float eyeUp = 0.0f;
+        Vec3d leftEye = headBoxCenter
+                .add(headFrame.tangent.multiply(eyeForward))
+                .add(headFrame.right.multiply(eyeSide))
+                .add(headFrame.up.multiply(eyeUp));
 
-Vec3d leftEye = headBoxCenter
-        .add(headFrame.tangent.multiply(eyeForward))
-        .add(headFrame.right.multiply(eyeSide))
-        .add(headFrame.up.multiply(eyeUp));
-
-Vec3d rightEye = headBoxCenter
-        .add(headFrame.tangent.multiply(eyeForward))
-        .subtract(headFrame.right.multiply(eyeSide))
-        .add(headFrame.up.multiply(eyeUp));
+        Vec3d rightEye = headBoxCenter
+                .add(headFrame.tangent.multiply(eyeForward))
+                .subtract(headFrame.right.multiply(eyeSide))
+                .add(headFrame.up.multiply(eyeUp));
 
         emitOrientedBox(
                 vc, matrix,
@@ -317,6 +322,34 @@ Vec3d rightEye = headBoxCenter
                 eyeSize * 0.5f, eyeSize * 0.5f, eyeSize * 0.5f,
                 EYE_R, EYE_G, EYE_B, EYE_A, fullLight
         );
+
+        ItemStack stolen = entity.getStolenDisplayStack();
+        if (!stolen.isEmpty()) {
+            Vec3d itemPos = headBoxCenter
+                    .add(headFrame.tangent.multiply(headHalfD * 0.15f))
+                    .add(headFrame.up.multiply(headHalfH * 0.20f));
+
+            float headYaw = (float) Math.atan2(headFrame.tangent.x, headFrame.tangent.z);
+            float headPitch = (float) -Math.asin(MathHelper.clamp((float) headFrame.tangent.y, -1f, 1f));
+
+            matrices.push();
+            matrices.translate(itemPos.x, itemPos.y, itemPos.z);
+            matrices.multiply(RotationAxis.POSITIVE_Y.rotation(headYaw));
+            matrices.multiply(RotationAxis.POSITIVE_X.rotation(headPitch));
+            matrices.scale(0.65f, 0.65f, 0.65f);
+
+            itemRenderer.renderItem(
+                    stolen,
+                    ModelTransformationMode.FIXED,
+                    fullLight,
+                    OverlayTexture.DEFAULT_UV,
+                    matrices,
+                    consumers,
+                    entity.getWorld(),
+                    entity.getId()
+            );
+            matrices.pop();
+        }
 
         matrices.pop();
         super.render(entity, yaw, tickDelta, matrices, consumers, light);

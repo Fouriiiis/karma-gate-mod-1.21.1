@@ -12,7 +12,9 @@ import net.minecraft.entity.data.TrackedData;
 import net.minecraft.entity.data.TrackedDataHandlerRegistry;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
@@ -33,6 +35,8 @@ import java.util.List;
  * Patched so:
  * - movement uses a hover/watch point around the target
  * - visual head aim uses the target's actual eye position
+ * - if a player is holding an item, the worm will attempt to steal it
+ * - stolen item is rendered on the head briefly while the worm retracts
  */
 public class GarbageWormEntity extends MobEntity {
 
@@ -50,6 +54,7 @@ public class GarbageWormEntity extends MobEntity {
     private static final TrackedData<Float> LOOK_Z = DataTracker.registerData(GarbageWormEntity.class, TrackedDataHandlerRegistry.FLOAT);
     private static final TrackedData<Integer> ATTACK_CTR = DataTracker.registerData(GarbageWormEntity.class, TrackedDataHandlerRegistry.INTEGER);
     private static final TrackedData<Float> BODY_SIZE_DATA = DataTracker.registerData(GarbageWormEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<ItemStack> STOLEN_STACK = DataTracker.registerData(GarbageWormEntity.class, TrackedDataHandlerRegistry.ITEM_STACK);
 
     // ── Constants ──────────────────────────────────────────────────────
     private static final float TENTACLE_LENGTH = 16.0f;
@@ -88,6 +93,10 @@ public class GarbageWormEntity extends MobEntity {
     private static final double SUCK_SURFACE_OFFSET = 0.18;
     private static final double SUCK_REACH = 1.15;
 
+    /** Theft behavior. */
+    private static final double STEAL_REACH = 1.85;
+    private static final int STOLEN_DISPLAY_TICKS = 40;
+
     // ── Server-side state ──────────────────────────────────────────────
     private Vec3d rootPos = Vec3d.ZERO;
     private float extended = 1f;
@@ -107,6 +116,9 @@ public class GarbageWormEntity extends MobEntity {
      * This lets the worm hover around a target while still visually looking directly at it.
      */
     private Vec3d movementPoint = Vec3d.ZERO;
+
+    /** True while the worm is actively closing distance to steal from a player. */
+    private boolean stealingItem = false;
 
     private int attackCounter = 0;
     private int searchCounter = 0;
@@ -137,6 +149,10 @@ public class GarbageWormEntity extends MobEntity {
     private int suckTimer = 0;
     private int nextSuckAttempt = SUCK_PICK_MIN_TICKS;
     private boolean suckingBlock = false;
+
+    /** Render-only stolen item state, synced to client. */
+    private ItemStack stolenDisplayStack = ItemStack.EMPTY;
+    private int stolenDisplayTicks = 0;
 
     public static DefaultAttributeContainer.Builder createAttributes() {
         return MobEntity.createMobAttributes()
@@ -170,6 +186,7 @@ public class GarbageWormEntity extends MobEntity {
         builder.add(LOOK_Z, 0f);
         builder.add(ATTACK_CTR, 0);
         builder.add(BODY_SIZE_DATA, 1f);
+        builder.add(STOLEN_STACK, ItemStack.EMPTY);
     }
 
     @Override
@@ -202,6 +219,14 @@ public class GarbageWormEntity extends MobEntity {
             initialized = true;
         }
 
+        if (!stolenDisplayStack.isEmpty()) {
+            stolenDisplayTicks--;
+            if (stolenDisplayTicks <= 0 || extended <= 0f) {
+                stolenDisplayStack = ItemStack.EMPTY;
+                stolenDisplayTicks = 0;
+            }
+        }
+
         extended += retractSpeed;
         extended = MathHelper.clamp(extended, 0f, 1f);
         boolean currentlyExtended = extended > 0f;
@@ -220,6 +245,7 @@ public class GarbageWormEntity extends MobEntity {
             updateHeadMovement();
         } else {
             watchedTarget = null;
+            stealingItem = false;
             suckingBlock = false;
             suckTimer = 0;
             if (retractCounter > 0) {
@@ -239,13 +265,14 @@ public class GarbageWormEntity extends MobEntity {
         if (debugLogTimer >= 60) {
             debugLogTimer = 0;
             String state = extended > 0f ? (retractSpeed >= 0 ? "EXTENDING" : "RETRACTING") : "RETRACTED";
-            LOGGER.info("[GarbageWorm id={}] state={} extended={} retractSpeed={} stress={} retractCounter={} comeBackOutCounter={} gracePeriod={} attackCounter={} suckingBlock={} rootPos=({},{},{}) headPos=({},{},{}) movePoint=({},{},{}) lookPoint=({},{},{})",
+            LOGGER.info("[GarbageWorm id={}] state={} extended={} retractSpeed={} stress={} retractCounter={} comeBackOutCounter={} gracePeriod={} attackCounter={} suckingBlock={} stealingItem={} stolen={} rootPos=({},{},{}) headPos=({},{},{}) movePoint=({},{},{}) lookPoint=({},{},{})",
                     getId(), state,
                     String.format("%.3f", extended),
                     String.format("%.4f", retractSpeed),
                     String.format("%.3f", stress),
                     retractCounter, comeBackOutCounter,
-                    gracePeriod, attackCounter, suckingBlock,
+                    gracePeriod, attackCounter, suckingBlock, stealingItem,
+                    !stolenDisplayStack.isEmpty(),
                     String.format("%.1f", rootPos.x), String.format("%.1f", rootPos.y), String.format("%.1f", rootPos.z),
                     String.format("%.1f", getX()), String.format("%.1f", getY()), String.format("%.1f", getZ()),
                     String.format("%.1f", movementPoint.x), String.format("%.1f", movementPoint.y), String.format("%.1f", movementPoint.z),
@@ -341,6 +368,7 @@ public class GarbageWormEntity extends MobEntity {
     private void updateAI() {
         showAsAngry = false;
         watchedTarget = null;
+        stealingItem = false;
         watchPhase += 0.08f;
 
         if (attackCounter > 0) {
@@ -386,12 +414,22 @@ public class GarbageWormEntity extends MobEntity {
             suckingBlock = false;
             suckTimer = 0;
 
-            // Movement hovers around the target...
-            movementPoint = computeWatchPoint(bestInterest);
-            // ...but the head visually aims directly at the target.
-            lookPoint = bestInterest.getEyePos();
+            if (bestInterest instanceof PlayerEntity player && canStealFrom(player)) {
+                stealingItem = true;
+                movementPoint = player.getEyePos();
+                lookPoint = player.getEyePos();
+                searchCounter = 0;
 
-            searchCounter = 0;
+                if (getPos().distanceTo(player.getEyePos()) <= STEAL_REACH) {
+                    stealHeldItem(player);
+                    return;
+                }
+            } else {
+                stealingItem = false;
+                movementPoint = computeWatchPoint(bestInterest);
+                lookPoint = bestInterest.getEyePos();
+                searchCounter = 0;
+            }
 
             float threatDistFromRoot = (float) rootPos.distanceTo(bestInterest.getPos());
             float threatDistFromHead = (float) getPos().distanceTo(bestInterest.getEyePos());
@@ -451,6 +489,57 @@ public class GarbageWormEntity extends MobEntity {
                 searchCounter = 0;
             }
         }
+    }
+
+    private boolean canStealFrom(PlayerEntity player) {
+        return !player.getMainHandStack().isEmpty() || !player.getOffHandStack().isEmpty();
+    }
+
+    private void stealHeldItem(PlayerEntity player) {
+        Hand handToSteal;
+        ItemStack held;
+
+        if (!player.getMainHandStack().isEmpty() && !player.getOffHandStack().isEmpty()) {
+            if (random.nextBoolean()) {
+            handToSteal = Hand.MAIN_HAND;
+            held = player.getMainHandStack();
+            } else {
+            handToSteal = Hand.OFF_HAND;
+            held = player.getOffHandStack();
+            }
+        } else if (!player.getMainHandStack().isEmpty()) {
+            handToSteal = Hand.MAIN_HAND;
+            held = player.getMainHandStack();
+        } else if (!player.getOffHandStack().isEmpty()) {
+            handToSteal = Hand.OFF_HAND;
+            held = player.getOffHandStack();
+        } else {
+            return;
+        }
+
+        ItemStack stolenCopy = held.copy();
+        player.setStackInHand(handToSteal, ItemStack.EMPTY);
+
+        stolenDisplayStack = stolenCopy;
+        stolenDisplayTicks = STOLEN_DISPLAY_TICKS;
+
+        showAsAngry = true;
+        watchedTarget = null;
+        stealingItem = false;
+        suckingBlock = false;
+        attackCounter = 0;
+        retractCounter = 0;
+
+        movementPoint = getPos();
+        lookPoint = getPos();
+
+        LOGGER.info("[GarbageWorm id={}] stole item {} x{} from player {} and is retracting",
+                getId(),
+                stolenCopy.getItem(),
+                stolenCopy.getCount(),
+                player.getName().getString());
+
+        doRetract();
     }
 
     private double interestScore(LivingEntity entity, double dist) {
@@ -746,7 +835,7 @@ public class GarbageWormEntity extends MobEntity {
                         headVel = headVel.add(0.0, -0.01 + 0.02 * Math.sin((age + suckTimer) * 0.6), 0.0);
                     }
                 }
-            } else if (watchedTarget != null && watchedTarget.isAlive()) {
+            } else if (!stealingItem && watchedTarget != null && watchedTarget.isAlive()) {
                 Vec3d targetPos = watchedTarget.getEyePos();
                 Vec3d fromTarget = headPos.subtract(targetPos);
                 double actualDist = fromTarget.length();
@@ -777,6 +866,9 @@ public class GarbageWormEntity extends MobEntity {
 
         double speed = headVel.length();
         double speedCap = attackCounter > 0 ? 0.8 : (suckingBlock ? 0.38 : 0.5);
+        if (stealingItem) {
+            speedCap = 0.65;
+        }
         if (speed > speedCap) {
             headVel = headVel.multiply(speedCap / speed);
         }
@@ -833,6 +925,7 @@ public class GarbageWormEntity extends MobEntity {
         retractCounter = 0;
         lookPoint = rootPos.add(0, TENTACLE_LENGTH * bodySize * 0.4, 0);
         movementPoint = lookPoint;
+        stealingItem = false;
         setPosition(rootPos.x, rootPos.y + 0.5, rootPos.z);
         headVel = new Vec3d(0, 0.15, 0);
         stopSucking();
@@ -850,6 +943,7 @@ public class GarbageWormEntity extends MobEntity {
         dataTracker.set(LOOK_Z, (float) lookPoint.z);
         dataTracker.set(ATTACK_CTR, attackCounter);
         dataTracker.set(BODY_SIZE_DATA, bodySize);
+        dataTracker.set(STOLEN_STACK, stolenDisplayStack);
     }
 
     public Vec3d getRootPos() { return new Vec3d(dataTracker.get(ROOT_X), dataTracker.get(ROOT_Y), dataTracker.get(ROOT_Z)); }
@@ -859,6 +953,7 @@ public class GarbageWormEntity extends MobEntity {
     public Vec3d getLookPoint() { return new Vec3d(dataTracker.get(LOOK_X), dataTracker.get(LOOK_Y), dataTracker.get(LOOK_Z)); }
     public int getAttackCtr() { return dataTracker.get(ATTACK_CTR); }
     public float getBodySizeValue() { return dataTracker.get(BODY_SIZE_DATA); }
+    public ItemStack getStolenDisplayStack() { return dataTracker.get(STOLEN_STACK); }
 
     @Override
     public void writeCustomDataToNbt(NbtCompound nbt) {
@@ -874,10 +969,15 @@ public class GarbageWormEntity extends MobEntity {
         nbt.putFloat("WatchPhase", watchPhase);
         nbt.putInt("NextSuckAttempt", nextSuckAttempt);
         nbt.putBoolean("SuckingBlock", suckingBlock);
+        nbt.putBoolean("StealingItem", stealingItem);
         nbt.putInt("SuckTimer", suckTimer);
         nbt.putDouble("MoveX", movementPoint.x);
         nbt.putDouble("MoveY", movementPoint.y);
         nbt.putDouble("MoveZ", movementPoint.z);
+        nbt.putInt("StolenDisplayTicks", stolenDisplayTicks);
+        if (!stolenDisplayStack.isEmpty()) {
+            nbt.put("StolenDisplayStack", stolenDisplayStack.encodeAllowEmpty(getRegistryManager()));
+        }
         if (suckBlockPos != null) {
             nbt.putInt("SuckX", suckBlockPos.getX());
             nbt.putInt("SuckY", suckBlockPos.getY());
@@ -899,11 +999,18 @@ public class GarbageWormEntity extends MobEntity {
         if (nbt.contains("WatchPhase")) watchPhase = nbt.getFloat("WatchPhase");
         if (nbt.contains("NextSuckAttempt")) nextSuckAttempt = nbt.getInt("NextSuckAttempt");
         if (nbt.contains("SuckingBlock")) suckingBlock = nbt.getBoolean("SuckingBlock");
+        if (nbt.contains("StealingItem")) stealingItem = nbt.getBoolean("StealingItem");
         if (nbt.contains("SuckTimer")) suckTimer = nbt.getInt("SuckTimer");
         if (nbt.contains("MoveX")) {
             movementPoint = new Vec3d(nbt.getDouble("MoveX"), nbt.getDouble("MoveY"), nbt.getDouble("MoveZ"));
         } else {
             movementPoint = lookPoint;
+        }
+        if (nbt.contains("StolenDisplayTicks")) {
+            stolenDisplayTicks = nbt.getInt("StolenDisplayTicks");
+        }
+        if (nbt.contains("StolenDisplayStack")) {
+            stolenDisplayStack = ItemStack.fromNbtOrEmpty(getRegistryManager(), nbt.getCompound("StolenDisplayStack"));
         }
         if (nbt.contains("SuckX")) {
             suckBlockPos = new BlockPos(nbt.getInt("SuckX"), nbt.getInt("SuckY"), nbt.getInt("SuckZ"));
