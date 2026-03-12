@@ -96,12 +96,12 @@ public class GarbageWormEntity extends MobEntity {
     private static final int SUCK_PICK_MIN_TICKS = 60;
     private static final int SUCK_PICK_MAX_TICKS = 160;
     private static final int SUCK_HOLD_TICKS = 40;
-    private static final double SUCK_SEARCH_RADIUS = 8.0;
-    private static final double SUCK_SURFACE_OFFSET = 0.18;
+    private static final double SUCK_SEARCH_RADIUS = 16.0;
+    private static final double SUCK_SURFACE_OFFSET = 1;
     private static final double SUCK_REACH = 1.15;
 
     /** Theft behavior. */
-    private static final double STEAL_REACH = 1.85;
+    private static final double STEAL_REACH = 0.5;
     private static final int STOLEN_DISPLAY_TICKS = 40;
 
     /** Hostility / harassment behavior. */
@@ -782,11 +782,11 @@ public class GarbageWormEntity extends MobEntity {
 
         if (!player.getMainHandStack().isEmpty() && !player.getOffHandStack().isEmpty()) {
             if (random.nextBoolean()) {
-            handToSteal = Hand.MAIN_HAND;
-            held = player.getMainHandStack();
+                handToSteal = Hand.MAIN_HAND;
+                held = player.getMainHandStack();
             } else {
-            handToSteal = Hand.OFF_HAND;
-            held = player.getOffHandStack();
+                handToSteal = Hand.OFF_HAND;
+                held = player.getOffHandStack();
             }
         } else if (!player.getMainHandStack().isEmpty()) {
             handToSteal = Hand.MAIN_HAND;
@@ -1003,10 +1003,13 @@ public class GarbageWormEntity extends MobEntity {
                     BlockState state = w.getBlockState(bp);
                     if (state.isAir()) continue;
                     if (state.isOf(Blocks.MYCELIUM)) continue;
-                    if (w.getBlockState(bp.up()).isSolidBlock(w, bp.up())) continue;
+                    // allow only air or water above the candidate block
+                    if (!w.getBlockState(bp.up()).isAir() && !w.getBlockState(bp.up()).isOf(Blocks.WATER)) continue;
 
                     Vec3d surface = new Vec3d(bp.getX() + 0.5, bp.getY() + 1.0 + SUCK_SURFACE_OFFSET, bp.getZ() + 0.5);
                     double rootDist = rootPos.distanceTo(surface);
+                    // exclude blocks that are too close to the root
+                    if (rootDist < 4.0) continue;
                     if (rootDist > TENTACLE_LENGTH * bodySize * Math.max(extended, 0.1f)) continue;
                     if (!hasLineOfSight(getPos(), surface)) continue;
 
@@ -1080,9 +1083,23 @@ public class GarbageWormEntity extends MobEntity {
             if (distToMovePoint > 0.01) {
                 Vec3d dir = toMovePoint.normalize();
 
-                double desiredStop = suckingBlock ? 0.18 : WATCH_RADIUS_TOLERANCE;
-                double maxSpeedNear = suckingBlock ? 0.18 : 0.10;
-                double maxSpeedFar = suckingBlock ? 0.34 : 0.42;
+                double desiredStop;
+                double maxSpeedNear;
+                double maxSpeedFar;
+
+                if (stealingItem) {
+                    desiredStop = 0.05;
+                    maxSpeedNear = 0.30;
+                    maxSpeedFar = 0.85;
+                } else if (suckingBlock) {
+                    desiredStop = 0.18;
+                    maxSpeedNear = 0.18;
+                    maxSpeedFar = 0.34;
+                } else {
+                    desiredStop = WATCH_RADIUS_TOLERANCE;
+                    maxSpeedNear = 0.10;
+                    maxSpeedFar = 0.42;
+                }
 
                 double targetSpeed;
                 if (distToMovePoint > desiredStop) {
@@ -1095,9 +1112,14 @@ public class GarbageWormEntity extends MobEntity {
                 Vec3d desiredVel = dir.multiply(targetSpeed);
                 Vec3d steering = desiredVel.subtract(headVel);
 
-                double steeringCap = suckingBlock
-                        ? (distToMovePoint < 0.75 ? 0.10 : 0.05)
-                        : (distToMovePoint < 2.0 ? 0.08 : 0.045);
+                double steeringCap;
+                if (stealingItem) {
+                    steeringCap = distToMovePoint < 2.0 ? 0.14 : 0.08;
+                } else if (suckingBlock) {
+                    steeringCap = distToMovePoint < 0.75 ? 0.10 : 0.05;
+                } else {
+                    steeringCap = distToMovePoint < 2.0 ? 0.08 : 0.045;
+                }
 
                 double steeringLen = steering.length();
                 if (steeringLen > steeringCap && steeringLen > 1.0e-8) {
@@ -1146,7 +1168,9 @@ public class GarbageWormEntity extends MobEntity {
 
         double speed = headVel.length();
         double speedCap = attackCounter > 0 ? 0.8 : (suckingBlock ? 0.38 : 0.5);
-        if (stealingItem || hostileTarget != null) {
+        if (stealingItem) {
+            speedCap = 0.95;
+        } else if (hostileTarget != null) {
             speedCap = 0.68;
         }
         if (speed > speedCap) {
