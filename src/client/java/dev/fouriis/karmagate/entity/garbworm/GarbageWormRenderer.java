@@ -38,11 +38,8 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
 
     private static final float ENTITY_TENTACLE_LENGTH = 16.0f;
 
-    /** Head aim tuning. */
-    private static final float HEAD_AIM_BLEND = 0.85f;
-    private static final float HEAD_MAX_TURN_RADIANS = 0.38f; // about 22 degrees per tick
-    private static final float HEAD_UP_BLEND = 0.30f;
-
+    /** Keep a wide neck limit, but do not persist head aim state. */
+private static final float HEAD_CONE_HALF_ANGLE_RADIANS = (float) (Math.PI * 0.5);
     private final Map<Integer, WormAnimState> animStates = new HashMap<>();
 
     private static class WormAnimState {
@@ -58,12 +55,6 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
 
         RenderTentacle tentacle;
         boolean initialized = false;
-
-        Vec3d headForward = new Vec3d(0, 1, 0);
-        Vec3d prevHeadForward = new Vec3d(0, 1, 0);
-        Vec3d headUp = new Vec3d(0, 1, 0);
-        Vec3d prevHeadUp = new Vec3d(0, 1, 0);
-        boolean headAimInitialized = false;
 
         WormAnimState(float bodySize) {
             float adjustedSize = MathHelper.lerp(0.5f, bodySize, 1f);
@@ -263,8 +254,8 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
 
         Vec3d[][] rings = new Vec3d[bodyCenters.length][];
         for (int i = 0; i < bodyCenters.length; i++) {
-            float halfWidth = bodyRadii[i];
-            float halfHeight = Math.max(0.02f, bodyRadii[i] * 0.90f);
+float halfWidth = bodyRadii[i] * 0.82f;
+float halfHeight = Math.max(0.02f, bodyRadii[i] * 0.74f);
             rings[i] = buildSquareRing(bodyCenters[i], bodyFrames[i], halfWidth, halfHeight);
         }
 
@@ -277,13 +268,13 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
 
         Vec3d headCenter = bodyCenters[bodyCenters.length - 1];
         Frame bodyTipFrame = bodyFrames[bodyFrames.length - 1];
-        Frame headFrame = buildThresholdHeadFrame(anim, headCenter, lookPointCR, bodyTipFrame, tickDelta);
 
-        float headScale = 0.62f * MathHelper.lerp(0.5f, bodySize, 1f);
+Frame headFrame = buildDirectHeadFrame(headCR, lookPointCR, bodyTipFrame);
+        float tipBodyWidth = bodyRadii[bodyRadii.length - 1];
 
-        float headHalfW = headScale * 0.42f;
-        float headHalfH = headScale * 0.28f;
-        float headHalfD = headScale * 0.34f;
+        float headHalfW = tipBodyWidth * 1.25f;
+        float headHalfH = headHalfW;
+        float headHalfD = headHalfW;
 
         Vec3d headBoxCenter = headCenter.add(headFrame.tangent.multiply(headHalfD * 0.10f));
         emitOrientedBox(
@@ -294,21 +285,22 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
                 BODY_R, BODY_G, BODY_B, BODY_A, fullLight
         );
 
-        // Bigger eyes on front top corners
-        float eyeSize = 0.10f * MathHelper.lerp(0.8f, bodySize, 1f);
-        float eyeForward = headHalfD * 0.96f;
-        float eyeSide = headHalfW * 0.92f;
-        float eyeUp = headHalfH * 0.92f;
+        float eyeSize = tipBodyWidth * 1.15f;
 
-        Vec3d leftEye = headBoxCenter
-                .add(headFrame.tangent.multiply(eyeForward))
-                .add(headFrame.right.multiply(eyeSide))
-                .add(headFrame.up.multiply(eyeUp));
+// On the side faces, but only in the forward quarter of the head
+float eyeForward = headHalfD * 0.45f;
+float eyeSide = headHalfW * 1.02f;
+float eyeUp = 0.0f;
 
-        Vec3d rightEye = headBoxCenter
-                .add(headFrame.tangent.multiply(eyeForward))
-                .subtract(headFrame.right.multiply(eyeSide))
-                .add(headFrame.up.multiply(eyeUp));
+Vec3d leftEye = headBoxCenter
+        .add(headFrame.tangent.multiply(eyeForward))
+        .add(headFrame.right.multiply(eyeSide))
+        .add(headFrame.up.multiply(eyeUp));
+
+Vec3d rightEye = headBoxCenter
+        .add(headFrame.tangent.multiply(eyeForward))
+        .subtract(headFrame.right.multiply(eyeSide))
+        .add(headFrame.up.multiply(eyeUp));
 
         emitOrientedBox(
                 vc, matrix,
@@ -409,56 +401,78 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
         return frames;
     }
 
-    private static Frame buildThresholdHeadFrame(WormAnimState anim, Vec3d headCenter, Vec3d lookPoint, Frame bodyTipFrame, float tickDelta) {
-        Vec3d toLook = lookPoint.subtract(headCenter);
-        Vec3d desiredForward = toLook.lengthSquared() > 1e-4 ? toLook.normalize() : bodyTipFrame.tangent;
-        desiredForward = safeNormalize(desiredForward.multiply(HEAD_AIM_BLEND).add(bodyTipFrame.tangent.multiply(1.0 - HEAD_AIM_BLEND)));
-        if (desiredForward.lengthSquared() < 1e-8) desiredForward = bodyTipFrame.tangent;
-
-        anim.prevHeadForward = anim.headForward;
-        anim.prevHeadUp = anim.headUp;
-
-        if (!anim.headAimInitialized) {
-            anim.headForward = desiredForward;
-            anim.headUp = new Vec3d(0, 1, 0);
-            anim.headAimInitialized = true;
-        } else {
-            double angle = angleBetween(anim.headForward, desiredForward);
-            if (angle > HEAD_MAX_TURN_RADIANS) {
-                double t = HEAD_MAX_TURN_RADIANS / angle;
-                anim.headForward = safeNormalize(lerpVec(anim.headForward, desiredForward, (float) t));
-            } else {
-                anim.headForward = desiredForward;
-            }
-
-            Vec3d desiredUp = new Vec3d(0, 1, 0);
-            anim.headUp = safeNormalize(lerpVec(anim.headUp, desiredUp, HEAD_UP_BLEND));
-            if (anim.headUp.lengthSquared() < 1e-8) {
-                anim.headUp = new Vec3d(0, 1, 0);
-            }
+    private static Frame buildDirectHeadFrame(Vec3d headCenter, Vec3d lookPoint, Frame bodyTipFrame) {
+        Vec3d axis = safeNormalize(bodyTipFrame.tangent);
+        if (axis.lengthSquared() < 1e-8) {
+            axis = new Vec3d(0, 1, 0);
         }
 
-        Vec3d smoothForward = safeNormalize(lerpVec(anim.prevHeadForward, anim.headForward, tickDelta));
-        if (smoothForward.lengthSquared() < 1e-8) smoothForward = desiredForward;
+        Vec3d toLook = lookPoint.subtract(headCenter);
+        Vec3d forward = toLook.lengthSquared() > 1e-6 ? toLook.normalize() : axis;
+        forward = constrainToCone(forward, axis, HEAD_CONE_HALF_ANGLE_RADIANS);
 
-        Vec3d smoothUpHint = safeNormalize(lerpVec(anim.prevHeadUp, anim.headUp, tickDelta));
-        if (smoothUpHint.lengthSquared() < 1e-8) smoothUpHint = new Vec3d(0, 1, 0);
+        Vec3d worldUp = new Vec3d(0, 1, 0);
+        Vec3d right = worldUp.crossProduct(forward);
 
-        Vec3d right = smoothUpHint.crossProduct(smoothForward);
+        if (right.lengthSquared() < 1e-10) {
+            right = forward.crossProduct(new Vec3d(0, 0, 1));
+        }
+        if (right.lengthSquared() < 1e-10) {
+            right = forward.crossProduct(new Vec3d(1, 0, 0));
+        }
+        if (right.lengthSquared() < 1e-10) {
+            right = bodyTipFrame.right;
+        }
         if (right.lengthSquared() < 1e-10) {
             right = new Vec3d(1, 0, 0);
-        } else {
-            right = right.normalize();
         }
+        right = right.normalize();
 
-        Vec3d up = smoothForward.crossProduct(right);
+        Vec3d up = forward.crossProduct(right);
         if (up.lengthSquared() < 1e-10) {
-            up = new Vec3d(0, 1, 0);
+            up = worldUp;
         } else {
             up = up.normalize();
         }
 
-        return new Frame(smoothForward, right, up);
+        if (up.y < 0.0) {
+            right = right.multiply(-1.0);
+            up = up.multiply(-1.0);
+        }
+
+        return new Frame(forward, right, up);
+    }
+
+    private static Vec3d constrainToCone(Vec3d desired, Vec3d axis, float maxAngle) {
+        Vec3d a = safeNormalize(axis);
+        Vec3d d = safeNormalize(desired);
+
+        if (a.lengthSquared() < 1e-8) return d;
+        if (d.lengthSquared() < 1e-8) return a;
+
+        double angle = angleBetween(a, d);
+        if (angle <= maxAngle) {
+            return d;
+        }
+
+        Vec3d radial = d.subtract(a.multiply(d.dotProduct(a)));
+        if (radial.lengthSquared() < 1e-10) {
+            radial = projectOntoPlane(new Vec3d(0, 1, 0), a);
+            if (radial.lengthSquared() < 1e-10) {
+                radial = projectOntoPlane(new Vec3d(1, 0, 0), a);
+            }
+        }
+        radial = radial.normalize();
+
+        return safeNormalize(
+                a.multiply(Math.cos(maxAngle)).add(radial.multiply(Math.sin(maxAngle)))
+        );
+    }
+
+    private static Vec3d projectOntoPlane(Vec3d v, Vec3d planeNormal) {
+        Vec3d n = safeNormalize(planeNormal);
+        if (n.lengthSquared() < 1e-8) return v;
+        return v.subtract(n.multiply(v.dotProduct(n)));
     }
 
     private static double angleBetween(Vec3d a, Vec3d b) {

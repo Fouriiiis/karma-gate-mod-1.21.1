@@ -29,6 +29,10 @@ import java.util.List;
  *
  * Entity position = head (small hitbox). Body/tentacle is rendered only.
  * Root position is pinned at the mycelium hole.
+ *
+ * Patched so:
+ * - movement uses a hover/watch point around the target
+ * - visual head aim uses the target's actual eye position
  */
 public class GarbageWormEntity extends MobEntity {
 
@@ -59,7 +63,16 @@ public class GarbageWormEntity extends MobEntity {
     /** Prefer to observe from above when possible. */
     private static final float WATCH_HEIGHT_MIN = 4.0f;
     private static final float WATCH_HEIGHT_MAX = 8.5f;
+
+    /** Observation wiggle / peering. */
     private static final float WATCH_SIDE_ORBIT = 1.25f;
+    private static final float WATCH_WIGGLE_SIDE = 0.95f;
+    private static final float WATCH_WIGGLE_UP = 0.55f;
+    private static final float WATCH_WIGGLE_FORE = 0.35f;
+
+    /** Idle floor-looking behavior from RW reference. */
+    private static final float IDLE_LOOK_SPREAD_XZ = 0.65f;
+    private static final float IDLE_LOOK_Y_OFFSET = 0.15f;
 
     /** Panic / retraction tuning. */
     private static final float ROOT_PANIC_RADIUS = 5.0f;
@@ -82,7 +95,19 @@ public class GarbageWormEntity extends MobEntity {
     private float bodySize = 1f;
     private float stress = 0f;
     private boolean showAsAngry = false;
+
+    /**
+     * Tracked and exposed to renderer.
+     * This is the point the head should visually look at.
+     */
     private Vec3d lookPoint = Vec3d.ZERO;
+
+    /**
+     * Server-side movement goal for the actual head position.
+     * This lets the worm hover around a target while still visually looking directly at it.
+     */
+    private Vec3d movementPoint = Vec3d.ZERO;
+
     private int attackCounter = 0;
     private int searchCounter = 0;
     private int comeBackOutCounter = 0;
@@ -214,7 +239,7 @@ public class GarbageWormEntity extends MobEntity {
         if (debugLogTimer >= 60) {
             debugLogTimer = 0;
             String state = extended > 0f ? (retractSpeed >= 0 ? "EXTENDING" : "RETRACTING") : "RETRACTED";
-            LOGGER.info("[GarbageWorm id={}] state={} extended={} retractSpeed={} stress={} retractCounter={} comeBackOutCounter={} gracePeriod={} attackCounter={} suckingBlock={} rootPos=({},{},{}) headPos=({},{},{}) lookPoint=({},{},{})",
+            LOGGER.info("[GarbageWorm id={}] state={} extended={} retractSpeed={} stress={} retractCounter={} comeBackOutCounter={} gracePeriod={} attackCounter={} suckingBlock={} rootPos=({},{},{}) headPos=({},{},{}) movePoint=({},{},{}) lookPoint=({},{},{})",
                     getId(), state,
                     String.format("%.3f", extended),
                     String.format("%.4f", retractSpeed),
@@ -223,6 +248,7 @@ public class GarbageWormEntity extends MobEntity {
                     gracePeriod, attackCounter, suckingBlock,
                     String.format("%.1f", rootPos.x), String.format("%.1f", rootPos.y), String.format("%.1f", rootPos.z),
                     String.format("%.1f", getX()), String.format("%.1f", getY()), String.format("%.1f", getZ()),
+                    String.format("%.1f", movementPoint.x), String.format("%.1f", movementPoint.y), String.format("%.1f", movementPoint.z),
                     String.format("%.1f", lookPoint.x), String.format("%.1f", lookPoint.y), String.format("%.1f", lookPoint.z));
         }
     }
@@ -240,6 +266,7 @@ public class GarbageWormEntity extends MobEntity {
         } else {
             rootPos = spawnPos;
             lookPoint = rootPos.add(0, 3, 0);
+            movementPoint = lookPoint;
             setPosition(rootPos.x, rootPos.y + 3, rootPos.z);
         }
         nextSuckAttempt = random.nextBetween(SUCK_PICK_MIN_TICKS, SUCK_PICK_MAX_TICKS);
@@ -275,6 +302,7 @@ public class GarbageWormEntity extends MobEntity {
 
         rootPos = new Vec3d(holePos.getX() + 0.5, holePos.getY() + 1.05, holePos.getZ() + 0.5);
         lookPoint = rootPos.add(0, TENTACLE_LENGTH * bodySize * 0.4, 0);
+        movementPoint = lookPoint;
 
         if (!burrowed) {
             setPosition(rootPos.x, rootPos.y + TENTACLE_LENGTH * bodySize * 0.5, rootPos.z);
@@ -330,7 +358,6 @@ public class GarbageWormEntity extends MobEntity {
                 e -> e != this && e.isAlive() && !e.isSpectator()
         );
 
-        // Most interesting nearby entity, not just nearest.
         LivingEntity bestInterest = null;
         double bestInterestScore = 0.05;
         float dangerAccum = 0f;
@@ -358,7 +385,12 @@ public class GarbageWormEntity extends MobEntity {
             watchedTarget = bestInterest;
             suckingBlock = false;
             suckTimer = 0;
-            lookPoint = computeWatchPoint(bestInterest);
+
+            // Movement hovers around the target...
+            movementPoint = computeWatchPoint(bestInterest);
+            // ...but the head visually aims directly at the target.
+            lookPoint = bestInterest.getEyePos();
+
             searchCounter = 0;
 
             float threatDistFromRoot = (float) rootPos.distanceTo(bestInterest.getPos());
@@ -387,11 +419,11 @@ public class GarbageWormEntity extends MobEntity {
             return;
         }
 
-        // No interesting entity: wander / suck behavior.
         if (retractCounter > 0) retractCounter--;
 
         if (suckingBlock) {
             suckTimer--;
+            movementPoint = suckSurfacePos;
             lookPoint = suckSurfacePos;
             if (suckTimer <= 0 || suckBlockPos == null || !isValidSuckTarget(suckBlockPos, suckSurfacePos)) {
                 stopSucking();
@@ -404,21 +436,17 @@ public class GarbageWormEntity extends MobEntity {
             return;
         }
 
-        if ((random.nextFloat() < 0.025f || searchCounter < 5)) {
-            float maxReach = TENTACLE_LENGTH * bodySize;
-            float idleHeight = 2.0f + random.nextFloat() * (maxReach * 0.5f);
-            float hSpread = 1.5f + random.nextFloat() * 2.5f;
-            lookPoint = rootPos.add(
-                    (random.nextFloat() - 0.5f) * hSpread,
-                    idleHeight,
-                    (random.nextFloat() - 0.5f) * hSpread
-            );
+        if ((random.nextFloat() < 0.025f || searchCounter < 5) && !floorTiles.isEmpty()) {
+            lookAtFloor = floorTiles.get(random.nextInt(floorTiles.size()));
+            Vec3d idlePoint = floorLookPoint(lookAtFloor);
+            movementPoint = idlePoint;
+            lookPoint = idlePoint;
         }
         searchCounter++;
 
         if (searchCounter > 100 && random.nextFloat() < 0.006f) {
             Vec3d headPos = getPos();
-            if (headPos.distanceTo(lookPoint) < 5.0) {
+            if (headPos.distanceTo(movementPoint) < 5.0) {
                 attackCounter = 1;
                 searchCounter = 0;
             }
@@ -430,23 +458,17 @@ public class GarbageWormEntity extends MobEntity {
         double speed = entity.getVelocity().length();
         double score = base;
 
-        // Moving things are more interesting.
         score *= (1.0 + speed * 2.0);
-
-        // Prefer closer things, but not purely nearest.
         score /= (1.0 + dist * 0.22);
 
-        // Players are especially interesting.
         if (entity instanceof PlayerEntity) {
             score *= 1.35;
         }
 
-        // Current attacker / recent aggressor becomes very interesting.
         if (getAttacker() != null && getAttacker() == entity) {
             score *= 2.5;
         }
 
-        // Penalize things that are almost on top of the head so the worm doesn't "hug" them.
         if (dist < WATCH_RADIUS * 0.55) {
             score *= 0.75;
         }
@@ -504,7 +526,12 @@ public class GarbageWormEntity extends MobEntity {
     }
 
     /**
-     * Garbage worms prefer to watch from above if they can.
+     * Rain World-style observing movement:
+     * - stay back from the target
+     * - prefer being above it
+     * - add a gentle peering wiggle while watching
+     *
+     * This is for the head's movement target, not the visual aim target.
      */
     private Vec3d computeWatchPoint(LivingEntity target) {
         Vec3d targetPos = target.getEyePos();
@@ -512,9 +539,7 @@ public class GarbageWormEntity extends MobEntity {
         Vec3d rootToTarget = targetPos.subtract(rootPos);
         Vec3d horizontal = new Vec3d(rootToTarget.x, 0.0, rootToTarget.z);
         Vec3d horizontalDir = horizontal.lengthSquared() < 1.0e-6 ? new Vec3d(1, 0, 0) : horizontal.normalize();
-
         Vec3d side = new Vec3d(-horizontalDir.z, 0.0, horizontalDir.x);
-        float sideOffset = (float) Math.sin(watchPhase) * WATCH_SIDE_ORBIT;
 
         double verticalBias = MathHelper.clamp(
                 rootPos.y - targetPos.y + WATCH_HEIGHT_MIN,
@@ -522,23 +547,39 @@ public class GarbageWormEntity extends MobEntity {
                 WATCH_HEIGHT_MAX
         );
 
-        Vec3d desired = targetPos
-                .subtract(horizontalDir.multiply(WATCH_RADIUS))
-                .add(side.multiply(sideOffset))
-                .add(0.0, verticalBias, 0.0);
+        double orbit = Math.sin(watchPhase) * WATCH_SIDE_ORBIT;
+        double wiggleSide = Math.sin(watchPhase * 1.85f) * WATCH_WIGGLE_SIDE;
+        double wiggleUp = Math.sin(watchPhase * 1.20f + 0.8f) * WATCH_WIGGLE_UP;
+        double wiggleFore = Math.cos(watchPhase * 1.05f + 1.6f) * WATCH_WIGGLE_FORE;
 
-        double maxReach = TENTACLE_LENGTH * bodySize * extended;
+        Vec3d desired = targetPos
+                .subtract(horizontalDir.multiply(WATCH_RADIUS + wiggleFore))
+                .add(side.multiply(orbit + wiggleSide))
+                .add(0.0, verticalBias + wiggleUp, 0.0);
+
+        double maxReach = TENTACLE_LENGTH * bodySize * Math.max(extended, 0.1f);
         Vec3d rootToDesired = desired.subtract(rootPos);
         double len = rootToDesired.length();
         if (len > maxReach && len > 1.0e-6) {
             desired = rootPos.add(rootToDesired.multiply(maxReach / len));
         }
 
-        if (desired.y < targetPos.y + WATCH_HEIGHT_MIN * 0.5f) {
-            desired = new Vec3d(desired.x, targetPos.y + WATCH_HEIGHT_MIN * 0.5f, desired.z);
+        double minObserveY = targetPos.y + WATCH_HEIGHT_MIN * 0.5f;
+        if (desired.y < minObserveY) {
+            desired = new Vec3d(desired.x, minObserveY, desired.z);
         }
 
         return desired;
+    }
+
+    private Vec3d floorLookPoint(BlockPos floor) {
+        double offX = (random.nextDouble() * 2.0 - 1.0) * IDLE_LOOK_SPREAD_XZ;
+        double offZ = (random.nextDouble() * 2.0 - 1.0) * IDLE_LOOK_SPREAD_XZ;
+        return new Vec3d(
+                floor.getX() + 0.5 + offX,
+                floor.getY() + IDLE_LOOK_Y_OFFSET,
+                floor.getZ() + 0.5 + offZ
+        );
     }
 
     private boolean tryStartSucking() {
@@ -555,6 +596,7 @@ public class GarbageWormEntity extends MobEntity {
         suckSurfacePos = chosen.surfacePos;
         suckTimer = SUCK_HOLD_TICKS + random.nextInt(20);
         suckingBlock = true;
+        movementPoint = suckSurfacePos;
         lookPoint = suckSurfacePos;
         searchCounter = 0;
         nextSuckAttempt = random.nextBetween(SUCK_PICK_MIN_TICKS, SUCK_PICK_MAX_TICKS);
@@ -641,18 +683,18 @@ public class GarbageWormEntity extends MobEntity {
 
         if (attackCounter > 0) {
             if (attackCounter < 20) {
-                Vec3d dir = lookPoint.subtract(headPos);
+                Vec3d dir = movementPoint.subtract(headPos);
                 if (dir.length() > 0.01) {
                     headVel = headVel.add(dir.normalize().multiply(0.015));
                 }
             } else if (attackCounter < 40) {
-                Vec3d dir = lookPoint.subtract(headPos);
+                Vec3d dir = movementPoint.subtract(headPos);
                 if (dir.length() > 0.01) {
                     double clampedLen = Math.min(dir.length(), 1.5);
                     headVel = headVel.add(dir.normalize().multiply(clampedLen * 0.5));
                 }
             } else if (attackCounter < 150) {
-                setPosition(lookPoint.x, lookPoint.y, lookPoint.z);
+                setPosition(movementPoint.x, movementPoint.y, movementPoint.z);
                 headVel = Vec3d.ZERO;
                 return;
             } else {
@@ -663,19 +705,19 @@ public class GarbageWormEntity extends MobEntity {
                 }
             }
         } else {
-            Vec3d toLookPoint = lookPoint.subtract(headPos);
-            double distToLookPoint = toLookPoint.length();
+            Vec3d toMovePoint = movementPoint.subtract(headPos);
+            double distToMovePoint = toMovePoint.length();
 
-            if (distToLookPoint > 0.01) {
-                Vec3d dir = toLookPoint.normalize();
+            if (distToMovePoint > 0.01) {
+                Vec3d dir = toMovePoint.normalize();
 
                 double desiredStop = suckingBlock ? 0.18 : WATCH_RADIUS_TOLERANCE;
                 double maxSpeedNear = suckingBlock ? 0.18 : 0.10;
                 double maxSpeedFar = suckingBlock ? 0.34 : 0.42;
 
                 double targetSpeed;
-                if (distToLookPoint > desiredStop) {
-                    double t = MathHelper.clamp((float) ((distToLookPoint - desiredStop) / 6.0), 0f, 1f);
+                if (distToMovePoint > desiredStop) {
+                    double t = MathHelper.clamp((float) ((distToMovePoint - desiredStop) / 6.0), 0f, 1f);
                     targetSpeed = MathHelper.lerp((float) t, (float) maxSpeedNear, (float) maxSpeedFar);
                 } else {
                     targetSpeed = 0.0;
@@ -685,8 +727,8 @@ public class GarbageWormEntity extends MobEntity {
                 Vec3d steering = desiredVel.subtract(headVel);
 
                 double steeringCap = suckingBlock
-                        ? (distToLookPoint < 0.75 ? 0.10 : 0.05)
-                        : (distToLookPoint < 2.0 ? 0.08 : 0.045);
+                        ? (distToMovePoint < 0.75 ? 0.10 : 0.05)
+                        : (distToMovePoint < 2.0 ? 0.08 : 0.045);
 
                 double steeringLen = steering.length();
                 if (steeringLen > steeringCap && steeringLen > 1.0e-8) {
@@ -699,7 +741,6 @@ public class GarbageWormEntity extends MobEntity {
             if (suckingBlock) {
                 double dist = headPos.distanceTo(suckSurfacePos);
                 if (dist < SUCK_REACH) {
-                    // damp lateral motion and create the "suck" settle
                     headVel = new Vec3d(headVel.x * 0.78, headVel.y * 0.70, headVel.z * 0.78);
                     if (dist < 0.35) {
                         headVel = headVel.add(0.0, -0.01 + 0.02 * Math.sin((age + suckTimer) * 0.6), 0.0);
@@ -791,6 +832,7 @@ public class GarbageWormEntity extends MobEntity {
         stress = 0f;
         retractCounter = 0;
         lookPoint = rootPos.add(0, TENTACLE_LENGTH * bodySize * 0.4, 0);
+        movementPoint = lookPoint;
         setPosition(rootPos.x, rootPos.y + 0.5, rootPos.z);
         headVel = new Vec3d(0, 0.15, 0);
         stopSucking();
@@ -833,6 +875,9 @@ public class GarbageWormEntity extends MobEntity {
         nbt.putInt("NextSuckAttempt", nextSuckAttempt);
         nbt.putBoolean("SuckingBlock", suckingBlock);
         nbt.putInt("SuckTimer", suckTimer);
+        nbt.putDouble("MoveX", movementPoint.x);
+        nbt.putDouble("MoveY", movementPoint.y);
+        nbt.putDouble("MoveZ", movementPoint.z);
         if (suckBlockPos != null) {
             nbt.putInt("SuckX", suckBlockPos.getX());
             nbt.putInt("SuckY", suckBlockPos.getY());
@@ -855,6 +900,11 @@ public class GarbageWormEntity extends MobEntity {
         if (nbt.contains("NextSuckAttempt")) nextSuckAttempt = nbt.getInt("NextSuckAttempt");
         if (nbt.contains("SuckingBlock")) suckingBlock = nbt.getBoolean("SuckingBlock");
         if (nbt.contains("SuckTimer")) suckTimer = nbt.getInt("SuckTimer");
+        if (nbt.contains("MoveX")) {
+            movementPoint = new Vec3d(nbt.getDouble("MoveX"), nbt.getDouble("MoveY"), nbt.getDouble("MoveZ"));
+        } else {
+            movementPoint = lookPoint;
+        }
         if (nbt.contains("SuckX")) {
             suckBlockPos = new BlockPos(nbt.getInt("SuckX"), nbt.getInt("SuckY"), nbt.getInt("SuckZ"));
             suckSurfacePos = new Vec3d(suckBlockPos.getX() + 0.5, suckBlockPos.getY() + 1.0 + SUCK_SURFACE_OFFSET, suckBlockPos.getZ() + 0.5);
