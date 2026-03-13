@@ -1,5 +1,6 @@
 package dev.fouriis.karmagate.entity.garbworm;
 
+import dev.fouriis.karmagate.entity.garbworm.client.GarbageWormSoundController;
 import dev.fouriis.karmagate.entity.tentacle.RenderTentacle;
 import dev.fouriis.karmagate.entity.tentacle.RenderTentacleChunk;
 import net.minecraft.client.render.Camera;
@@ -112,6 +113,8 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
     public void render(GarbageWormEntity entity, float yaw, float tickDelta,
                        MatrixStack matrices, VertexConsumerProvider consumers, int light) {
 
+        GarbageWormSoundController.tickFor(entity);
+
         Vec3d rootPos = entity.getRootPos();
         float ext = entity.getExtended();
         float stress = entity.getStress();
@@ -119,6 +122,7 @@ public class GarbageWormRenderer extends EntityRenderer<GarbageWormEntity> {
         float bodySize = entity.getBodySizeValue();
 
         if (ext <= 0f && entity.getStolenDisplayStack().isEmpty()) {
+            GarbageWormSoundController.stopFor(entity);
             return;
         }
 

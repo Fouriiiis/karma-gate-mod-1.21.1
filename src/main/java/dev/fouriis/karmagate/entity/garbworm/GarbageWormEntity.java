@@ -15,7 +15,9 @@ import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.sound.SoundEvent;
 import net.minecraft.util.Hand;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
@@ -29,25 +31,20 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * Garbage Worm entity — Rain World faithful port.
- *
- * Entity position = head (small hitbox). Body/tentacle is rendered only.
- * Root position is pinned at the mycelium hole.
- *
- * Patched so:
- * - movement uses a hover/watch point around the target
- * - visual head aim uses the target's actual eye position
- * - if a player is holding an item, the worm will attempt to steal it
- * - stolen item is rendered on the head briefly while the worm retracts
- * - worms cannot be damaged by weapons / normal attacks
- * - hitting one alerts nearby worms and makes them hostile
- * - hostile worms grab players and either fling them or drag/hold them underwater
- * - /kill still removes them
- */
+import net.brickcraftdream.librainworldmc.client.api.RwSoundApi;
+import net.brickcraftdream.librainworldmc.client.api.RwSoundsApi;
+
 public class GarbageWormEntity extends MobEntity {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("GarbageWorm");
+
+    // ── Sound ids ──────────────────────────────────────────────────────
+    private static final String SND_WITHDRAW       = "wormMoveA";
+    private static final String SND_EMERGE         = "wormMoveA";
+    private static final String SND_SNATCH_SPEAR   = "gravel1f";
+    private static final String SND_GRAB_CREATURE  = "gravel1f";
+
+    private static final RwSoundApi RW_SOUNDS = RwSoundsApi.get();
 
     // ── Tracked data keys ──────────────────────────────────────────────
     private static final TrackedData<Float> ROOT_X = DataTracker.registerData(GarbageWormEntity.class, TrackedDataHandlerRegistry.FLOAT);
@@ -68,31 +65,25 @@ public class GarbageWormEntity extends MobEntity {
     private static final float AIR_FRICTION = 0.94f;
     private static final int SCAN_RANGE = 20;
 
-    /** Rain World-like "watch from a distance" radius. */
     private static final float WATCH_RADIUS = 8.0f;
     private static final float WATCH_RADIUS_TOLERANCE = 1.5f;
 
-    /** Prefer to observe from above when possible. */
     private static final float WATCH_HEIGHT_MIN = 4.0f;
     private static final float WATCH_HEIGHT_MAX = 8.5f;
 
-    /** Observation wiggle / peering. */
     private static final float WATCH_SIDE_ORBIT = 1.25f;
     private static final float WATCH_WIGGLE_SIDE = 0.95f;
     private static final float WATCH_WIGGLE_UP = 0.55f;
     private static final float WATCH_WIGGLE_FORE = 0.35f;
 
-    /** Idle floor-looking behavior from RW reference. */
     private static final float IDLE_LOOK_SPREAD_XZ = 0.65f;
     private static final float IDLE_LOOK_Y_OFFSET = 0.15f;
 
-    /** Panic / retraction tuning. */
     private static final float ROOT_PANIC_RADIUS = 5.0f;
     private static final float HEAD_PANIC_RADIUS = 3.0f;
     private static final float FAST_APPROACH_SPEED = 0.20f;
     private static final float VERY_FAST_APPROACH_SPEED = 0.35f;
 
-    /** Sucking behavior. */
     private static final int SUCK_PICK_MIN_TICKS = 60;
     private static final int SUCK_PICK_MAX_TICKS = 160;
     private static final int SUCK_HOLD_TICKS = 40;
@@ -100,23 +91,19 @@ public class GarbageWormEntity extends MobEntity {
     private static final double SUCK_SURFACE_OFFSET = 1;
     private static final double SUCK_REACH = 1.15;
 
-    /** Theft behavior. */
     private static final double STEAL_REACH = 0.5;
     private static final int STOLEN_DISPLAY_TICKS = 40;
 
-    /** Hostility / harassment behavior. */
     private static final double ALERT_RADIUS = 18.0;
     private static final int HOSTILE_TICKS = 20 * 20;
     private static final double HOSTILE_GRAB_REACH = 1.65;
 
-    /** Fling = grab, swing, then release with velocity. */
     private static final int FLING_WINDUP_TICKS = 10;
     private static final int FLING_SWING_TICKS = 10;
     private static final double FLING_SWING_RADIUS = 2.4;
     private static final double FLING_THROW_SPEED = 1.55;
     private static final double FLING_THROW_UP_SPEED = 0.95;
 
-    /** Drown = grab, drag to nearby water, hold victim below surface. */
     private static final int DROWN_HOLD_TICKS = 70;
     private static final double DROWN_SEARCH_RADIUS = 10.0;
     private static final double DROWN_PULL_STRENGTH = 0.34;
@@ -131,13 +118,8 @@ public class GarbageWormEntity extends MobEntity {
     private float stress = 0f;
     private boolean showAsAngry = false;
 
-    /** Tracked and exposed to renderer. */
     private Vec3d lookPoint = Vec3d.ZERO;
-
-    /** Actual movement goal for the head. */
     private Vec3d movementPoint = Vec3d.ZERO;
-
-    /** True while the worm is actively closing distance to steal from a player. */
     private boolean stealingItem = false;
 
     private int attackCounter = 0;
@@ -154,32 +136,23 @@ public class GarbageWormEntity extends MobEntity {
     private int currentHole = -1;
     private boolean initialized = false;
 
-    /** Entity-local head velocity (custom physics, NOT MC movement). */
     private Vec3d headVel = Vec3d.ZERO;
-
-    /** Current watched target for movement behavior. */
     private LivingEntity watchedTarget;
-
-    /** Small phase to make the worm orbit/peer organically while watching. */
     private float watchPhase = 0f;
 
-    /** Sucking state. */
     private BlockPos suckBlockPos;
     private Vec3d suckSurfacePos = Vec3d.ZERO;
     private int suckTimer = 0;
     private int nextSuckAttempt = SUCK_PICK_MIN_TICKS;
     private boolean suckingBlock = false;
 
-    /** Render-only stolen item state, synced to client. */
     private ItemStack stolenDisplayStack = ItemStack.EMPTY;
     private int stolenDisplayTicks = 0;
 
-    /** Hostility state. */
     private UUID hostileTargetUuid;
     private int hostileTicks = 0;
     private LivingEntity hostileTarget;
 
-    /** Grab state. */
     private LivingEntity grabbedTarget;
     private int grabTicks = 0;
     private HarassMode harassMode = HarassMode.FLING;
@@ -297,9 +270,15 @@ public class GarbageWormEntity extends MobEntity {
         boolean currentlyExtended = extended > 0f;
 
         if (extended == 0f && lastExtended) {
+            playOneShot(SND_WITHDRAW, 1.0f, 1.0f);
+
             setPosition(rootPos.x, rootPos.y - 2.0, rootPos.z);
             headVel = Vec3d.ZERO;
             releaseGrabbedTarget();
+        }
+
+        if (extended > 0f && !lastExtended) {
+            playOneShot(SND_EMERGE, 1.0f, 1.0f);
         }
 
         lastExtended = currentlyExtended;
@@ -347,6 +326,38 @@ public class GarbageWormEntity extends MobEntity {
         }
     }
 
+    // ── Sound helpers ──────────────────────────────────────────────────
+
+    private SoundEvent resolveRwSound(String id) {
+        if (id == null || id.isEmpty()) {
+            return null;
+        }
+
+        try {
+            SoundEvent event = RW_SOUNDS.getEvent(id);
+            if (event == null) {
+                LOGGER.warn("[GarbageWorm id={}] RW sound '{}' resolved to null", getId(), id);
+            }
+            return event;
+        } catch (Exception e) {
+            LOGGER.warn("[GarbageWorm id={}] Failed to resolve RW sound '{}': {}", getId(), id, e.getMessage());
+            return null;
+        }
+    }
+
+    private void playOneShot(String id, float volume, float pitch) {
+        if (getWorld() == null) {
+            return;
+        }
+
+        SoundEvent event = resolveRwSound(id);
+        if (event == null) {
+            return;
+        }
+
+        this.playSound(event, volume, pitch);
+    }
+
     private void initialize() {
         Vec3d spawnPos = getPos();
         scanForMycelium(spawnPos);
@@ -372,11 +383,17 @@ public class GarbageWormEntity extends MobEntity {
         BlockPos cp = BlockPos.ofFloored(center);
         World w = getWorld();
 
+        Identifier rwId = Identifier.of("rw_block_mod", "garbage_worm_block");
+
         for (int dx = -SCAN_RANGE; dx <= SCAN_RANGE; dx++) {
             for (int dy = -SCAN_RANGE; dy <= SCAN_RANGE; dy++) {
                 for (int dz = -SCAN_RANGE; dz <= SCAN_RANGE; dz++) {
                     BlockPos bp = cp.add(dx, dy, dz);
-                    if (w.getBlockState(bp).isOf(Blocks.MYCELIUM)) {
+                    BlockState state = w.getBlockState(bp);
+                    boolean isMycelium = state.isOf(Blocks.MYCELIUM);
+                    boolean isRwBlock = net.minecraft.registry.Registries.BLOCK.getId(state.getBlock()).equals(rwId);
+
+                    if (isMycelium || isRwBlock) {
                         if (!w.getBlockState(bp.up()).isSolidBlock(w, bp.up())) {
                             myceliumHoles.add(bp.toImmutable());
                         }
@@ -591,6 +608,8 @@ public class GarbageWormEntity extends MobEntity {
         grabTicks = 0;
         lookPoint = target.getEyePos();
         movementPoint = target.getEyePos();
+
+        playOneShot(SND_GRAB_CREATURE, 1.0f, 1.0f);
 
         Vec3d waterAnchor = findNearbyWaterAnchor();
         if (waterAnchor != null && random.nextBoolean()) {
@@ -813,6 +832,8 @@ public class GarbageWormEntity extends MobEntity {
         movementPoint = getPos();
         lookPoint = getPos();
 
+        playOneShot(SND_SNATCH_SPEAR, 1.0f, 1.0f);
+
         LOGGER.info("[GarbageWorm id={}] stole item {} x{} from player {} and is retracting",
                 getId(),
                 stolenCopy.getItem(),
@@ -894,14 +915,6 @@ public class GarbageWormEntity extends MobEntity {
         }
     }
 
-    /**
-     * Rain World-style observing movement:
-     * - stay back from the target
-     * - prefer being above it
-     * - add a gentle peering wiggle while watching
-     *
-     * This is for the head's movement target, not the visual aim target.
-     */
     private Vec3d computeWatchPoint(LivingEntity target) {
         Vec3d targetPos = target.getEyePos();
 
@@ -1003,12 +1016,10 @@ public class GarbageWormEntity extends MobEntity {
                     BlockState state = w.getBlockState(bp);
                     if (state.isAir()) continue;
                     if (state.isOf(Blocks.MYCELIUM)) continue;
-                    // allow only air or water above the candidate block
                     if (!w.getBlockState(bp.up()).isAir() && !w.getBlockState(bp.up()).isOf(Blocks.WATER)) continue;
 
                     Vec3d surface = new Vec3d(bp.getX() + 0.5, bp.getY() + 1.0 + SUCK_SURFACE_OFFSET, bp.getZ() + 0.5);
                     double rootDist = rootPos.distanceTo(surface);
-                    // exclude blocks that are too close to the root
                     if (rootDist < 4.0) continue;
                     if (rootDist > TENTACLE_LENGTH * bodySize * Math.max(extended, 0.1f)) continue;
                     if (!hasLineOfSight(getPos(), surface)) continue;
