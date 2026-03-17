@@ -37,6 +37,16 @@ public class ModItems {
         )
     );
 
+    public static final SpawnEggItem DADDY_LONG_LEGS_SPAWN_EGG = (SpawnEggItem) registerItem(
+        "daddy_long_legs_spawn_egg",
+        new SpawnEggItem(
+            KarmaGateMod.DADDY_LONG_LEGS_ENTITY_TYPE,
+            0x0D0F16,
+            0x1E83FF,
+            new Item.Settings().maxCount(64)
+        )
+    );
+
     private static Item registerItem(String name, Item item) {
         return Registry.register(Registries.ITEM, Identifier.of(KarmaGateMod.MOD_ID, name), item);
     }
@@ -51,6 +61,7 @@ public class ModItems {
         ItemGroupEvents.modifyEntriesEvent(RegistryKey.of(RegistryKeys.ITEM_GROUP, Identifier.of("minecraft", "spawn_eggs"))).register(entries -> {
             entries.add(STOWAWAY_BUG_SPAWN_EGG);
             entries.add(SPIDER_SPAWN_EGG);
+            entries.add(DADDY_LONG_LEGS_SPAWN_EGG);
         });
     }
 }
