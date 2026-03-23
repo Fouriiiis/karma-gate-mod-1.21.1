@@ -7,27 +7,31 @@ import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasManager;
 import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
+import net.brickcraftdream.librainworldmc.client.render.shader.ShaderRenderer;
+import net.brickcraftdream.librainworldmc.client.render.shader.uniform.UniformEntry;
+import net.brickcraftdream.librainworldmc.client.render.shader.uniform.UniformValue;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.BufferBuilder;
-import net.minecraft.client.render.BufferRenderer;
-import net.minecraft.client.render.Camera;
-import net.minecraft.client.render.Tessellator;
-import net.minecraft.client.render.VertexFormat;
-import net.minecraft.client.render.VertexFormats;
-import net.minecraft.client.render.VertexConsumer;
-import net.minecraft.client.render.VertexConsumerProvider;
-import net.minecraft.client.render.RenderLayer;
+import net.minecraft.client.gl.ShaderProgram;
+import net.minecraft.client.render.*;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactory;
+import net.minecraft.client.texture.MissingSprite;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.component.ComponentType;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ColorHelper;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
+import org.joml.Vector2f;
 import org.joml.Vector3f;
 import software.bernie.geckolib.cache.object.BakedGeoModel;
 import software.bernie.geckolib.renderer.GeoBlockRenderer;
 import software.bernie.geckolib.renderer.layer.GeoRenderLayer;
+
+import java.util.List;
+
+import static dev.fouriis.karmagate.KarmaGateMod.MOD_ID;
 
 public class HeatCoilRenderer extends GeoBlockRenderer<HeatCoilBlockEntity> {
     private static final Identifier HEAT_NOISE_TEX =
@@ -151,7 +155,7 @@ public class HeatCoilRenderer extends GeoBlockRenderer<HeatCoilBlockEntity> {
             Vec3d camPos = mc.gameRenderer.getCamera().getPos();
             Vec3d toCamera = camPos.subtract(baseCenter);
             Vec3d towardCamera = toCamera.lengthSquared() > 1.0e-6 ? toCamera.normalize() : Vec3d.ZERO;
-            Vec3d blockCenter = baseCenter.add(towardCamera.multiply(1.0));
+            Vec3d blockCenter = baseCenter.add(towardCamera.multiply(-1.0));
 
             // Tuned to preserve the Rain World proportions:
             // width grows 10 -> 15  (1.5x)
@@ -162,17 +166,23 @@ public class HeatCoilRenderer extends GeoBlockRenderer<HeatCoilBlockEntity> {
             float alpha = sCurve(heatT, 1.5f);
 
             long time = animatable.getWorld() != null ? animatable.getWorld().getTime() : 0L;
-            float spinRadians = (time + partialTick) * 0.02f;
 
-            RenderUtils.recordLateWorldDraw(camera -> drawHeatDistortionNow(
-                    camera,
-                    blockCenter,
-                    halfWidth,
-                    halfHeight,
-                    alpha,
-                    spinRadians,
-                    packedLight
-            ));
+            Box box = Box.of(blockCenter, 3.75, 1.25, 3.75);
+            float boxHalf = Math.max(halfWidth, halfHeight);
+
+            RenderUtils.drawCameraFacingBillboardFitBoxNoScaleLargest(
+                    () -> {
+                        float[] spriteRect = new float[]{0f, 0f, 1f, 1f};
+                        CoreShaderRenderer.bindShader$HeatDistortion(spriteRect, Identifier.of("librainworldmc", "textures/rainworld/palettes/noise-hq.png"), GRAB_TEXTURE);
+                        RenderSystem.setShaderColor(1, 1, 1, alpha);
+                    },
+                    blockCenter.x, blockCenter.y - 1, blockCenter.z,
+                    box, boxHalf, boxHalf,
+                    0, 0, 0,
+                    1, 1, 1, alpha, packedLight
+            );
+
+            //RenderUtils.drawWireBox3D(GameRenderer.getPositionColorTexLightmapProgram(), box, 0.01f, 1, 1, 0.4f, 1);
         }
 
         private void drawHeatDistortionNow(
@@ -225,7 +235,13 @@ public class HeatCoilRenderer extends GeoBlockRenderer<HeatCoilBlockEntity> {
                     1.0f + rectExpand
             };
 
-            CoreShaderRenderer.bindShader$HeatDistortion(rippleRect, heatNoiseTexture, GRAB_TEXTURE);
+            //CoreShaderRenderer.bindShader$HeatDistortion(rippleRect, heatNoiseTexture, GRAB_TEXTURE);
+            //RenderSystem.setShader(GameRenderer::getPositionColorTexLightmapProgram);
+
+            Box box = new Box(center.x -0.75, center.y -0.5, center.z -1.75, center.x + 0.75, center.y +0.5, center.z+1.75);
+
+            //RenderUtils.drawWireBox3D(box, 1, 1, 1, 1);
+            //RenderUtils.drawCameraFacingBillboardOffset(null, center.x, center.y, center.z, halfWidth, halfHeight, (float) center.x - 0.75f, (float) center.y - 0.5f, (float) center.z - 1.75f, spinRadians, 1, 1, 1, 1, packedLight);
 
             BufferBuilder bb = Tessellator.getInstance().begin(
                     VertexFormat.DrawMode.QUADS,
@@ -237,7 +253,7 @@ public class HeatCoilRenderer extends GeoBlockRenderer<HeatCoilBlockEntity> {
             bb.vertex(mat, trX, trY, trZ).color(1f, 1f, 1f, alpha).texture(1f, 0f).light(packedLight);
             bb.vertex(mat, tlX, tlY, tlZ).color(1f, 1f, 1f, alpha).texture(0f, 0f).light(packedLight);
 
-            BufferRenderer.drawWithGlobalProgram(bb.end());
+            //BufferRenderer.drawWithGlobalProgram(bb.end());
             RenderSystem.disableBlend();
         }
 
