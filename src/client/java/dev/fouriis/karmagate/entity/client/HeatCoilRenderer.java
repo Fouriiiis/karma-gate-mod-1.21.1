@@ -7,31 +7,17 @@ import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasManager;
 import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
-import net.brickcraftdream.librainworldmc.client.render.shader.ShaderRenderer;
-import net.brickcraftdream.librainworldmc.client.render.shader.uniform.UniformEntry;
-import net.brickcraftdream.librainworldmc.client.render.shader.uniform.UniformValue;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gl.ShaderProgram;
 import net.minecraft.client.render.*;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactory;
-import net.minecraft.client.texture.MissingSprite;
 import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.component.ComponentType;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ColorHelper;
 import net.minecraft.util.math.Vec3d;
-import org.joml.Matrix4f;
-import org.joml.Quaternionf;
-import org.joml.Vector2f;
-import org.joml.Vector3f;
 import software.bernie.geckolib.cache.object.BakedGeoModel;
 import software.bernie.geckolib.renderer.GeoBlockRenderer;
 import software.bernie.geckolib.renderer.layer.GeoRenderLayer;
-
-import java.util.List;
-
-import static dev.fouriis.karmagate.KarmaGateMod.MOD_ID;
 
 public class HeatCoilRenderer extends GeoBlockRenderer<HeatCoilBlockEntity> {
     private static final Identifier HEAT_NOISE_TEX =
@@ -59,11 +45,8 @@ public class HeatCoilRenderer extends GeoBlockRenderer<HeatCoilBlockEntity> {
     }
 
     private static final class GlowLayer extends GeoRenderLayer<HeatCoilBlockEntity> {
-        private final Identifier heatNoiseTexture;
-
         GlowLayer(HeatCoilRenderer parent, Identifier heatNoiseTexture) {
             super(parent);
-            this.heatNoiseTexture = heatNoiseTexture != null ? heatNoiseTexture : HEAT_NOISE_TEX;
         }
 
         @Override
@@ -165,7 +148,6 @@ public class HeatCoilRenderer extends GeoBlockRenderer<HeatCoilBlockEntity> {
 
             float alpha = sCurve(heatT, 1.5f);
 
-            long time = animatable.getWorld() != null ? animatable.getWorld().getTime() : 0L;
 
             Box box = Box.of(blockCenter, 3.75, 1.25, 3.75);
             float boxHalf = Math.max(halfWidth, halfHeight);
@@ -185,77 +167,6 @@ public class HeatCoilRenderer extends GeoBlockRenderer<HeatCoilBlockEntity> {
             //RenderUtils.drawWireBox3D(GameRenderer.getPositionColorTexLightmapProgram(), box, 0.01f, 1, 1, 0.4f, 1);
         }
 
-        private void drawHeatDistortionNow(
-                Camera camera,
-                Vec3d center,
-                float halfWidth,
-                float halfHeight,
-                float alpha,
-                float spinRadians,
-                int packedLight
-        ) {
-            Quaternionf cameraRotation = new Quaternionf(camera.getRotation());
-            Vector3f right = cameraRotation.transform(new Vector3f(1f, 0f, 0f));
-            Vector3f up = cameraRotation.transform(new Vector3f(0f, 1f, 0f));
-
-            float cos = (float) Math.cos(spinRadians);
-            float sin = (float) Math.sin(spinRadians);
-            float rightX = right.x * cos + up.x * sin;
-            float rightY = right.y * cos + up.y * sin;
-            float rightZ = right.z * cos + up.z * sin;
-            float upX = up.x * cos - right.x * sin;
-            float upY = up.y * cos - right.y * sin;
-            float upZ = up.z * cos - right.z * sin;
-
-            Vec3d cam = camera.getPos();
-            float cx = (float) (center.x - cam.x);
-            float cy = (float) (center.y - cam.y);
-            float cz = (float) (center.z - cam.z);
-
-            float blX = cx - rightX * halfWidth - upX * halfHeight;
-            float blY = cy - rightY * halfWidth - upY * halfHeight;
-            float blZ = cz - rightZ * halfWidth - upZ * halfHeight;
-            float brX = cx + rightX * halfWidth - upX * halfHeight;
-            float brY = cy + rightY * halfWidth - upY * halfHeight;
-            float brZ = cz + rightZ * halfWidth - upZ * halfHeight;
-            float trX = cx + rightX * halfWidth + upX * halfHeight;
-            float trY = cy + rightY * halfWidth + upY * halfHeight;
-            float trZ = cz + rightZ * halfWidth + upZ * halfHeight;
-            float tlX = cx - rightX * halfWidth + upX * halfHeight;
-            float tlY = cy - rightY * halfWidth + upY * halfHeight;
-            float tlZ = cz - rightZ * halfWidth + upZ * halfHeight;
-
-            Matrix4f mat = new Matrix4f().rotation(camera.getRotation()).transpose();
-
-            float rectExpand = lerp(0.08f, 0.28f, alpha);
-            float[] rippleRect = new float[]{
-                    -rectExpand,
-                    -rectExpand,
-                    1.0f + rectExpand,
-                    1.0f + rectExpand
-            };
-
-            //CoreShaderRenderer.bindShader$HeatDistortion(rippleRect, heatNoiseTexture, GRAB_TEXTURE);
-            //RenderSystem.setShader(GameRenderer::getPositionColorTexLightmapProgram);
-
-            Box box = new Box(center.x -0.75, center.y -0.5, center.z -1.75, center.x + 0.75, center.y +0.5, center.z+1.75);
-
-            //RenderUtils.drawWireBox3D(box, 1, 1, 1, 1);
-            //RenderUtils.drawCameraFacingBillboardOffset(null, center.x, center.y, center.z, halfWidth, halfHeight, (float) center.x - 0.75f, (float) center.y - 0.5f, (float) center.z - 1.75f, spinRadians, 1, 1, 1, 1, packedLight);
-
-            BufferBuilder bb = Tessellator.getInstance().begin(
-                    VertexFormat.DrawMode.QUADS,
-                    VertexFormats.POSITION_COLOR_TEXTURE_LIGHT
-            );
-
-            bb.vertex(mat, blX, blY, blZ).color(1f, 1f, 1f, alpha).texture(0f, 1f).light(packedLight);
-            bb.vertex(mat, brX, brY, brZ).color(1f, 1f, 1f, alpha).texture(1f, 1f).light(packedLight);
-            bb.vertex(mat, trX, trY, trZ).color(1f, 1f, 1f, alpha).texture(1f, 0f).light(packedLight);
-            bb.vertex(mat, tlX, tlY, tlZ).color(1f, 1f, 1f, alpha).texture(0f, 0f).light(packedLight);
-
-            //BufferRenderer.drawWithGlobalProgram(bb.end());
-            RenderSystem.disableBlend();
-        }
 
         private float inverseLerpClamped(float a, float b, float value) {
             if (a == b) return 0f;
