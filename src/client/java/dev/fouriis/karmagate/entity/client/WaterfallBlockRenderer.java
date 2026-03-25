@@ -6,15 +6,11 @@ import dev.fouriis.karmagate.entity.karmagate.HeatCoilBlockEntity;
 import dev.fouriis.karmagate.entity.karmagate.WaterfallBlockEntity;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.SteamAudioController;
-import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
-import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
-import net.brickcraftdream.librainworldmc.client.atlas.FAtlasManager;
+import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.client.render.OverlayTexture;
-import net.minecraft.client.render.RenderLayer;
-import net.minecraft.client.render.VertexConsumer;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactory;
@@ -23,25 +19,25 @@ import net.minecraft.fluid.FluidState;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.world.World;
-import org.joml.Matrix4f;
-import org.joml.Vector3f;
 
 public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements BlockEntityRenderer<T> {
 
     private static final int MAX_BLOCKS_DOWN = 128;
-    private static final float PLANE_HALF_WIDTH = 0.70710678f;
-    private static final float DEPTH_NUDGE = 0.0015f;
-    private static final float V_TILES_PER_BLOCK = 1.0f;
+
+    private static final Identifier LEVEL_TEXTURE =
+            Identifier.of("librainworldmc", "grabtex");
+
+    private static final Identifier NOISE_TEXTURE =
+            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise-hq.png");
 
     private static final Identifier MINECRAFT_WATER_FLOW =
             Identifier.of("minecraft", "textures/block/water_flow.png");
-
-    private Identifier levelTexture;
-    private Identifier noiseTexture;
 
     public WaterfallBlockRenderer(BlockEntityRendererFactory.Context ctx) {
     }
@@ -73,247 +69,92 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
         float flow = sampleAverageFlow(be, clientTime, blocksDown);
         if (flow <= 0.001f) return;
 
-        ensureTexturesResolved();
-
-        float d = 0.70710678f;
-        boolean drewShader = false;
-
-        if (levelTexture != null && noiseTexture != null) {
-            drewShader |= tryRenderShaderSheet(
-                    be, tickDelta, matrices, vertexConsumers, light,
-                    new Vector3f(d, 0f, d),
-                    new Vector3f(-d, 0f, d),
-                    blocksDown, flow
-            );
-
-            drewShader |= tryRenderShaderSheet(
-                    be, tickDelta, matrices, vertexConsumers, light,
-                    new Vector3f(d, 0f, -d),
-                    new Vector3f(d, 0f, d),
-                    blocksDown, flow
-            );
-        }
-
-        // Only draw fallback if shader path did NOT render.
+        boolean drewShader = renderWaterfallBillboards(be, tickDelta, flow, blocksDown, light);
         if (!drewShader) {
-            renderPlainSheet(
-                    be, tickDelta, matrices, vertexConsumers, light,
-                    new Vector3f(d, 0f, d),
-                    new Vector3f(-d, 0f, d),
-                    blocksDown,
-                    220
-            );
-
-            renderPlainSheet(
-                    be, tickDelta, matrices, vertexConsumers, light,
-                    new Vector3f(d, 0f, -d),
-                    new Vector3f(d, 0f, d),
-                    blocksDown,
-                    220
-            );
+            System.err.println("[Karmagate/Waterfall] Waterfall shader path returned false at " + pos
+                    + " flow=" + flow + " blocksDown=" + blocksDown
+                    + " levelTexture=" + LEVEL_TEXTURE
+                    + " noiseTexture=" + NOISE_TEXTURE
+                    + " palTexture=" + MINECRAFT_WATER_FLOW);
         }
     }
 
-    private void ensureTexturesResolved() {
-        FAtlasManager atlasManager = LibrainworldmcClient.getAtlasManager();
-        if (atlasManager == null) return;
-
-        if (levelTexture == null) {
-            FAtlasElement e = findAtlasElement(
-                    atlasManager,
-                    "grabtex"
-            );
-            if (e != null) levelTexture = e.textureIdentifier;
-        }
-
-        if (noiseTexture == null) {
-            FAtlasElement e = findAtlasElement(
-                    atlasManager,
-                    "noise-hq.png",
-                    "noise-hq",
-                    "NoiseTex",
-                    "noise"
-            );
-            if (e != null) noiseTexture = e.textureIdentifier;
-        }
-    }
-
-    private boolean tryRenderShaderSheet(
+    private boolean renderWaterfallBillboards(
             WaterfallBlockEntity be,
             float tickDelta,
-            MatrixStack matrices,
-            VertexConsumerProvider vertexConsumers,
-            int light,
-            Vector3f right,
-            Vector3f normal,
+            float flow,
             float blocksDown,
-            float flow
+            int packedLight
     ) {
-        try {
-            renderShaderSheet(be, tickDelta, matrices, vertexConsumers, light, right, normal, blocksDown, flow);
-            return true;
-        } catch (Throwable ignored) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.world == null || mc.gameRenderer == null || mc.getCameraEntity() == null) {
+            System.err.println("[Karmagate/Waterfall] Minecraft render context unavailable");
             return false;
         }
-    }
 
-    private void renderShaderSheet(
-            WaterfallBlockEntity be,
-            float tickDelta,
-            MatrixStack matrices,
-            VertexConsumerProvider vertexConsumers,
-            int light,
-            Vector3f right,
-            Vector3f normal,
-            float blocksDown,
-            float flow
-    ) {
-        World world = be.getWorld();
-        if (world == null) return;
-        if (levelTexture == null || noiseTexture == null) return;
+        Vec3d camPos = mc.gameRenderer.getCamera().getPos();
+        Vec3d baseCenter = Vec3d.ofCenter(be.getPos());
 
-        double clientTime = world.getTime() + tickDelta;
-        float vScroll = frac((float) (-clientTime * 0.06));
+        int segments = Math.max(2, Math.min(10, MathHelper.ceil(blocksDown * 1.5f)));
+        double segmentHeight = blocksDown / segments;
 
-        /*
-         * RW WaterFall shader uses vertex color:
-         * R = density
-         * G = top falloff
-         * B = bottom falloff
-         *
-         * Lower density = more holes.
-         */
-        float density = MathHelper.clamp(MathHelper.lerp(flow, 0.06f, 0.42f), 0f, 1f);
+        boolean renderedAny = false;
 
-        // Use small edge parameters like the original RW code.
-        float topFalloff = 0.02f;
-        float bottomFalloff = 0.02f;
+        for (int i = 0; i < segments; i++) {
+            try {
+                double segCenterY = be.getPos().getY() + 0.5 - (i + 0.5) * segmentHeight;
+                Vec3d segCenter = new Vec3d(baseCenter.x, segCenterY, baseCenter.z);
 
-        int pr = MathHelper.clamp((int) (density * 255.0f), 0, 255);
-        int pg = MathHelper.clamp((int) (topFalloff * 255.0f), 0, 255);
-        int pb = MathHelper.clamp((int) (bottomFalloff * 255.0f), 0, 255);
-        int pa = 255;
+                Vec3d toCamera = camPos.subtract(segCenter);
+                Vec3d towardCamera = toCamera.lengthSquared() > 1.0e-6 ? toCamera.normalize() : Vec3d.ZERO;
 
-        float[] spriteRect = new float[]{0f, 0f, 1f, 1f};
+                Vec3d drawCenter = segCenter.add(towardCamera.multiply(-0.35));
 
-        CoreShaderRenderer.bindShader$WaterFall(
-                spriteRect,
-                levelTexture,
-                noiseTexture,
-                MINECRAFT_WATER_FLOW,
-                null,
-                null,
-                false
-        );
+                double boxHeight = Math.max(0.75, segmentHeight + 0.25);
+                double boxWidth = Math.max(1.25, 1.45 + flow * 0.75);
 
-        RenderSystem.setShaderTexture(0, MINECRAFT_WATER_FLOW);
-        VertexConsumer vc = vertexConsumers.getBuffer(RenderLayer.getEntityTranslucent(MINECRAFT_WATER_FLOW));
+                Box box = Box.of(drawCenter, boxWidth, boxHeight, boxWidth);
+                float boxHalf = (float) Math.max(boxWidth * 0.5, boxHeight * 0.5);
 
-        matrices.push();
-        matrices.translate(0.5, 0.0, 0.5);
-        matrices.translate(normal.x() * DEPTH_NUDGE, 0.0, normal.z() * DEPTH_NUDGE);
+                float density = MathHelper.clamp(MathHelper.lerp(flow, 0.08f, 0.45f), 0f, 1f);
+                float alpha = MathHelper.clamp(0.20f + flow * 0.55f, 0f, 1f);
 
-        Matrix4f m = matrices.peek().getPositionMatrix();
+                float[] spriteRect = new float[]{0f, 0f, 1f, 1f};
 
-        float rx = right.x();
-        float rz = right.z();
-        float nx = normal.x();
-        float nz = normal.z();
+                float finalAlpha = alpha;
+                RenderUtils.drawCameraFacingBillboardFitBoxNoScaleLargest(
+                        () -> {
+                            CoreShaderRenderer.bindShader$WaterFall(
+                                    spriteRect,
+                                    LEVEL_TEXTURE,
+                                    NOISE_TEXTURE,
+                                    MINECRAFT_WATER_FLOW,
+                                    null,
+                                    null,
+                                    false
+                            );
+                            RenderSystem.setShaderColor(density, 0.02f, 0.02f, finalAlpha);
+                        },
+                        drawCenter.x, drawCenter.y, drawCenter.z,
+                        box, boxHalf, boxHalf,
+                        0, 0, 0,
+                        1, 1, 1, finalAlpha, packedLight
+                );
 
-        float xA = -PLANE_HALF_WIDTH * rx;
-        float zA = -PLANE_HALF_WIDTH * rz;
-        float xB =  PLANE_HALF_WIDTH * rx;
-        float zB =  PLANE_HALF_WIDTH * rz;
-
-        float yTop = 1.0f;
-        float yBottom = -blocksDown;
-
-        float u0 = 0.0f;
-        float u1 = 1.0f;
-        float v0 = vScroll;
-        float v1 = blocksDown * V_TILES_PER_BLOCK + vScroll;
-
-        vc.vertex(m, xA, yTop, zA).color(pr, pg, pb, pa).texture(u0, v0)
-                .overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, 0.0f, nz);
-        vc.vertex(m, xB, yTop, zB).color(pr, pg, pb, pa).texture(u1, v0)
-                .overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, 0.0f, nz);
-        vc.vertex(m, xB, yBottom, zB).color(pr, pg, pb, pa).texture(u1, v1)
-                .overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, 0.0f, nz);
-        vc.vertex(m, xA, yBottom, zA).color(pr, pg, pb, pa).texture(u0, v1)
-                .overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, 0.0f, nz);
-
-        matrices.pop();
-    }
-
-    private void renderPlainSheet(
-            WaterfallBlockEntity be,
-            float tickDelta,
-            MatrixStack matrices,
-            VertexConsumerProvider vertexConsumers,
-            int light,
-            Vector3f right,
-            Vector3f normal,
-            float blocksDown,
-            int alpha
-    ) {
-        World world = be.getWorld();
-        if (world == null) return;
-
-        double clientTime = world.getTime() + tickDelta;
-        float vScroll = frac((float) (-clientTime * 0.06));
-
-        VertexConsumer vc = vertexConsumers.getBuffer(RenderLayer.getEntityTranslucent(MINECRAFT_WATER_FLOW));
-
-        matrices.push();
-        matrices.translate(0.5, 0.0, 0.5);
-        matrices.translate(normal.x() * DEPTH_NUDGE, 0.0, normal.z() * DEPTH_NUDGE);
-
-        Matrix4f m = matrices.peek().getPositionMatrix();
-
-        float rx = right.x();
-        float rz = right.z();
-        float nx = normal.x();
-        float nz = normal.z();
-
-        float xA = -PLANE_HALF_WIDTH * rx;
-        float zA = -PLANE_HALF_WIDTH * rz;
-        float xB =  PLANE_HALF_WIDTH * rx;
-        float zB =  PLANE_HALF_WIDTH * rz;
-
-        float yTop = 1.0f;
-        float yBottom = -blocksDown;
-
-        float u0 = 0.0f;
-        float u1 = 1.0f;
-        float v0 = vScroll;
-        float v1 = blocksDown * V_TILES_PER_BLOCK + vScroll;
-
-        vc.vertex(m, xA, yTop, zA).color(255, 255, 255, alpha).texture(u0, v0)
-                .overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, 0.0f, nz);
-        vc.vertex(m, xB, yTop, zB).color(255, 255, 255, alpha).texture(u1, v0)
-                .overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, 0.0f, nz);
-        vc.vertex(m, xB, yBottom, zB).color(255, 255, 255, alpha).texture(u1, v1)
-                .overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, 0.0f, nz);
-        vc.vertex(m, xA, yBottom, zA).color(255, 255, 255, alpha).texture(u0, v1)
-                .overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, 0.0f, nz);
-
-        matrices.pop();
-    }
-
-    private static FAtlasElement findAtlasElement(FAtlasManager atlasManager, String... candidates) {
-        if (atlasManager == null) return null;
-
-        for (String candidate : candidates) {
-            FAtlasElement element = atlasManager.getElementWithName(candidate);
-            if (element != null && element.textureIdentifier != null) {
-                return element;
+                renderedAny = true;
+            } catch (Throwable t) {
+                System.err.println("[Karmagate/Waterfall] Exception while rendering billboard segment "
+                        + i + " at " + be.getPos()
+                        + " flow=" + flow
+                        + " blocksDown=" + blocksDown
+                        + " levelTexture=" + LEVEL_TEXTURE
+                        + " noiseTexture=" + NOISE_TEXTURE
+                        + " palTexture=" + MINECRAFT_WATER_FLOW);
+                t.printStackTrace();
             }
         }
-        return null;
-    }
 
-    private static float frac(float x) {
-        return x - (float) Math.floor(x);
+        return renderedAny;
     }
 
     private static float sampleAverageFlow(WaterfallBlockEntity be, double clientTime, float blocksDown) {
