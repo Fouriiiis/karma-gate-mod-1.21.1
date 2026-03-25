@@ -1,17 +1,22 @@
 package dev.fouriis.karmagate.entity.client;
 
+import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
+import net.minecraft.client.render.BufferBuilder;
+import net.minecraft.client.render.BufferRenderer;
+import net.minecraft.client.render.Tessellator;
+import net.minecraft.client.render.VertexFormats;
 import dev.fouriis.karmagate.block.karmagate.HeatCoilBlock;
 import dev.fouriis.karmagate.entity.karmagate.HeatCoilBlockEntity;
 import dev.fouriis.karmagate.entity.karmagate.WaterfallBlockEntity;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.SteamAudioController;
-import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.VertexConsumerProvider;
+import net.minecraft.client.render.VertexFormat;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactory;
 import net.minecraft.client.util.math.MatrixStack;
@@ -19,16 +24,18 @@ import net.minecraft.fluid.FluidState;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.world.World;
+import org.joml.Matrix4f;
 
 public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements BlockEntityRenderer<T> {
 
     private static final int MAX_BLOCKS_DOWN = 128;
+    private static final float HALF_DIAGONAL = 0.70710678f;
+    private static final float DEPTH_NUDGE = 0.002f;
+    private static final float V_TILES_PER_BLOCK = 1.0f;
 
     private static final Identifier LEVEL_TEXTURE =
             Identifier.of("librainworldmc", "grabtex");
@@ -69,7 +76,10 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
         float flow = sampleAverageFlow(be, clientTime, blocksDown);
         if (flow <= 0.001f) return;
 
-        boolean drewShader = renderWaterfallBillboards(be, tickDelta, flow, blocksDown, light);
+        boolean drewShader = renderWaterfallCrossedStreamsImmediate(
+                be, tickDelta, matrices, light, blocksDown, flow
+        );
+
         if (!drewShader) {
             System.err.println("[Karmagate/Waterfall] Waterfall shader path returned false at " + pos
                     + " flow=" + flow + " blocksDown=" + blocksDown
@@ -79,82 +89,149 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
         }
     }
 
-    private boolean renderWaterfallBillboards(
+    private boolean renderWaterfallCrossedStreamsImmediate(
             WaterfallBlockEntity be,
             float tickDelta,
-            float flow,
+            MatrixStack matrices,
+            int packedLight,
             float blocksDown,
-            int packedLight
+            float flow
     ) {
-        MinecraftClient mc = MinecraftClient.getInstance();
-        if (mc.world == null || mc.gameRenderer == null || mc.getCameraEntity() == null) {
-            System.err.println("[Karmagate/Waterfall] Minecraft render context unavailable");
+        try {
+            float[] spriteRect = new float[]{0f, 0f, 1f, 1f};
+
+            CoreShaderRenderer.bindShader$WaterFall(
+                    spriteRect,
+                    LEVEL_TEXTURE,
+                    NOISE_TEXTURE,
+                    MINECRAFT_WATER_FLOW,
+                    null,
+                    null,
+                    false
+            );
+
+            float vScroll = frac((float) (-(be.getWorld().getTime() + tickDelta) * 0.06));
+
+            // RW waterfall shader parameter packing:
+            // R = density, G = top falloff, B = bottom falloff
+            float density = MathHelper.clamp(MathHelper.lerp(flow, 0.08f, 0.45f), 0f, 1f);
+            float topFalloff = 0.02f;
+            float bottomFalloff = 0.02f;
+
+            int r = MathHelper.clamp((int) (density * 255.0f), 0, 255);
+            int g = MathHelper.clamp((int) (topFalloff * 255.0f), 0, 255);
+            int b = MathHelper.clamp((int) (bottomFalloff * 255.0f), 0, 255);
+            int a = 255;
+
+            RenderSystem.enableBlend();
+            RenderSystem.defaultBlendFunc();
+            RenderSystem.depthMask(false);
+            RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
+            RenderSystem.setShaderTexture(0, MINECRAFT_WATER_FLOW);
+
+            matrices.push();
+            matrices.translate(0.5, 0.0, 0.5);
+            Matrix4f m = matrices.peek().getPositionMatrix();
+
+            Tessellator tessellator = Tessellator.getInstance();
+            BufferBuilder buffer = Tessellator.getInstance().begin(
+        VertexFormat.DrawMode.QUADS,
+        VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
+);
+
+            // First X plane: \ diagonal
+            emitPlane(
+                    buffer, m,
+                    -HALF_DIAGONAL, -HALF_DIAGONAL,
+                     HALF_DIAGONAL,  HALF_DIAGONAL,
+                    blocksDown, vScroll, packedLight,
+                    r, g, b, a,
+                    -0.7071f, 0.0f, 0.7071f
+            );
+
+            // Second X plane: / diagonal
+            emitPlane(
+                    buffer, m,
+                    -HALF_DIAGONAL,  HALF_DIAGONAL,
+                     HALF_DIAGONAL, -HALF_DIAGONAL,
+                    blocksDown, vScroll, packedLight,
+                    r, g, b, a,
+                     0.7071f, 0.0f, 0.7071f
+            );
+
+            BufferRenderer.drawWithGlobalProgram(buffer.end());
+
+            matrices.pop();
+
+            RenderSystem.depthMask(true);
+            return true;
+        } catch (Throwable t) {
+            System.err.println("[Karmagate/Waterfall] Exception while rendering crossed streams at "
+                    + be.getPos()
+                    + " flow=" + flow
+                    + " blocksDown=" + blocksDown
+                    + " levelTexture=" + LEVEL_TEXTURE
+                    + " noiseTexture=" + NOISE_TEXTURE
+                    + " palTexture=" + MINECRAFT_WATER_FLOW);
+            t.printStackTrace();
+            RenderSystem.depthMask(true);
             return false;
         }
+    }
 
-        Vec3d camPos = mc.gameRenderer.getCamera().getPos();
-        Vec3d baseCenter = Vec3d.ofCenter(be.getPos());
+    private void emitPlane(
+            BufferBuilder buffer,
+            Matrix4f m,
+            float xA, float zA,
+            float xB, float zB,
+            float blocksDown,
+            float vScroll,
+            int light,
+            int r, int g, int b, int a,
+            float nx, float ny, float nz
+    ) {
+        float u0 = 0.0f;
+        float u1 = 1.0f;
+        float v0 = vScroll;
+        float v1 = blocksDown * V_TILES_PER_BLOCK + vScroll;
 
-        int segments = Math.max(2, Math.min(10, MathHelper.ceil(blocksDown * 1.5f)));
-        double segmentHeight = blocksDown / segments;
+        float yTop = 1.0f;
+        float yBottom = -blocksDown;
 
-        boolean renderedAny = false;
+        float offX = nx * DEPTH_NUDGE;
+        float offZ = nz * DEPTH_NUDGE;
 
-        for (int i = 0; i < segments; i++) {
-            try {
-                double segCenterY = be.getPos().getY() + 0.5 - (i + 0.5) * segmentHeight;
-                Vec3d segCenter = new Vec3d(baseCenter.x, segCenterY, baseCenter.z);
+        buffer.vertex(m, xA + offX, yTop,    zA + offZ)
+                .color(r, g, b, a)
+                .texture(u0, v0)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
 
-                Vec3d toCamera = camPos.subtract(segCenter);
-                Vec3d towardCamera = toCamera.lengthSquared() > 1.0e-6 ? toCamera.normalize() : Vec3d.ZERO;
+        buffer.vertex(m, xB + offX, yTop,    zB + offZ)
+                .color(r, g, b, a)
+                .texture(u1, v0)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
 
-                Vec3d drawCenter = segCenter.add(towardCamera.multiply(-0.35));
+        buffer.vertex(m, xB + offX, yBottom, zB + offZ)
+                .color(r, g, b, a)
+                .texture(u1, v1)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
 
-                double boxHeight = Math.max(0.75, segmentHeight + 0.25);
-                double boxWidth = Math.max(1.25, 1.45 + flow * 0.75);
+        buffer.vertex(m, xA + offX, yBottom, zA + offZ)
+                .color(r, g, b, a)
+                .texture(u0, v1)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
+    }
 
-                Box box = Box.of(drawCenter, boxWidth, boxHeight, boxWidth);
-                float boxHalf = (float) Math.max(boxWidth * 0.5, boxHeight * 0.5);
-
-                float density = MathHelper.clamp(MathHelper.lerp(flow, 0.08f, 0.45f), 0f, 1f);
-                float alpha = MathHelper.clamp(0.20f + flow * 0.55f, 0f, 1f);
-
-                float[] spriteRect = new float[]{0f, 0f, 1f, 1f};
-
-                float finalAlpha = alpha;
-                RenderUtils.drawCameraFacingBillboardFitBoxNoScaleLargest(
-                        () -> {
-                            CoreShaderRenderer.bindShader$WaterFall(
-                                    spriteRect,
-                                    LEVEL_TEXTURE,
-                                    NOISE_TEXTURE,
-                                    MINECRAFT_WATER_FLOW,
-                                    null,
-                                    null,
-                                    false
-                            );
-                            RenderSystem.setShaderColor(density, 0.02f, 0.02f, finalAlpha);
-                        },
-                        drawCenter.x, drawCenter.y, drawCenter.z,
-                        box, boxHalf, boxHalf,
-                        0, 0, 0,
-                        1, 1, 1, finalAlpha, packedLight
-                );
-
-                renderedAny = true;
-            } catch (Throwable t) {
-                System.err.println("[Karmagate/Waterfall] Exception while rendering billboard segment "
-                        + i + " at " + be.getPos()
-                        + " flow=" + flow
-                        + " blocksDown=" + blocksDown
-                        + " levelTexture=" + LEVEL_TEXTURE
-                        + " noiseTexture=" + NOISE_TEXTURE
-                        + " palTexture=" + MINECRAFT_WATER_FLOW);
-                t.printStackTrace();
-            }
-        }
-
-        return renderedAny;
+    private static float frac(float x) {
+        return x - (float) Math.floor(x);
     }
 
     private static float sampleAverageFlow(WaterfallBlockEntity be, double clientTime, float blocksDown) {
