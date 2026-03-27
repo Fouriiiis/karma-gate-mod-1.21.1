@@ -58,9 +58,9 @@ dependencies {
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 	modImplementation "software.bernie.geckolib:geckolib-fabric-${minecraft_version}:${geckolib_version}"
 
-	modImplementation "maven.modrinth:librainworldmc:1.1.6"
+	//modImplementation "maven.modrinth:librainworldmc:1.1.6"
 	//use a lib mod in the libs folder build\libs\librainworldmc-1.1.1.jar
-	//modImplementation files("libs/librainworldmc-1.1.1.jar")
+	modImplementation files("libs/librainworldmc-1.1.6.jar")
 
 	// jcodec: pure-Java MP4/H.264 decoder for graffiti video playback (no native libs required)
 	include implementation('org.jcodec:jcodec:0.2.5')
