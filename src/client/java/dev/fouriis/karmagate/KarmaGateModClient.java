@@ -4,6 +4,7 @@ import dev.fouriis.karmagate.client.AtcSkyFabricAdapter;
 import dev.fouriis.karmagate.client.gridproject.CoralNeuronCircleManager;
 import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerManager;
 import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerRenderer;
+import dev.fouriis.karmagate.client.weather.DeathRainWeatherRenderer;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
 import dev.fouriis.karmagate.entity.client.GateLightBlockRenderer;
 import dev.fouriis.karmagate.entity.client.HeatCoilRenderer;
@@ -52,6 +53,7 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.particle.v1.ParticleFactoryRegistry;
 import net.fabricmc.fabric.api.client.rendereregistry.v1.EntityRendererRegistry;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactories;
+import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
@@ -116,6 +118,20 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		// Register daddy long legs renderer
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.DADDY_LONG_LEGS_ENTITY_TYPE, DaddyLongLegsRenderer::new);
+
+		WorldRenderEvents.LAST.register(context -> {
+    MinecraftClient client = MinecraftClient.getInstance();
+    if (client.world == null) {
+        return;
+    }
+
+    DeathRainWeatherRenderer.render(
+            client.world,
+            context.camera(),
+            context.tickCounter().getTickDelta(false),
+            context.matrixStack()
+    );
+});
 
 		// Register Karma Gate item renderer with custom transforms
 		var gateItemRenderer = new KarmaGateItemGeoRenderer();
