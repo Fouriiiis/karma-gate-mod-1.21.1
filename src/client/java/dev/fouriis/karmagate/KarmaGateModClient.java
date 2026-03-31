@@ -43,6 +43,7 @@ import dev.fouriis.karmagate.sound.MultiSound.Spec;
 import net.minecraft.registry.Registries;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import dev.fouriis.karmagate.client.wormgrass.WormGrassRenderCache;
@@ -53,6 +54,7 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.particle.v1.ParticleFactoryRegistry;
 import net.fabricmc.fabric.api.client.rendereregistry.v1.EntityRendererRegistry;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactories;
+import net.minecraft.client.util.InputUtil;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
@@ -60,8 +62,15 @@ import net.minecraft.world.World;
 import net.minecraft.client.MinecraftClient;
 import net.fabricmc.fabric.api.client.rendering.v1.BuiltinItemRendererRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.DimensionRenderingRegistry;
-
+import dev.fouriis.karmagate.client.cubefold.CubeFoldEffect;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.util.InputUtil;
+import org.lwjgl.glfw.GLFW;
 import java.util.Map;
+
+import org.lwjgl.glfw.GLFW;
+
 import java.util.HashMap;
 import dev.fouriis.karmagate.entity.karmagate.WaterStreamBlockEntity;
 import dev.fouriis.karmagate.client.network.ClientNetworking;
@@ -119,19 +128,36 @@ public class KarmaGateModClient implements ClientModInitializer {
 		// Register daddy long legs renderer
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.DADDY_LONG_LEGS_ENTITY_TYPE, DaddyLongLegsRenderer::new);
 
-		WorldRenderEvents.LAST.register(context -> {
-    MinecraftClient client = MinecraftClient.getInstance();
-    if (client.world == null) {
-        return;
-    }
+		// --- Cube fold effect ---
+		KeyBinding cubeFoldKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+				"key.karmagate.cube_fold",
+				InputUtil.Type.KEYSYM,
+				GLFW.GLFW_KEY_Z,
+				"category.karmagate.effects"
+		));
 
-    DeathRainWeatherRenderer.render(
-            client.world,
-            context.camera(),
-            context.tickCounter().getTickDelta(false),
-            context.matrixStack()
-    );
-});
+		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			while (cubeFoldKey.wasPressed()) {
+				CubeFoldEffect.trigger(client);
+			}
+			CubeFoldEffect.tick(client);
+		});
+
+		WorldRenderEvents.LAST.register(CubeFoldEffect::render);
+
+		WorldRenderEvents.LAST.register(context -> {
+			MinecraftClient client = MinecraftClient.getInstance();
+			if (client.world == null) {
+				return;
+			}
+
+			DeathRainWeatherRenderer.render(
+					client.world,
+					context.camera(),
+					context.tickCounter().getTickDelta(false),
+					context.matrixStack()
+			);
+		});
 
 		// Register Karma Gate item renderer with custom transforms
 		var gateItemRenderer = new KarmaGateItemGeoRenderer();
@@ -269,7 +295,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 		});
 
 		// Clear cached loop references on disconnect or new join to avoid stale sound state after rejoin
-		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+				ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
 			SteamAudioController.get().clear();
 			NeuronSwarmerManager.getInstance().clear();
 			CoralNeuronCircleManager.getInstance().clear();
@@ -279,6 +305,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			screwLoops.clear();
 			RotRenderCache.clearAll();
 			RotWorldRenderer.clearCache();
+			CubeFoldEffect.clear();
 		});
 
 		// --- Wormgrass client hooks ---
@@ -296,7 +323,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		// Render corruption spheres with eye patterns.
 		WorldRenderEvents.AFTER_ENTITIES.register(RotWorldRenderer::render);
-		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+				ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
 			SteamAudioController.get().clear();
 			NeuronSwarmerManager.getInstance().clear();
 			CoralNeuronCircleManager.getInstance().clear();
@@ -306,6 +333,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			screwLoops.clear();
 			RotRenderCache.clearAll();
 			RotWorldRenderer.clearCache();
+			CubeFoldEffect.clear();
 		});
 	}
 
