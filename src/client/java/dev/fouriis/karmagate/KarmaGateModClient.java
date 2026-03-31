@@ -2,78 +2,73 @@ package dev.fouriis.karmagate;
 
 import dev.fouriis.karmagate.client.AtcSkyFabricAdapter;
 import dev.fouriis.karmagate.client.gridproject.CoralNeuronCircleManager;
+import dev.fouriis.karmagate.client.network.ClientNetworking;
+import dev.fouriis.karmagate.client.rot.RotRenderCache;
+import dev.fouriis.karmagate.client.rot.RotWorldRenderer;
 import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerManager;
 import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerRenderer;
 import dev.fouriis.karmagate.client.weather.DeathRainWeatherRenderer;
+import dev.fouriis.karmagate.client.wormgrass.WormGrassRenderCache;
+import dev.fouriis.karmagate.client.wormgrass.WormGrassWorldRenderer;
+import dev.fouriis.karmagate.client.cubefold.CubeFoldEffect;
+import dev.fouriis.karmagate.client.graffiti.GraffitiEntityRenderer;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
+import dev.fouriis.karmagate.entity.centipede.CentiwingEntityRenderer;
+import dev.fouriis.karmagate.entity.centipede.CentipedeBodyRenderer;
+import dev.fouriis.karmagate.entity.centipede.CentipedeEntityRenderer;
+import dev.fouriis.karmagate.entity.centipede.CentipedeHeadRenderer;
+import dev.fouriis.karmagate.entity.centipede.RedCentipedeRenderer;
+import dev.fouriis.karmagate.entity.centipede.SmallCentipedeRenderer;
+import dev.fouriis.karmagate.entity.centipede.SmallCentiwingRenderer;
+import dev.fouriis.karmagate.entity.client.CoralNeuronEntityRenderer;
 import dev.fouriis.karmagate.entity.client.GateLightBlockRenderer;
+import dev.fouriis.karmagate.entity.client.GateLightItemModel;
+import dev.fouriis.karmagate.entity.client.HeatCoilItemModel;
 import dev.fouriis.karmagate.entity.client.HeatCoilRenderer;
 import dev.fouriis.karmagate.entity.client.KarmaGateBlockRenderer;
 import dev.fouriis.karmagate.entity.client.ShelterDoorRenderer;
-import dev.fouriis.karmagate.entity.client.CoralNeuronEntityRenderer;
 import dev.fouriis.karmagate.entity.client.WaterfallBlockRenderer;
-import dev.fouriis.karmagate.client.graffiti.GraffitiEntityRenderer;
-import dev.fouriis.karmagate.entity.stowaway.StowawayBugRenderer;
-import dev.fouriis.karmagate.entity.garbworm.GarbageWormRenderer;
-import dev.fouriis.karmagate.entity.centipede.CentipedeHeadRenderer;
-import dev.fouriis.karmagate.entity.centipede.CentipedeBodyRenderer;
-import dev.fouriis.karmagate.entity.centipede.RedCentipedeRenderer;
-import dev.fouriis.karmagate.entity.centipede.CentipedeEntityRenderer;
-import dev.fouriis.karmagate.entity.centipede.CentiwingEntityRenderer;
-import dev.fouriis.karmagate.entity.centipede.SmallCentipedeRenderer;
-import dev.fouriis.karmagate.entity.centipede.SmallCentiwingRenderer;
 import dev.fouriis.karmagate.entity.daddy.DaddyLongLegsRenderer;
+import dev.fouriis.karmagate.entity.garbworm.GarbageWormRenderer;
+import dev.fouriis.karmagate.entity.karmagate.WaterStreamBlockEntity;
 import dev.fouriis.karmagate.entity.spider.SpiderEntityRenderer;
+import dev.fouriis.karmagate.entity.stowaway.StowawayBugRenderer;
+import dev.fouriis.karmagate.hologram.HologramProjectorRenderer;
 import dev.fouriis.karmagate.item.KarmaGateItemGeoRenderer;
-import dev.fouriis.karmagate.entity.client.HeatCoilItemModel;
-import dev.fouriis.karmagate.entity.client.GateLightItemModel;
 import dev.fouriis.karmagate.item.tool.CoralNeuronClientDefinition;
 import dev.fouriis.karmagate.item.tool.ProjectionZoneClientDefinition;
-import net.brickcraftdream.librainworldmc.tool.api.SelectionToolRegistry;
-import software.bernie.geckolib.renderer.GeoItemRenderer;
-import dev.fouriis.karmagate.hologram.HologramProjectorRenderer;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.particle.SteamParticle;
 import dev.fouriis.karmagate.particle.WaterStreamParticle;
-import dev.fouriis.karmagate.sound.SteamAudioController;
+import dev.fouriis.karmagate.sound.GateAudioSpecs;
 import dev.fouriis.karmagate.sound.ModSounds;
 import dev.fouriis.karmagate.sound.MultiSound;
-import dev.fouriis.karmagate.sound.GateAudioSpecs;
 import dev.fouriis.karmagate.sound.MultiSound.Spec;
-import net.minecraft.registry.Registries;
+import dev.fouriis.karmagate.sound.SteamAudioController;
+import net.brickcraftdream.librainworldmc.tool.api.SelectionToolRegistry;
 import net.fabricmc.api.ClientModInitializer;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
-import dev.fouriis.karmagate.client.wormgrass.WormGrassRenderCache;
-import dev.fouriis.karmagate.client.wormgrass.WormGrassWorldRenderer;
-import dev.fouriis.karmagate.client.rot.RotRenderCache;
-import dev.fouriis.karmagate.client.rot.RotWorldRenderer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.particle.v1.ParticleFactoryRegistry;
 import net.fabricmc.fabric.api.client.rendereregistry.v1.EntityRendererRegistry;
+import net.fabricmc.fabric.api.client.rendering.v1.BuiltinItemRendererRegistry;
+import net.fabricmc.fabric.api.client.rendering.v1.DimensionRenderingRegistry;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import net.fabricmc.fabric.api.event.player.UseBlockCallback;
+import net.minecraft.block.Blocks;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactories;
-import net.minecraft.client.util.InputUtil;
-import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.registry.Registries;
+import net.minecraft.util.ActionResult;
+import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
-import net.minecraft.client.MinecraftClient;
-import net.fabricmc.fabric.api.client.rendering.v1.BuiltinItemRendererRegistry;
-import net.fabricmc.fabric.api.client.rendering.v1.DimensionRenderingRegistry;
-import dev.fouriis.karmagate.client.cubefold.CubeFoldEffect;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
-import net.minecraft.client.option.KeyBinding;
-import net.minecraft.client.util.InputUtil;
-import org.lwjgl.glfw.GLFW;
-import java.util.Map;
-
-import org.lwjgl.glfw.GLFW;
+import software.bernie.geckolib.renderer.GeoItemRenderer;
 
 import java.util.HashMap;
-import dev.fouriis.karmagate.entity.karmagate.WaterStreamBlockEntity;
-import dev.fouriis.karmagate.client.network.ClientNetworking;
+import java.util.Map;
 
 public class KarmaGateModClient implements ClientModInitializer {
 	@Override
@@ -87,7 +82,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		// Register distant structure billboards
 		//dev.fouriis.karmagate.client.DistantStructuresRenderer.init();
-		
+
 		// Register block entity renderer
 		BlockEntityRendererFactories.register(ModBlockEntities.KARMA_GATE_BLOCK_ENTITY, KarmaGateBlockRenderer::new);
 		BlockEntityRendererFactories.register(ModBlockEntities.SHELTER_DOOR_BLOCK_ENTITY, ShelterDoorRenderer::new);
@@ -103,10 +98,10 @@ public class KarmaGateModClient implements ClientModInitializer {
 		// Register neuron swarmer renderer
 		NeuronSwarmerRenderer.register();
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.VINE_ENTITY_TYPE, CoralNeuronEntityRenderer::new);
-		
+
 		// Register graffiti entity renderer
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.GRAFFITI_ENTITY_TYPE, GraffitiEntityRenderer::new);
-		
+
 		// Register stowaway bug entity renderer
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.STOWAWAY_BUG_ENTITY_TYPE, StowawayBugRenderer::new);
 
@@ -129,19 +124,19 @@ public class KarmaGateModClient implements ClientModInitializer {
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.DADDY_LONG_LEGS_ENTITY_TYPE, DaddyLongLegsRenderer::new);
 
 		// --- Cube fold effect ---
-		KeyBinding cubeFoldKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-				"key.karmagate.cube_fold",
-				InputUtil.Type.KEYSYM,
-				GLFW.GLFW_KEY_Z,
-				"category.karmagate.effects"
-		));
-
-		ClientTickEvents.END_CLIENT_TICK.register(client -> {
-			while (cubeFoldKey.wasPressed()) {
-				CubeFoldEffect.trigger(client);
+		UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
+			if (!world.isClient || hand != Hand.MAIN_HAND) {
+				return ActionResult.PASS;
 			}
-			CubeFoldEffect.tick(client);
+
+			if (world.getBlockState(hitResult.getBlockPos()).isOf(Blocks.DARK_OAK_DOOR)) {
+				CubeFoldEffect.trigger(MinecraftClient.getInstance());
+			}
+
+			return ActionResult.PASS;
 		});
+
+		ClientTickEvents.END_CLIENT_TICK.register(CubeFoldEffect::tick);
 
 		WorldRenderEvents.LAST.register(CubeFoldEffect::render);
 		WorldRenderEvents.END.register(CubeFoldEffect::onEndFrame);
@@ -200,8 +195,6 @@ public class KarmaGateModClient implements ClientModInitializer {
 				matrices.pop();
 			}
 		);
-
-
 
 		// Install client implementation for audio shim
 		final Map<BlockPos, MultiSound.Handle> clampLoops = new HashMap<>();
@@ -296,7 +289,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 		});
 
 		// Clear cached loop references on disconnect or new join to avoid stale sound state after rejoin
-				ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
 			SteamAudioController.get().clear();
 			NeuronSwarmerManager.getInstance().clear();
 			CoralNeuronCircleManager.getInstance().clear();
@@ -324,7 +317,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		// Render corruption spheres with eye patterns.
 		WorldRenderEvents.AFTER_ENTITIES.register(RotWorldRenderer::render);
-				ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
 			SteamAudioController.get().clear();
 			NeuronSwarmerManager.getInstance().clear();
 			CoralNeuronCircleManager.getInstance().clear();
