@@ -144,6 +144,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 		});
 
 		WorldRenderEvents.LAST.register(CubeFoldEffect::render);
+		WorldRenderEvents.END.register(CubeFoldEffect::onEndFrame);
 
 		WorldRenderEvents.LAST.register(context -> {
 			MinecraftClient client = MinecraftClient.getInstance();

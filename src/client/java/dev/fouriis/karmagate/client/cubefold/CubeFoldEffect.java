@@ -148,11 +148,10 @@ public final class CubeFoldEffect {
             return;
         }
 
+        // Capture is deferred to END so shader pipelines (e.g. Iris) have already
+        // composed the final world image into the framebuffer.
         if (pendingCapture) {
-            captureFromCurrentWorldFramebuffer(client);
-            pendingCapture = false;
-            active = true;
-            startMs = System.currentTimeMillis();
+            return;
         }
 
         if (!active || captureTextureId == null) {
@@ -272,6 +271,23 @@ public final class CubeFoldEffect {
         RenderSystem.disableCull();
         RenderSystem.depthMask(true);
         RenderSystem.disableBlend();
+    }
+
+    public static void onEndFrame(WorldRenderContext context) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (!pendingCapture) {
+            return;
+        }
+
+        if (client.world == null || client.player == null || context.camera() == null) {
+            clear();
+            return;
+        }
+
+        captureFromCurrentWorldFramebuffer(client);
+        pendingCapture = false;
+        active = true;
+        startMs = System.currentTimeMillis();
     }
 
     private static boolean emitClippedTriangle(BufferBuilder buffer,
