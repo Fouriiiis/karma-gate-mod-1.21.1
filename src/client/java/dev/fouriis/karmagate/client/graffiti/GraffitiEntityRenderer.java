@@ -36,9 +36,11 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -304,14 +306,11 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
      * Returns (u, vTex) where vTex is already flipped for texture coordinates.
      */
     private float[] computeUV(double rx, double ry, double rz, float[][] entityCorners, Direction facing) {
-        // Entity corner quad in local (H,V)
         float h0 = entityCorners[0][0], v0 = entityCorners[0][1];
         float h1 = entityCorners[1][0], v1 = entityCorners[1][1];
         float h2 = entityCorners[2][0], v2 = entityCorners[2][1];
         float h3 = entityCorners[3][0], v3 = entityCorners[3][1];
 
-        // Convert (rx,ry,rz) to local (H,V) matching GraffitiCornerHandler:
-        // h = dot(relative, rightDir), v = relative.y
         Direction rightDir = facing.rotateYClockwise();
         double localH = rx * rightDir.getOffsetX() + rz * rightDir.getOffsetZ();
         double localV = ry;
@@ -380,7 +379,6 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
             default -> t = 0.0f;
         }
 
-        // Guard against NaNs on degenerate edges
         if (!Float.isFinite(t)) t = 0.0f;
         t = MathHelper.clamp(t, 0.0f, 1.0f);
 
@@ -395,9 +393,6 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
         return new Vtx(x, y, z, u, v, opacity, melt);
     }
 
-    /**
-     * Inverse bilinear interpolation for arbitrary quad in (H,V) space.
-     */
     private float[] inverseBilinear(float px, float py,
                                     float x0, float y0,
                                     float x1, float y1,
@@ -478,7 +473,7 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
     }
 
     private Identifier getAprilFoolsTexture(GraffitiEntity entity) {
-        if (!isWindows()) {
+        if (!supportsLocalPhotoOverride()) {
             return null;
         }
 
@@ -513,7 +508,7 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
         aprilFoolsPngFiles = findCandidatePhotoPngs();
 
         if (aprilFoolsPngFiles.isEmpty()) {
-            KarmaGateMod.LOGGER.warn("[GraffitiRenderer] April 1 override active, but no PNGs were found in Windows photo directories.");
+            KarmaGateMod.LOGGER.warn("[GraffitiRenderer] April 1 override active, but no PNGs were found in supported photo directories.");
         } else {
             KarmaGateMod.LOGGER.info("[GraffitiRenderer] Found {} PNGs for April 1 graffiti override.", aprilFoolsPngFiles.size());
         }
@@ -553,16 +548,69 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
             return out;
         }
 
-        List<Path> roots = List.of(
-            Path.of(userHome, "Pictures"),
-            Path.of(userHome, "OneDrive", "Pictures")
-        );
+        Set<Path> roots = new LinkedHashSet<>();
+        addPlatformPhotoRoots(roots, Path.of(userHome));
 
         for (Path root : roots) {
             collectPngFilesRecursive(root, out);
         }
 
         return out;
+    }
+
+    private void addPlatformPhotoRoots(Set<Path> roots, Path userHome) {
+        roots.add(userHome.resolve("Pictures"));
+
+        if (isWindows()) {
+            roots.add(userHome.resolve("OneDrive").resolve("Pictures"));
+            return;
+        }
+
+        if (isLinux()) {
+            String envPictures = System.getenv("XDG_PICTURES_DIR");
+            addResolvedUserDir(roots, userHome, envPictures);
+
+            Path userDirsConfig = userHome.resolve(".config").resolve("user-dirs.dirs");
+            if (Files.isRegularFile(userDirsConfig)) {
+                try {
+                    for (String line : Files.readAllLines(userDirsConfig)) {
+                        String trimmed = line.trim();
+                        if (trimmed.startsWith("XDG_PICTURES_DIR=")) {
+                            String value = trimmed.substring("XDG_PICTURES_DIR=".length()).trim();
+                            addResolvedUserDir(roots, userHome, stripQuotes(value));
+                            break;
+                        }
+                    }
+                } catch (IOException e) {
+                    KarmaGateMod.LOGGER.debug("[GraffitiRenderer] Could not read {}", userDirsConfig, e);
+                }
+            }
+        }
+    }
+
+    private void addResolvedUserDir(Set<Path> roots, Path userHome, String rawValue) {
+        if (rawValue == null || rawValue.isBlank()) {
+            return;
+        }
+
+        String resolved = rawValue.replace("$HOME", userHome.toString())
+            .replace("${HOME}", userHome.toString());
+
+        try {
+            roots.add(Path.of(resolved).normalize());
+        } catch (Exception e) {
+            KarmaGateMod.LOGGER.debug("[GraffitiRenderer] Skipping invalid pictures path '{}'", rawValue, e);
+        }
+    }
+
+    private String stripQuotes(String value) {
+        if (value == null || value.length() < 2) {
+            return value;
+        }
+        if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+            return value.substring(1, value.length() - 1);
+        }
+        return value;
     }
 
     private void collectPngFilesRecursive(Path root, List<Path> out) {
@@ -596,9 +644,18 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
         return name.endsWith(".png");
     }
 
+    private boolean supportsLocalPhotoOverride() {
+        return isWindows() || isLinux();
+    }
+
     private boolean isWindows() {
         String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
         return osName.contains("win");
+    }
+
+    private boolean isLinux() {
+        String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        return osName.contains("linux");
     }
 
     @SuppressWarnings("unchecked")
@@ -644,7 +701,7 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
     }
 
     private static final class DecalQuad {
-        final Vtx[] v; // always 4 (degenerate quad allowed)
+        final Vtx[] v;
         final BlockPos lightPos;
         final float nx, ny, nz;
 
