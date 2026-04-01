@@ -426,7 +426,11 @@ public final class CubeFoldEffect {
 
         Vec3d camPos = context.camera().getPos();
         Matrix4f positionMatrix = context.matrixStack().peek().getPositionMatrix();
-        renderFallbackSkybox(camPos, positionMatrix);
+        // Keep the fallback sky hidden while the cube is fully closed to avoid
+        // a brief pre-unfold seam flash.
+        if (state.unfoldT() > 0.0f) {
+            renderFallbackSkybox(camPos, positionMatrix);
+        }
         renderFoldGeometry(camPos, positionMatrix, state.unfoldT(), state.alpha());
     }
 
@@ -509,7 +513,8 @@ public final class CubeFoldEffect {
         // Render fold panels without depth testing to avoid hand-shaped cutouts through the cube.
         RenderSystem.disableDepthTest();
         RenderSystem.depthMask(false);
-        RenderSystem.enableCull();
+        // Draw both sides to avoid a one-frame sky flash when panel winding flips during transition.
+        RenderSystem.disableCull();
 
         RenderSystem.setShader(GameRenderer::getPositionColorProgram);
         BufferBuilder blackBuffer = Tessellator.getInstance().begin(

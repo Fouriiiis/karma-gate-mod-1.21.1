@@ -1,6 +1,7 @@
 package dev.fouriis.karmagate.mixin;
 
 
+import net.minecraft.network.NetworkThreadUtils;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.server.network.ServerPlayNetworkHandler;
 import org.spongepowered.asm.mixin.Mixin;
@@ -14,6 +15,9 @@ public class DisableMovementCheckMixin {
     @Inject(method = "onPlayerMove", at = @At("HEAD"), cancellable = true)
     private void onPlayerMove(PlayerMoveC2SPacket packet, CallbackInfo ci) {
         ServerPlayNetworkHandler handler = (ServerPlayNetworkHandler) (Object) this;
+
+    // Mirror vanilla thread handoff to avoid off-thread world/chunk mutations.
+    NetworkThreadUtils.forceMainThread(packet, handler, handler.player.getServerWorld());
 
         handler.player.updatePositionAndAngles(
                 packet.getX(handler.player.getX()),
