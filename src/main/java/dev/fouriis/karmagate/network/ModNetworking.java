@@ -69,6 +69,11 @@ public class ModNetworking {
             DeleteProjectionZonePayload.CODEC
         );
 
+        PayloadTypeRegistry.playC2S().register(
+            UpdateBarrierPlatformPayload.ID,
+            UpdateBarrierPlatformPayload.CODEC
+        );
+
         ServerPlayNetworking.registerGlobalReceiver(SpawnGraffitiPayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
             context.server().execute(() -> {
@@ -213,6 +218,20 @@ public class ModNetworking {
                 syncToAll(context.server());
                 KarmaGateMod.LOGGER.info("Tool deleted ProjectionZone '{}' for player {}",
                         payload.name(), player.getName().getString());
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(UpdateBarrierPlatformPayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            context.server().execute(() -> {
+                ServerWorld world = player.getServerWorld();
+                
+                // Place barrier blocks at the specified positions
+                for (net.minecraft.util.math.BlockPos pos : payload.platformPositions()) {
+                    if (world.getBlockState(pos).isAir()) {
+                        world.setBlockState(pos, net.minecraft.block.Blocks.BARRIER.getDefaultState(), 3);
+                    }
+                }
             });
         });
     }

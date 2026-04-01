@@ -31,6 +31,7 @@ public class ModSounds {
     public static final Identifier OMINOUS_MACHINE_A = Identifier.of("karma-gate-mod:ominousmachinea");
     public static final Identifier STEAM_BLAST_A = Identifier.of("karma-gate-mod:steamblasta");
     public static final Identifier WATER_DRAIN_LOOP = Identifier.of("karma-gate-mod:waterdrainloop");
+    public static final Identifier THE_HORIZON_OF_EVENTS_WITHOUT_BURNIN_IN_QUESTION_FROM_A_PIERCE_HER = Identifier.of("karma-gate-mod:the-horizon-of-events-without-burnin-in-question-from-a-pierce-her");
 
     public static SoundEvent CAABINET_DOOR_EVENT = SoundEvent.of(CAABINET_DOOR);
     public static SoundEvent CAABINET_LOOP_EVENT = SoundEvent.of(CAABINET_LOOP);
@@ -48,6 +49,7 @@ public class ModSounds {
     public static SoundEvent OMINOUS_MACHINE_A_EVENT = SoundEvent.of(OMINOUS_MACHINE_A);
     public static SoundEvent STEAM_BLAST_A_EVENT = SoundEvent.of(STEAM_BLAST_A);
     public static SoundEvent WATER_DRAIN_LOOP_EVENT = SoundEvent.of(WATER_DRAIN_LOOP);
+    public static SoundEvent THE_HORIZON_OF_EVENTS_WITHOUT_BURNIN_IN_QUESTION_FROM_A_PIERCE_HER_EVENT = SoundEvent.of(THE_HORIZON_OF_EVENTS_WITHOUT_BURNIN_IN_QUESTION_FROM_A_PIERCE_HER);
 
     public static void registerModSounds() {
         Registry.register(Registries.SOUND_EVENT, STEAM_LOOP, STEAM_LOOP_EVENT);
@@ -68,6 +70,7 @@ public class ModSounds {
         Registry.register(Registries.SOUND_EVENT, OMINOUS_MACHINE_A, OMINOUS_MACHINE_A_EVENT);
         Registry.register(Registries.SOUND_EVENT, STEAM_BLAST_A, STEAM_BLAST_A_EVENT);
         Registry.register(Registries.SOUND_EVENT, WATER_DRAIN_LOOP, WATER_DRAIN_LOOP_EVENT);
+        Registry.register(Registries.SOUND_EVENT, THE_HORIZON_OF_EVENTS_WITHOUT_BURNIN_IN_QUESTION_FROM_A_PIERCE_HER, THE_HORIZON_OF_EVENTS_WITHOUT_BURNIN_IN_QUESTION_FROM_A_PIERCE_HER_EVENT);
         System.out.println("Registered sound events for karma-gate-mod");
     }
 

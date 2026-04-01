@@ -2,8 +2,11 @@ package dev.fouriis.karmagate.client.network;
 
 import dev.fouriis.karmagate.client.gridproject.ProjectionZone;
 import dev.fouriis.karmagate.network.ProjectionZoneSyncPayload;
+import dev.fouriis.karmagate.network.UpdateBarrierPlatformPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.util.math.BlockPos;
+
+import java.util.Set;
 
 /**
  * Handles client-side networking for projection zones.
@@ -48,4 +51,12 @@ public class ClientNetworking {
             payload.zones().size()
         );
     }
+
+    /**
+     * Sends a barrier platform update payload to the server.
+     */
+    public static void sendUpdateBarrierPlatform(BlockPos center, Set<BlockPos> platformPositions) {
+        ClientPlayNetworking.send(new UpdateBarrierPlatformPayload(center, platformPositions));
+    }
+
 }

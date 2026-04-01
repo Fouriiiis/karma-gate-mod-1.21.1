@@ -77,5 +77,13 @@
     "sounds": [
       { "name": "karma-gate-mod:waterdrainloop", "stream": true, "attenuation_distance": 32 }
     ]
+  },
+  "the-horizon-of-events-without-burnin-in-question-from-a-pierce-her": {
+    "sounds": [
+      {
+        "name": "karma-gate-mod:the-horizon-of-events-without-burnin-in-question-from-a-pierce-her",
+        "stream": true
+      }
+    ]
   }
 }

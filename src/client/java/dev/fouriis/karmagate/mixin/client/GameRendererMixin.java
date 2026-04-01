@@ -1,6 +1,7 @@
 package dev.fouriis.karmagate.mixin.client;
 
 import dev.fouriis.karmagate.client.DistantStructuresRenderer;
+import dev.fouriis.karmagate.client.cubefold.CubeFoldEffect;
 import dev.fouriis.karmagate.client.gridproject.GridProjectRenderer;
 import net.minecraft.client.render.Camera;
 import net.minecraft.client.render.GameRenderer;
@@ -24,6 +25,10 @@ public class GameRendererMixin {
         Matrix4f projectionMatrix, Matrix4f matrix4f2,
         CallbackInfo ci
     ) {
+        if (CubeFoldEffect.shouldSuppressExtraWorldRender()) {
+            return;
+        }
+
         
         float tickDelta = tickCounter.getTickDelta(true);
         DistantStructuresRenderer.renderLate(tickDelta, camera);

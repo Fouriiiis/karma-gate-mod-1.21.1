@@ -27,6 +27,7 @@ import net.brickcraftdream.librainworldmc.tool.api.SelectionToolRegistry;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
 import net.minecraft.entity.EntityDimensions;
@@ -35,6 +36,9 @@ import net.minecraft.entity.SpawnGroup;
 import net.minecraft.registry.Registries;
 import net.minecraft.registry.Registry;
 import net.minecraft.util.Identifier;
+import net.minecraft.block.DoorBlock;
+import net.minecraft.util.ActionResult;
+import net.minecraft.util.Hand;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -214,6 +218,18 @@ public class KarmaGateMod implements ModInitializer {
         // Wormgrass server-side grab / bury tick
         ServerTickEvents.END_WORLD_TICK.register(world ->
                 dev.fouriis.karmagate.block.WormGrassManager.tick(world));
+
+        // Server-side door interaction cancellation
+        UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
+            if (!world.isClient && hand == Hand.MAIN_HAND) {
+                net.minecraft.block.BlockState state = world.getBlockState(hitResult.getBlockPos());
+                if (state.getBlock() instanceof DoorBlock) {
+                    // Cancel door interaction on server side
+                    return ActionResult.SUCCESS;
+                }
+            }
+            return ActionResult.PASS;
+        });
 
         
 

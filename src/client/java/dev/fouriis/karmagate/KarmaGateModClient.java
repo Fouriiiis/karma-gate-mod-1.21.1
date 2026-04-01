@@ -54,9 +54,12 @@ import net.fabricmc.fabric.api.client.particle.v1.ParticleFactoryRegistry;
 import net.fabricmc.fabric.api.client.rendereregistry.v1.EntityRendererRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.BuiltinItemRendererRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.DimensionRenderingRegistry;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.DoorBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactories;
 import net.minecraft.registry.Registries;
@@ -125,12 +128,18 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		// --- Cube fold effect ---
 		UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
-			if (!world.isClient || hand != Hand.MAIN_HAND) {
+			if (hand != Hand.MAIN_HAND) {
 				return ActionResult.PASS;
 			}
 
-			if (world.getBlockState(hitResult.getBlockPos()).isOf(Blocks.DARK_OAK_DOOR)) {
-				CubeFoldEffect.trigger(MinecraftClient.getInstance());
+			BlockState state = world.getBlockState(hitResult.getBlockPos());
+
+			if (state.getBlock() instanceof DoorBlock) {
+				if (world.isClient) {
+					CubeFoldEffect.trigger(MinecraftClient.getInstance());
+				}
+				// Returning SUCCESS on the server cancels the vanilla door interaction
+				return ActionResult.SUCCESS;
 			}
 
 			return ActionResult.PASS;
@@ -140,6 +149,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		WorldRenderEvents.LAST.register(CubeFoldEffect::render);
 		WorldRenderEvents.END.register(CubeFoldEffect::onEndFrame);
+		HudRenderCallback.EVENT.register((context, tickCounter) -> CubeFoldEffect.renderCaptureOverlay(context));
 
 		WorldRenderEvents.LAST.register(context -> {
 			MinecraftClient client = MinecraftClient.getInstance();
@@ -147,12 +157,12 @@ public class KarmaGateModClient implements ClientModInitializer {
 				return;
 			}
 
-			DeathRainWeatherRenderer.render(
-					client.world,
-					context.camera(),
-					context.tickCounter().getTickDelta(false),
-					context.matrixStack()
-			);
+			//DeathRainWeatherRenderer.render(
+			//		client.world,
+			//		context.camera(),
+			//		context.tickCounter().getTickDelta(false),
+			//		context.matrixStack()
+			//);
 		});
 
 		// Register Karma Gate item renderer with custom transforms
@@ -299,7 +309,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			screwLoops.clear();
 			RotRenderCache.clearAll();
 			RotWorldRenderer.clearCache();
-			CubeFoldEffect.clear();
+			CubeFoldEffect.clearForWorldTransition();
 		});
 
 		// --- Wormgrass client hooks ---
@@ -327,7 +337,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			screwLoops.clear();
 			RotRenderCache.clearAll();
 			RotWorldRenderer.clearCache();
-			CubeFoldEffect.clear();
+			CubeFoldEffect.clearForWorldTransition();
 		});
 	}
 

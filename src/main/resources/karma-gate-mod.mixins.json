@@ -1,14 +1,15 @@
 {
-	"required": true,
-	"package": "dev.fouriis.karmagate.mixin",
-	"compatibilityLevel": "JAVA_21",
-	"mixins": [
-		"ExampleMixin"
-	],
-	"injectors": {
-		"defaultRequire": 1
-	},
-	"overwrites": {
-		"requireAnnotations": true
+  "required": true,
+  "package": "dev.fouriis.karmagate.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "DisableMovementCheckMixin",
+    "ExampleMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "overwrites": {
+    "requireAnnotations": true
 	}
 }
