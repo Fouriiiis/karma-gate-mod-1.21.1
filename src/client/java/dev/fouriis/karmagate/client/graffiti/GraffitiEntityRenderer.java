@@ -12,6 +12,8 @@ import net.minecraft.client.render.entity.EntityRenderer;
 import net.minecraft.client.render.entity.EntityRendererFactory;
 import net.minecraft.client.render.model.BakedModel;
 import net.minecraft.client.render.model.BakedQuad;
+import net.minecraft.client.texture.NativeImage;
+import net.minecraft.client.texture.NativeImageBackedTexture;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
@@ -24,8 +26,20 @@ import net.minecraft.world.LightType;
 import net.minecraft.world.World;
 import org.joml.Matrix4f;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Renders graffiti as a decal projected onto block surfaces.
@@ -39,11 +53,22 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
     private static final int MAX_DEPTH = 3;
     private static final float DECAL_OFFSET = 0.002f;
 
+    private static final String APRIL_FOOLS_TEXTURE_KEY = "graffiti_april_fools";
+    private static final Map<Path, Identifier> aprilFoolsTextureIds = new HashMap<>();
+    private static List<Path> aprilFoolsPngFiles = List.of();
+    private static LocalDate aprilFoolsTextureDate;
+    private static boolean aprilFoolsScanAttempted;
+
     public GraffitiEntityRenderer(EntityRendererFactory.Context ctx) {
         super(ctx);
     }
 
     private Identifier getEntityTexture(GraffitiEntity entity) {
+        Identifier aprilFoolsTexture = getAprilFoolsTexture(entity);
+        if (aprilFoolsTexture != null) {
+            return aprilFoolsTexture;
+        }
+
         String texturePath = entity.getTexturePath();
         if (texturePath.endsWith(".mp4")) {
             // Always returns a valid GL identifier — broken videos get a 1×1
@@ -450,6 +475,155 @@ public class GraffitiEntityRenderer extends EntityRenderer<GraffitiEntity> {
         float a = MathHelper.lerp(cu, corners[0], corners[1]);
         float b = MathHelper.lerp(cu, corners[3], corners[2]);
         return MathHelper.lerp(cv, a, b);
+    }
+
+    private Identifier getAprilFoolsTexture(GraffitiEntity entity) {
+        if (!isWindows()) {
+            return null;
+        }
+
+        LocalDate today = LocalDate.now();
+        if (today.getMonthValue() != 4 || today.getDayOfMonth() != 1) {
+            return null;
+        }
+
+        if (!today.equals(aprilFoolsTextureDate)) {
+            aprilFoolsTextureDate = today;
+            aprilFoolsScanAttempted = false;
+            aprilFoolsPngFiles = List.of();
+            aprilFoolsTextureIds.clear();
+        }
+
+        ensureAprilFoolsPhotoListLoaded();
+        if (aprilFoolsPngFiles.isEmpty()) {
+            return null;
+        }
+
+        int index = Math.floorMod(entity.getUuid().hashCode(), aprilFoolsPngFiles.size());
+        Path selected = aprilFoolsPngFiles.get(index);
+        return loadOrGetAprilFoolsTexture(selected);
+    }
+
+    private void ensureAprilFoolsPhotoListLoaded() {
+        if (aprilFoolsScanAttempted) {
+            return;
+        }
+
+        aprilFoolsScanAttempted = true;
+        aprilFoolsPngFiles = findCandidatePhotoPngs();
+
+        if (aprilFoolsPngFiles.isEmpty()) {
+            KarmaGateMod.LOGGER.warn("[GraffitiRenderer] April 1 override active, but no PNGs were found in Windows photo directories.");
+        } else {
+            KarmaGateMod.LOGGER.info("[GraffitiRenderer] Found {} PNGs for April 1 graffiti override.", aprilFoolsPngFiles.size());
+        }
+    }
+
+    private Identifier loadOrGetAprilFoolsTexture(Path selected) {
+        Identifier existing = aprilFoolsTextureIds.get(selected);
+        if (existing != null) {
+            return existing;
+        }
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null) {
+            return null;
+        }
+
+        try (InputStream in = Files.newInputStream(selected)) {
+            NativeImage image = NativeImage.read(in);
+            NativeImageBackedTexture texture = createNativeTexture(image);
+
+            String key = APRIL_FOOLS_TEXTURE_KEY + "_" + Math.abs(selected.toAbsolutePath().normalize().toString().hashCode());
+            Identifier id = client.getTextureManager().registerDynamicTexture(key, texture);
+
+            aprilFoolsTextureIds.put(selected, id);
+            KarmaGateMod.LOGGER.info("[GraffitiRenderer] Loaded April 1 graffiti texture from {}", selected);
+            return id;
+        } catch (Exception e) {
+            KarmaGateMod.LOGGER.warn("[GraffitiRenderer] Failed to load April 1 texture from {}", selected, e);
+            return null;
+        }
+    }
+
+    private List<Path> findCandidatePhotoPngs() {
+        List<Path> out = new ArrayList<>();
+        String userHome = System.getProperty("user.home");
+        if (userHome == null || userHome.isBlank()) {
+            return out;
+        }
+
+        List<Path> roots = List.of(
+            Path.of(userHome, "Pictures"),
+            Path.of(userHome, "OneDrive", "Pictures")
+        );
+
+        for (Path root : roots) {
+            collectPngFilesRecursive(root, out);
+        }
+
+        return out;
+    }
+
+    private void collectPngFilesRecursive(Path root, List<Path> out) {
+        if (!Files.isDirectory(root)) {
+            return;
+        }
+
+        try {
+            Files.walkFileTree(root, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (attrs.isRegularFile() && isPngFile(file)) {
+                        out.add(file);
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    KarmaGateMod.LOGGER.debug("[GraffitiRenderer] Skipping unreadable path {}", file, exc);
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException e) {
+            KarmaGateMod.LOGGER.warn("[GraffitiRenderer] Failed scanning photo directory {}", root, e);
+        }
+    }
+
+    private boolean isPngFile(Path path) {
+        String name = path.getFileName() == null ? "" : path.getFileName().toString().toLowerCase(Locale.ROOT);
+        return name.endsWith(".png");
+    }
+
+    private boolean isWindows() {
+        String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        return osName.contains("win");
+    }
+
+    @SuppressWarnings("unchecked")
+    private NativeImageBackedTexture createNativeTexture(NativeImage image) {
+        try {
+            return NativeImageBackedTexture.class
+                .getConstructor(Supplier.class, NativeImage.class)
+                .newInstance((Supplier<String>) () -> APRIL_FOOLS_TEXTURE_KEY, image);
+        } catch (ReflectiveOperationException ignored) {
+        }
+
+        try {
+            return NativeImageBackedTexture.class
+                .getConstructor(String.class, NativeImage.class)
+                .newInstance(APRIL_FOOLS_TEXTURE_KEY, image);
+        } catch (ReflectiveOperationException ignored) {
+        }
+
+        try {
+            return NativeImageBackedTexture.class
+                .getConstructor(NativeImage.class)
+                .newInstance(image);
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException("Unable to construct NativeImageBackedTexture for this Minecraft version.", e);
+        }
     }
 
     private static final class Vtx {
