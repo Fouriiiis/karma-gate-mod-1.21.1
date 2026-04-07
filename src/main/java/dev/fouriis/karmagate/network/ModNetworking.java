@@ -7,6 +7,7 @@ import dev.fouriis.karmagate.coralneuron.CoralNeuronManager;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneData;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneManager;
+import dev.fouriis.karmagate.rain.GlobalRain;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -31,6 +32,11 @@ public class ModNetworking {
         PayloadTypeRegistry.playS2C().register(
             ProjectionZoneSyncPayload.ID, 
             ProjectionZoneSyncPayload.CODEC
+        );
+
+        PayloadTypeRegistry.playS2C().register(
+            GlobalRainSyncPayload.ID,
+            GlobalRainSyncPayload.CODEC
         );
         
         // Register the graffiti spawn payload type (client -> server)
@@ -117,6 +123,7 @@ public class ModNetworking {
         // Sync zones to players when they join
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             syncToPlayer(handler.getPlayer());
+            syncGlobalRainToPlayer(handler.getPlayer(), GlobalRain.get(server).getBulletRainDensity());
         });
 
         ServerPlayNetworking.registerGlobalReceiver(DeleteGraffitiPayload.ID, (payload, context) -> {
@@ -252,6 +259,17 @@ public class ModNetworking {
         ProjectionZoneManager manager = ProjectionZoneManager.get(server);
         ProjectionZoneSyncPayload payload = ProjectionZoneSyncPayload.fromZones(manager.getAllZones());
         
+        for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
+            ServerPlayNetworking.send(player, payload);
+        }
+    }
+
+    public static void syncGlobalRainToPlayer(ServerPlayerEntity player, float bulletRainDensity) {
+        ServerPlayNetworking.send(player, new GlobalRainSyncPayload(bulletRainDensity));
+    }
+
+    public static void syncGlobalRainToAll(net.minecraft.server.MinecraftServer server, float bulletRainDensity) {
+        GlobalRainSyncPayload payload = new GlobalRainSyncPayload(bulletRainDensity);
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             ServerPlayNetworking.send(player, payload);
         }

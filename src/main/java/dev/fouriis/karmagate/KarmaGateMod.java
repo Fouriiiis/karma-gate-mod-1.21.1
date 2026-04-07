@@ -2,6 +2,7 @@ package dev.fouriis.karmagate;
 
 import dev.fouriis.karmagate.block.ModBlocks;
 import dev.fouriis.karmagate.command.CoralNeuronCommands;
+import dev.fouriis.karmagate.command.GlobalRainCommands;
 import dev.fouriis.karmagate.command.ProjectionZoneCommands;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
@@ -23,6 +24,7 @@ import dev.fouriis.karmagate.item.tool.ProjectionZoneDefinition;
 import dev.fouriis.karmagate.network.ModNetworking;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.ModSounds;
+import dev.fouriis.karmagate.rain.GlobalRain;
 import net.brickcraftdream.librainworldmc.tool.api.SelectionToolRegistry;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -184,6 +186,8 @@ public class KarmaGateMod implements ModInitializer {
 
     @Override
     public void onInitialize() {
+                
+
         // Register mod content
         ModBlocks.registerModBlocks();
         ModBlockEntities.registerBlockEntities();
@@ -213,7 +217,10 @@ public class KarmaGateMod implements ModInitializer {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
             ProjectionZoneCommands.register(dispatcher);
             CoralNeuronCommands.register(dispatcher);
+                        GlobalRainCommands.register(dispatcher);
         });
+
+                ServerTickEvents.END_SERVER_TICK.register(server -> GlobalRain.get(server).tick(server));
 
         // Wormgrass server-side grab / bury tick
         ServerTickEvents.END_WORLD_TICK.register(world ->

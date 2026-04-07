@@ -1,6 +1,8 @@
 package dev.fouriis.karmagate.client.network;
 
 import dev.fouriis.karmagate.client.gridproject.ProjectionZone;
+import dev.fouriis.karmagate.client.weather.GlobalRainClientState;
+import dev.fouriis.karmagate.network.GlobalRainSyncPayload;
 import dev.fouriis.karmagate.network.ProjectionZoneSyncPayload;
 import dev.fouriis.karmagate.network.UpdateBarrierPlatformPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
@@ -27,6 +29,11 @@ public class ClientNetworking {
                     applyZoneSync(payload);
                 });
             }
+        );
+
+        ClientPlayNetworking.registerGlobalReceiver(
+            GlobalRainSyncPayload.ID,
+            (payload, context) -> context.client().execute(() -> GlobalRainClientState.applySync(payload.bulletRainDensity()))
         );
     }
     

@@ -7,7 +7,9 @@ import dev.fouriis.karmagate.client.rot.RotRenderCache;
 import dev.fouriis.karmagate.client.rot.RotWorldRenderer;
 import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerManager;
 import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerRenderer;
+import dev.fouriis.karmagate.client.weather.BulletRainRender;
 import dev.fouriis.karmagate.client.weather.DeathRainWeatherRenderer;
+import dev.fouriis.karmagate.client.weather.GlobalRainClientState;
 import dev.fouriis.karmagate.client.wormgrass.WormGrassRenderCache;
 import dev.fouriis.karmagate.client.wormgrass.WormGrassWorldRenderer;
 import dev.fouriis.karmagate.client.cubefold.CubeFoldEffect;
@@ -157,6 +159,13 @@ public class KarmaGateModClient implements ClientModInitializer {
 				return;
 			}
 
+			BulletRainRender.render(
+					client.world,
+					context.camera(),
+					context.tickCounter().getTickDelta(false),
+					context.matrixStack()
+			);
+
 			//DeathRainWeatherRenderer.render(
 			//		client.world,
 			//		context.camera(),
@@ -303,6 +312,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			SteamAudioController.get().clear();
 			NeuronSwarmerManager.getInstance().clear();
 			CoralNeuronCircleManager.getInstance().clear();
+			GlobalRainClientState.clear();
 			clampLoops.values().forEach(MultiSound.Handle::stop);
 			screwLoops.values().forEach(MultiSound.Handle::stop);
 			clampLoops.clear();
@@ -331,6 +341,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			SteamAudioController.get().clear();
 			NeuronSwarmerManager.getInstance().clear();
 			CoralNeuronCircleManager.getInstance().clear();
+			GlobalRainClientState.clear();
 			clampLoops.values().forEach(MultiSound.Handle::stop);
 			screwLoops.values().forEach(MultiSound.Handle::stop);
 			clampLoops.clear();
