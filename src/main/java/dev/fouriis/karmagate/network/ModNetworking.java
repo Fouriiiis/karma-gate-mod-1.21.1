@@ -123,7 +123,14 @@ public class ModNetworking {
         // Sync zones to players when they join
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             syncToPlayer(handler.getPlayer());
-            syncGlobalRainToPlayer(handler.getPlayer(), GlobalRain.get(server).getBulletRainDensity());
+            GlobalRain rain = GlobalRain.get(server);
+            syncGlobalRainToPlayer(
+                    handler.getPlayer(),
+                    rain.getIntensity(),
+                    rain.getRainDirection(),
+                    rain.getBulletRainDensity(),
+                    rain.getRumbleSound()
+            );
         });
 
         ServerPlayNetworking.registerGlobalReceiver(DeleteGraffitiPayload.ID, (payload, context) -> {
@@ -264,12 +271,20 @@ public class ModNetworking {
         }
     }
 
-    public static void syncGlobalRainToPlayer(ServerPlayerEntity player, float bulletRainDensity) {
-        ServerPlayNetworking.send(player, new GlobalRainSyncPayload(bulletRainDensity));
+    public static void syncGlobalRainToPlayer(ServerPlayerEntity player,
+                                              float intensity,
+                                              float rainDirection,
+                                              float bulletRainDensity,
+                                              float rumbleSound) {
+        ServerPlayNetworking.send(player, new GlobalRainSyncPayload(intensity, rainDirection, bulletRainDensity, rumbleSound));
     }
 
-    public static void syncGlobalRainToAll(net.minecraft.server.MinecraftServer server, float bulletRainDensity) {
-        GlobalRainSyncPayload payload = new GlobalRainSyncPayload(bulletRainDensity);
+    public static void syncGlobalRainToAll(net.minecraft.server.MinecraftServer server,
+                                           float intensity,
+                                           float rainDirection,
+                                           float bulletRainDensity,
+                                           float rumbleSound) {
+        GlobalRainSyncPayload payload = new GlobalRainSyncPayload(intensity, rainDirection, bulletRainDensity, rumbleSound);
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             ServerPlayNetworking.send(player, payload);
         }

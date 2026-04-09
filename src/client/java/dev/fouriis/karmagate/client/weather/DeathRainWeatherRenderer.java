@@ -1,6 +1,7 @@
 package dev.fouriis.karmagate.client.weather;
 
 import com.mojang.blaze3d.systems.RenderSystem;
+import dev.fouriis.karmagate.rain.GlobalRain;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.color.world.BiomeColors;
@@ -26,6 +27,7 @@ public final class DeathRainWeatherRenderer {
     private static final int DEBUG_RADIUS = 12;
     private static final float FACE_EPSILON = 0.001f;
     private static final float SCREEN_RAIN_TRANSITION_DISTANCE = 1.25f;
+    private static final float MIN_RENDER_INTENSITY = 0.01f;
 
     private static final Identifier LEVEL_TEXTURE =
             Identifier.of("librainworldmc", "grabtex");
@@ -49,19 +51,29 @@ public final class DeathRainWeatherRenderer {
             return;
         }
 
+        float rainIntensity = resolveGlobalRainIntensity();
+        if (rainIntensity < MIN_RENDER_INTENSITY) {
+            return;
+        }
+        float rainDirection = resolveGlobalRainDirection();
+
         RainBorderTransition transition = findNearestRainBorderTransition(world, camera);
         float coverage = computeScreenRainCoverage(transition);
 
-        renderBorderCurtains(world, camera, matrices);
+        renderBorderCurtains(world, camera, matrices, rainIntensity, rainDirection);
 
         if (coverage > 0.0f) {
             float axis = 0.0f; // reveal left/right
             float flip = transition.rainOnPositiveSide ? 0.0f : 1.0f;
-            renderScreenRainOverlay(world, camera, matrices, coverage, axis, flip);
+            renderScreenRainOverlay(world, camera, matrices, coverage, axis, flip, rainIntensity, rainDirection);
         }
     }
 
-    private static void renderBorderCurtains(World world, Camera camera, MatrixStack matrices) {
+    private static void renderBorderCurtains(World world,
+                                             Camera camera,
+                                             MatrixStack matrices,
+                                             float rainIntensity,
+                                             float rainDirection) {
         MinecraftClient client = MinecraftClient.getInstance();
         BlockPos anchor = client.player.getBlockPos();
         int playerY = anchor.getY();
@@ -96,7 +108,9 @@ public final class DeathRainWeatherRenderer {
                                     topY,
                                     bottomY,
                                     CurtainOrientation.NORTH_SOUTH,
-                                    false
+                                        false,
+                                        rainIntensity,
+                                        rainDirection
                             );
                         }
                     } else {
@@ -114,7 +128,9 @@ public final class DeathRainWeatherRenderer {
                                     topY,
                                     bottomY,
                                     CurtainOrientation.NORTH_SOUTH,
-                                    true
+                                        true,
+                                        rainIntensity,
+                                        rainDirection
                             );
                         }
                     }
@@ -139,7 +155,9 @@ public final class DeathRainWeatherRenderer {
                                     topY,
                                     bottomY,
                                     CurtainOrientation.EAST_WEST,
-                                    true
+                                        true,
+                                        rainIntensity,
+                                        rainDirection
                             );
                         }
                     } else {
@@ -157,7 +175,9 @@ public final class DeathRainWeatherRenderer {
                                     topY,
                                     bottomY,
                                     CurtainOrientation.EAST_WEST,
-                                    false
+                                        false,
+                                        rainIntensity,
+                                        rainDirection
                             );
                         }
                     }
@@ -260,16 +280,18 @@ public final class DeathRainWeatherRenderer {
             float worldZ,
             float screenCoverage,
             float screenCoverageAxis,
-            float screenCoverageFlip
+            float screenCoverageFlip,
+            float rainIntensity01,
+            float rainDirectionSigned
     ) {
         float[] spriteRect = new float[]{0f, 0f, 1f, 1f};
         float[] rippleGold = new float[]{0f, 0f, 0f, 0f};
 
-        float rainDirection = 1.5f;
+        float rainDirection = rainDirectionSigned;
         float rainEverywhere = 1.0f;
-        float rainIntensity = 1.0f;
+        float rainIntensity = clamp01(rainIntensity01);
         float waterLevel = 0.0f;
-        float scale = 10.0f;
+        float scale = lerp(12.0f, 8.0f, rainIntensity);
         float pitchStretch = computePitchStretch(camera);
 
         CoreShaderRenderer.bindShader$DeathRain(
@@ -315,15 +337,28 @@ public final class DeathRainWeatherRenderer {
             float topY,
             float bottomY,
             CurtainOrientation orientation,
-            boolean positiveFacing
+            boolean positiveFacing,
+            float rainIntensity,
+            float rainDirection
     ) {
         try {
-            bindDeathRainShader(world, camera, worldX, (topY + bottomY) * 0.5f, worldZ, 1.0f, 0.0f, 0.0f);
+            bindDeathRainShader(
+                world,
+                camera,
+                worldX,
+                (topY + bottomY) * 0.5f,
+                worldZ,
+                1.0f,
+                0.0f,
+                0.0f,
+                rainIntensity,
+                rainDirection
+            );
 
             int r = 255;
             int g = 255;
             int b = 255;
-            int a = 255;
+            int a = computeRenderAlpha(rainIntensity);
 
             RenderSystem.enableBlend();
             RenderSystem.defaultBlendFunc();
@@ -378,7 +413,9 @@ public final class DeathRainWeatherRenderer {
             MatrixStack matrices,
             float coverage,
             float coverageAxis,
-            float coverageFlip
+            float coverageFlip,
+            float rainIntensity,
+            float rainDirection
     ) {
         try {
             Vec3d camPos = camera.getPos();
@@ -389,9 +426,11 @@ public final class DeathRainWeatherRenderer {
                     (float) camPos.x,
                     (float) camPos.y,
                     (float) camPos.z,
-                    coverage,
+                        coverage * rainIntensity,
                     coverageAxis,
-                    coverageFlip
+                        coverageFlip,
+                        rainIntensity,
+                        rainDirection
             );
 
             RenderSystem.enableBlend();
@@ -410,30 +449,31 @@ public final class DeathRainWeatherRenderer {
             );
 
             int light = LightmapTextureManager.MAX_LIGHT_COORDINATE;
+                int alpha = computeRenderAlpha(rainIntensity);
 
             buffer.vertex(m, -1.0f,  1.0f, 0.0f)
-                    .color(255, 255, 255, 255)
+                    .color(255, 255, 255, alpha)
                     .texture(0f, 0f)
                     .overlay(OverlayTexture.DEFAULT_UV)
                     .light(light)
                     .normal(0.0f, 0.0f, -1.0f);
 
             buffer.vertex(m,  1.0f,  1.0f, 0.0f)
-                    .color(255, 255, 255, 255)
+                    .color(255, 255, 255, alpha)
                     .texture(1f, 0f)
                     .overlay(OverlayTexture.DEFAULT_UV)
                     .light(light)
                     .normal(0.0f, 0.0f, -1.0f);
 
             buffer.vertex(m,  1.0f, -1.0f, 0.0f)
-                    .color(255, 255, 255, 255)
+                    .color(255, 255, 255, alpha)
                     .texture(1f, 1f)
                     .overlay(OverlayTexture.DEFAULT_UV)
                     .light(light)
                     .normal(0.0f, 0.0f, -1.0f);
 
             buffer.vertex(m, -1.0f, -1.0f, 0.0f)
-                    .color(255, 255, 255, 255)
+                    .color(255, 255, 255, alpha)
                     .texture(0f, 1f)
                     .overlay(OverlayTexture.DEFAULT_UV)
                     .light(light)
@@ -526,6 +566,50 @@ public final class DeathRainWeatherRenderer {
 
     private static boolean isOpenToSky(World world, BlockPos pos) {
         return pos.getY() >= world.getBottomY() && world.isSkyVisible(pos);
+    }
+
+    private static float resolveGlobalRainIntensity() {
+        if (GlobalRainClientState.hasSync()) {
+            return clamp01(GlobalRainClientState.intensity());
+        }
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.getServer() != null) {
+            return clamp01(GlobalRain.get(client.getServer()).getIntensity());
+        }
+
+        return 0.0f;
+    }
+
+    private static float resolveGlobalRainDirection() {
+        if (GlobalRainClientState.hasSync()) {
+            return GlobalRainClientState.rainDirection();
+        }
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.getServer() != null) {
+            return GlobalRain.get(client.getServer()).getRainDirection();
+        }
+
+        return 0.0f;
+    }
+
+    private static int computeRenderAlpha(float rainIntensity) {
+        return (int) (80.0f + 175.0f * clamp01(rainIntensity));
+    }
+
+    private static float clamp01(float value) {
+        if (value < 0.0f) {
+            return 0.0f;
+        }
+        if (value > 1.0f) {
+            return 1.0f;
+        }
+        return value;
+    }
+
+    private static float lerp(float start, float end, float delta) {
+        return start + (end - start) * delta;
     }
 
     private static float getCoverUndersideY(World world, int x, int z, int playerY) {

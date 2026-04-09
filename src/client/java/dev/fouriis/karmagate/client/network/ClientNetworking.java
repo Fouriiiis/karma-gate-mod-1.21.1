@@ -33,7 +33,14 @@ public class ClientNetworking {
 
         ClientPlayNetworking.registerGlobalReceiver(
             GlobalRainSyncPayload.ID,
-            (payload, context) -> context.client().execute(() -> GlobalRainClientState.applySync(payload.bulletRainDensity()))
+            (payload, context) -> context.client().execute(() ->
+                    GlobalRainClientState.applySync(
+                            payload.intensity(),
+                            payload.rainDirection(),
+                            payload.bulletRainDensity(),
+                            payload.rumbleSound()
+                    )
+            )
         );
     }
     
