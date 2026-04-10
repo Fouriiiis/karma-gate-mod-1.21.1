@@ -129,7 +129,9 @@ public class ModNetworking {
                     rain.getIntensity(),
                     rain.getRainDirection(),
                     rain.getBulletRainDensity(),
-                    rain.getRumbleSound()
+                    rain.getRumbleSound(),
+                    rain.getScreenShake(),
+                    rain.getMicroScreenShake()
             );
         });
 
@@ -275,16 +277,37 @@ public class ModNetworking {
                                               float intensity,
                                               float rainDirection,
                                               float bulletRainDensity,
-                                              float rumbleSound) {
-        ServerPlayNetworking.send(player, new GlobalRainSyncPayload(intensity, rainDirection, bulletRainDensity, rumbleSound));
+                                              float rumbleSound,
+                                              float screenShake,
+                                              float microScreenShake) {
+        ServerPlayNetworking.send(
+                player,
+                new GlobalRainSyncPayload(
+                        intensity,
+                        rainDirection,
+                        bulletRainDensity,
+                        rumbleSound,
+                        screenShake,
+                        microScreenShake
+                )
+        );
     }
 
     public static void syncGlobalRainToAll(net.minecraft.server.MinecraftServer server,
                                            float intensity,
                                            float rainDirection,
                                            float bulletRainDensity,
-                                           float rumbleSound) {
-        GlobalRainSyncPayload payload = new GlobalRainSyncPayload(intensity, rainDirection, bulletRainDensity, rumbleSound);
+                                           float rumbleSound,
+                                           float screenShake,
+                                           float microScreenShake) {
+        GlobalRainSyncPayload payload = new GlobalRainSyncPayload(
+                intensity,
+                rainDirection,
+                bulletRainDensity,
+                rumbleSound,
+                screenShake,
+                microScreenShake
+        );
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             ServerPlayNetworking.send(player, payload);
         }

@@ -4,14 +4,14 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import dev.fouriis.karmagate.rain.GlobalRain;
 import net.brickcraftdream.librainworldmc.client.api.RwSoundApi;
 import net.brickcraftdream.librainworldmc.client.api.RwSoundsApi;
-import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
+import net.minecraft.client.gl.GlUniform;
+import net.minecraft.client.gl.ShaderProgram;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.color.world.BiomeColors;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
 import net.minecraft.client.render.Camera;
 import net.minecraft.client.render.LightmapTextureManager;
-import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.Tessellator;
 import net.minecraft.client.render.VertexFormat;
 import net.minecraft.client.render.VertexFormats;
@@ -46,12 +46,6 @@ public final class BulletRainRender {
     private static final float SOUND_RADIUS_SQ = 26.0f * 26.0f;
     private static final int MAX_SOUNDS_PER_TICK = 5;
     private static final boolean DEBUG_CAMERA_LOCAL_STRIKES = true;
-
-    private static final Identifier LEVEL_TEXTURE =
-            Identifier.of("librainworldmc", "grabtex");
-
-    private static final Identifier NOISE_TEXTURE =
-            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise_hq.png");
 
     private static final Identifier RAIN_TEXTURE =
             Identifier.of("minecraft", "textures/block/water_flow.png");
@@ -320,45 +314,32 @@ public final class BulletRainRender {
         return null;
     }
 
-    private static void bindBulletRainShader(World world, Camera camera, float intensity) {
-        float[] spriteRect = new float[]{0f, 0f, 1f, 1f};
-        float[] rippleGold = new float[]{0f, 0f, 0f, 0f};
+    private static boolean bindBulletRainProgram(World world, Camera camera, float intensity) {
+        ShaderProgram program = BulletRainShaders.PROGRAM;
+        if (program == null) {
+            return false;
+        }
 
-        float rainDirection = 1.5f;
-        float rainEverywhere = 1.0f;
-        float rainIntensity = intensity;
-        float waterLevel = 0.0f;
-        float scale = 10.0f;
-        float pitchStretch = 1.0f + (Math.abs(camera.getPitch()) / 90.0f) * 2.0f;
+        RenderSystem.setShader(() -> program);
+        RenderSystem.setShaderTexture(0, RAIN_TEXTURE);
 
-        CoreShaderRenderer.bindShader$DeathRain(
-                spriteRect,
-                rippleGold,
-                rainDirection,
-                rainEverywhere,
-                rainIntensity,
-                waterLevel,
-                scale,
-                pitchStretch,
-            1.0f,
-                0.0f,
-                0.0f,
-                RAIN_TEXTURE,
-                NOISE_TEXTURE,
-                LEVEL_TEXTURE,
-                null,
-                null,
-                false,
-                false,
-                false,
-                false
-        );
+        program.bind();
+        setUniform1f(program, "uRainIntensity", MathHelper.clamp(intensity, 0.0f, 1.0f));
+        setUniform1f(program, "uDistortionStrength", 0.05f);
 
         int waterColor = BiomeColors.getWaterColor(world, BlockPos.ofFloored(camera.getPos()));
         float red = ((waterColor >> 16) & 0xFF) / 255.0f;
         float green = ((waterColor >> 8) & 0xFF) / 255.0f;
         float blue = (waterColor & 0xFF) / 255.0f;
         RenderSystem.setShaderColor(red, green, blue, 1.0f);
+        return true;
+    }
+
+    private static void setUniform1f(ShaderProgram program, String name, float value) {
+        GlUniform uniform = program.getUniform(name);
+        if (uniform != null) {
+            uniform.set(value);
+        }
     }
 
     private static void renderDrips(World world, Camera camera, float tickDelta, MatrixStack matrices, float intensity) {
@@ -367,7 +348,9 @@ public final class BulletRainRender {
         }
 
         try {
-            bindBulletRainShader(world, camera, intensity);
+            if (!bindBulletRainProgram(world, camera, intensity)) {
+                return;
+            }
 
             RenderSystem.enableBlend();
             RenderSystem.defaultBlendFunc();
@@ -385,7 +368,7 @@ public final class BulletRainRender {
             Tessellator tessellator = Tessellator.getInstance();
             BufferBuilder buffer = tessellator.begin(
                     VertexFormat.DrawMode.QUADS,
-                    VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
+                    VertexFormats.POSITION_COLOR_TEXTURE_LIGHT
             );
 
             int light = LightmapTextureManager.MAX_LIGHT_COORDINATE;
@@ -413,12 +396,14 @@ public final class BulletRainRender {
             RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
             RenderSystem.depthMask(true);
             RenderSystem.enableCull();
+            RenderSystem.disableBlend();
         } catch (Throwable t) {
             System.err.println("[Karmagate/BulletRain] Exception while rendering bullet rain");
             t.printStackTrace();
             RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
             RenderSystem.depthMask(true);
             RenderSystem.enableCull();
+            RenderSystem.disableBlend();
         }
     }
 
@@ -447,7 +432,6 @@ public final class BulletRainRender {
         }
 
         right = right.normalize().multiply(STREAK_WIDTH * 0.5);
-        Vec3d normal = right.crossProduct(axis).normalize();
 
         Vec3d v0 = start.add(right);
         Vec3d v1 = start.subtract(right);
@@ -459,37 +443,25 @@ public final class BulletRainRender {
         int b = 255;
         int a = MathHelper.clamp((int) (160.0f + intensity * 95.0f), 0, 255);
 
-        float nx = (float) normal.x;
-        float ny = (float) normal.y;
-        float nz = (float) normal.z;
-
         buffer.vertex(matrix, (float) v0.x, (float) v0.y, (float) v0.z)
                 .color(r, g, b, a)
                 .texture(0f, 0f)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(nx, ny, nz);
+            .light(light);
 
         buffer.vertex(matrix, (float) v1.x, (float) v1.y, (float) v1.z)
                 .color(r, g, b, a)
                 .texture(1f, 0f)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(nx, ny, nz);
+            .light(light);
 
         buffer.vertex(matrix, (float) v2.x, (float) v2.y, (float) v2.z)
                 .color(r, g, b, a)
                 .texture(1f, 1f)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(nx, ny, nz);
+            .light(light);
 
         buffer.vertex(matrix, (float) v3.x, (float) v3.y, (float) v3.z)
                 .color(r, g, b, a)
                 .texture(0f, 1f)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(nx, ny, nz);
+            .light(light);
     }
 
     private static void emitSplashBillboard(
@@ -529,30 +501,22 @@ public final class BulletRainRender {
         buffer.vertex(matrix, (float) v0.x, (float) v0.y, (float) v0.z)
                 .color(255, 255, 255, alpha)
                 .texture(0f, 0f)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(0.0f, 1.0f, 0.0f);
+            .light(light);
 
         buffer.vertex(matrix, (float) v1.x, (float) v1.y, (float) v1.z)
                 .color(255, 255, 255, alpha)
                 .texture(1f, 0f)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(0.0f, 1.0f, 0.0f);
+            .light(light);
 
         buffer.vertex(matrix, (float) v2.x, (float) v2.y, (float) v2.z)
                 .color(255, 255, 255, alpha)
                 .texture(1f, 1f)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(0.0f, 1.0f, 0.0f);
+            .light(light);
 
         buffer.vertex(matrix, (float) v3.x, (float) v3.y, (float) v3.z)
                 .color(255, 255, 255, alpha)
                 .texture(0f, 1f)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(0.0f, 1.0f, 0.0f);
+            .light(light);
     }
 
     private static final class Drip {

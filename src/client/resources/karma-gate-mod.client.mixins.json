@@ -4,6 +4,7 @@
 	"compatibilityLevel": "JAVA_21",
 	"client": [
 		"ExampleClientMixin",
+		"CameraMixin",
 		"GameRendererMixin",
 		"GameRendererAccessor",
 		"GraffitiBlockBreakMixin"

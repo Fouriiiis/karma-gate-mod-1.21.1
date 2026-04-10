@@ -38,7 +38,9 @@ public class ClientNetworking {
                             payload.intensity(),
                             payload.rainDirection(),
                             payload.bulletRainDensity(),
-                            payload.rumbleSound()
+                            payload.rumbleSound(),
+                            payload.screenShake(),
+                            payload.microScreenShake()
                     )
             )
         );

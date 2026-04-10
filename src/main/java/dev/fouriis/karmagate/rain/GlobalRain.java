@@ -368,7 +368,15 @@ public class GlobalRain {
 
             logEvery10Ticks(lightRain > 0.0f || heavyRain > 0.0f || forcedRain);
         } finally {
-            ModNetworking.syncGlobalRainToAll(server, intensity, rainDirection, bulletRainDensity, rumbleSound);
+            ModNetworking.syncGlobalRainToAll(
+                    server,
+                    intensity,
+                    rainDirection,
+                    bulletRainDensity,
+                    rumbleSound,
+                    screenShake,
+                    microScreenShake
+            );
         }
     }
 
