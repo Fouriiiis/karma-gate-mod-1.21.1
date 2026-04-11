@@ -148,6 +148,20 @@ public final class DeathRainWeatherRenderer {
                         if (next != null) {
                             renderJoinIfNeeded(world, camera, matrices, current.b(), next.a(), next.d(), current.c(), rainIntensity, rainDirection);
                         }
+
+                        renderNorthSouthCornerSeams(
+                                world,
+                                camera,
+                                matrices,
+                                playerY,
+                                dryX,
+                                dryZ,
+                                borderNormal,
+                                current,
+                                rainIntensity,
+                                rainDirection,
+                                rainVector
+                        );
                     }
                 }
 
@@ -209,6 +223,168 @@ public final class DeathRainWeatherRenderer {
         }
     }
 
+    private static void renderNorthSouthCornerSeams(
+            World world,
+            Camera camera,
+            MatrixStack matrices,
+            int playerY,
+            int dryX,
+            int dryZ,
+            Vec3d borderNormal,
+            ProjectedQuad current,
+            float rainIntensity,
+            float rainDirection,
+            Vec3d rainVector
+    ) {
+        boolean westFace = borderNormal.x < 0.0;
+        DryFace primaryFace = westFace ? DryFace.WEST : DryFace.EAST;
+
+        boolean continuesNorth = hasOpenNeighborOnFace(world, playerY, dryX, dryZ - 1, primaryFace);
+        if (!continuesNorth) {
+            ProjectedQuad north = buildFaceProjectedQuad(
+                    world,
+                    playerY,
+                    dryX,
+                    dryZ,
+                    DryFace.NORTH,
+                    rainIntensity,
+                    rainVector
+            );
+
+            if (north != null && shouldRenderCornerSeam(world, playerY, dryX, dryZ, primaryFace, DryFace.NORTH)) {
+                Vec3d northTop = westFace ? north.a() : north.b();
+                Vec3d northBottom = westFace ? north.d() : north.c();
+                renderJoinIfNeeded(world, camera, matrices, current.a(), northTop, northBottom, current.d(), rainIntensity, rainDirection);
+            }
+        }
+
+        boolean continuesSouth = hasOpenNeighborOnFace(world, playerY, dryX, dryZ + 1, primaryFace);
+        if (continuesSouth) {
+            return;
+        }
+
+        ProjectedQuad south = buildFaceProjectedQuad(
+                world,
+                playerY,
+                dryX,
+                dryZ,
+                DryFace.SOUTH,
+                rainIntensity,
+                rainVector
+        );
+
+        if (south != null && shouldRenderCornerSeam(world, playerY, dryX, dryZ, primaryFace, DryFace.SOUTH)) {
+            Vec3d southTop = westFace ? south.a() : south.b();
+            Vec3d southBottom = westFace ? south.d() : south.c();
+            renderJoinIfNeeded(world, camera, matrices, current.b(), southTop, southBottom, current.c(), rainIntensity, rainDirection);
+        }
+    }
+
+    private static boolean shouldRenderCornerSeam(
+            World world,
+            int playerY,
+            int dryX,
+            int dryZ,
+            DryFace primaryFace,
+            DryFace secondaryFace
+    ) {
+        int diagonalX = dryX + faceStepX(primaryFace) + faceStepX(secondaryFace);
+        int diagonalZ = dryZ + faceStepZ(primaryFace) + faceStepZ(secondaryFace);
+        return isOpenToSky(world, new BlockPos(diagonalX, playerY, diagonalZ));
+    }
+
+    private static int faceStepX(DryFace face) {
+        return switch (face) {
+            case WEST -> -1;
+            case EAST -> 1;
+            case NORTH, SOUTH -> 0;
+        };
+    }
+
+    private static int faceStepZ(DryFace face) {
+        return switch (face) {
+            case NORTH -> -1;
+            case SOUTH -> 1;
+            case WEST, EAST -> 0;
+        };
+    }
+
+    private static ProjectedQuad buildFaceProjectedQuad(
+            World world,
+            int playerY,
+            int dryX,
+            int dryZ,
+            DryFace face,
+            float rainIntensity,
+            Vec3d rainVector
+    ) {
+        if (!hasOpenNeighborOnFace(world, playerY, dryX, dryZ, face)) {
+            return null;
+        }
+
+        Vec3d borderNormal;
+        Vec3d edgeStart;
+        Vec3d edgeEnd;
+
+        switch (face) {
+            case WEST -> {
+                double x = dryX + FACE_EPSILON;
+                borderNormal = new Vec3d(-1.0, 0.0, 0.0);
+                edgeStart = new Vec3d(x, 0.0, dryZ);
+                edgeEnd = new Vec3d(x, 0.0, dryZ + 1.0);
+            }
+            case EAST -> {
+                double x = dryX + 1.0 - FACE_EPSILON;
+                borderNormal = new Vec3d(1.0, 0.0, 0.0);
+                edgeStart = new Vec3d(x, 0.0, dryZ);
+                edgeEnd = new Vec3d(x, 0.0, dryZ + 1.0);
+            }
+            case NORTH -> {
+                double z = dryZ + FACE_EPSILON;
+                borderNormal = new Vec3d(0.0, 0.0, -1.0);
+                edgeStart = new Vec3d(dryX, 0.0, z);
+                edgeEnd = new Vec3d(dryX + 1.0, 0.0, z);
+            }
+            case SOUTH -> {
+                double z = dryZ + 1.0 - FACE_EPSILON;
+                borderNormal = new Vec3d(0.0, 0.0, 1.0);
+                edgeStart = new Vec3d(dryX, 0.0, z);
+                edgeEnd = new Vec3d(dryX + 1.0, 0.0, z);
+            }
+            default -> {
+                return null;
+            }
+        }
+
+        return buildProjectedBorderQuad(
+                world,
+                playerY,
+                dryX,
+                dryZ,
+                edgeStart,
+                edgeEnd,
+                borderNormal,
+                rainIntensity,
+                rainVector
+        );
+    }
+
+    private static boolean hasOpenNeighborOnFace(World world, int playerY, int dryX, int dryZ, DryFace face) {
+        BlockPos dryPos = new BlockPos(dryX, playerY, dryZ);
+        if (isOpenToSky(world, dryPos)) {
+            return false;
+        }
+
+        BlockPos neighborPos = switch (face) {
+            case WEST -> new BlockPos(dryX - 1, playerY, dryZ);
+            case EAST -> new BlockPos(dryX + 1, playerY, dryZ);
+            case NORTH -> new BlockPos(dryX, playerY, dryZ - 1);
+            case SOUTH -> new BlockPos(dryX, playerY, dryZ + 1);
+        };
+
+        return isOpenToSky(world, neighborPos);
+    }
+
     private static ProjectedQuad buildProjectedBorderQuad(
             World world,
             int playerY,
@@ -226,8 +402,9 @@ public final class DeathRainWeatherRenderer {
         }
 
         float floorY = getDryFloorTopY(world, dryX, dryZ, playerY);
-        float startY0 = chooseSourceCornerY(cover, dryX, dryZ, footprintEdgeStart, rainVector);
-        float startY1 = chooseSourceCornerY(cover, dryX, dryZ, footprintEdgeEnd, rainVector);
+        float edgeStartY = chooseSourceEdgeY(cover, dryX, dryZ, footprintEdgeStart, footprintEdgeEnd, rainVector);
+        float startY0 = edgeStartY;
+        float startY1 = edgeStartY;
 
         if (startY0 <= floorY + MIN_START_HEIGHT_ABOVE_FLOOR
                 && startY1 <= floorY + MIN_START_HEIGHT_ABOVE_FLOOR) {
@@ -265,8 +442,9 @@ public final class DeathRainWeatherRenderer {
         }
 
         float floorY = getDryFloorTopY(world, dryX, dryZ, playerY);
-        float startY0 = chooseSourceCornerY(cover, dryX, dryZ, footprintEdgeStart, rainVector);
-        float startY1 = chooseSourceCornerY(cover, dryX, dryZ, footprintEdgeEnd, rainVector);
+        float edgeStartY = chooseSourceEdgeY(cover, dryX, dryZ, footprintEdgeStart, footprintEdgeEnd, rainVector);
+        float startY0 = edgeStartY;
+        float startY1 = edgeStartY;
 
         if (startY0 <= floorY + MIN_START_HEIGHT_ABOVE_FLOOR
                 && startY1 <= floorY + MIN_START_HEIGHT_ABOVE_FLOOR) {
@@ -394,11 +572,12 @@ public final class DeathRainWeatherRenderer {
         );
     }
 
-    private static float chooseSourceCornerY(
+    private static float chooseSourceEdgeY(
             CoverSpan cover,
             int dryX,
             int dryZ,
-            Vec3d corner,
+            Vec3d edgeStart,
+            Vec3d edgeEnd,
             Vec3d rainVector
     ) {
         if (cover.topY() - cover.undersideY() <= MIN_COVER_THICKNESS) {
@@ -407,8 +586,10 @@ public final class DeathRainWeatherRenderer {
 
         double centerX = dryX + 0.5;
         double centerZ = dryZ + 0.5;
-        double dx = corner.x - centerX;
-        double dz = corner.z - centerZ;
+        double midX = (edgeStart.x + edgeEnd.x) * 0.5;
+        double midZ = (edgeStart.z + edgeEnd.z) * 0.5;
+        double dx = midX - centerX;
+        double dz = midZ - centerZ;
         double horizontalDot = dx * rainVector.x + dz * rainVector.z;
         return horizontalDot >= 0.0 ? cover.topY() : cover.undersideY();
     }
@@ -430,8 +611,9 @@ public final class DeathRainWeatherRenderer {
     }
 
     private static Vec3d resolveHorizontalRainVector(float rainDirection) {
-        float dirX = MathHelper.clamp(rainDirection, -1.0f, 1.0f);
-        return new Vec3d(dirX, 0.0, 0.0);
+        float diagonal = MathHelper.clamp(rainDirection, -1.0f, 1.0f);
+        double axisComponent = diagonal * 0.7071067811865476;
+        return new Vec3d(axisComponent, 0.0, axisComponent);
     }
 
     private static boolean sameDirection(Vec3d a, Vec3d b) {
@@ -564,6 +746,13 @@ public final class DeathRainWeatherRenderer {
     private enum BorderAxis {
         X,
         Z
+    }
+
+    private enum DryFace {
+        WEST,
+        EAST,
+        NORTH,
+        SOUTH
     }
 
     private record CoverSpan(float undersideY, float topY) {
