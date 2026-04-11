@@ -20,6 +20,7 @@ public final class RainCameraShakeController {
     private long ageTicks;
     private float microShake;
     private float screenShake;
+    private boolean noShake = true;
 
     private RainCameraShakeController() {
     }
@@ -49,7 +50,7 @@ public final class RainCameraShakeController {
     }
 
     public Sample sample(float tickDelta) {
-        if (microShake <= 0.0f && screenShake <= 0.0f) {
+        if (noShake || (microShake <= 0.0f && screenShake <= 0.0f)) {
             return Sample.ZERO;
         }
 

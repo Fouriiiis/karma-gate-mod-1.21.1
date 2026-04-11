@@ -25,14 +25,14 @@ import org.joml.Matrix4f;
 
 public final class DeathRainWeatherRenderer {
 
-    private static final int DEBUG_RADIUS = 12;
+    private static final int RENDER_RADIUS = 12;
     private static final float FACE_EPSILON = 0.001f;
-    private static final float SCREEN_RAIN_TRANSITION_DISTANCE = 1.25f;
     private static final float MIN_RENDER_INTENSITY = 0.01f;
-    private static final float CURTAIN_JOIN_EPSILON = 0.01f;
-    private static final float TOP_LIP_CLEARANCE_THRESHOLD = 0.999f;
-
+    private static final float SCREEN_RAIN_TRANSITION_DISTANCE = 1.25f;
     private static final float MAX_CURTAIN_LEAN = 3.0f;
+    private static final float MIN_START_HEIGHT_ABOVE_FLOOR = 0.05f;
+    private static final float MIN_COVER_THICKNESS = 0.05f;
+    private static final double JOIN_EPSILON = 1.0e-4;
 
     private static final Identifier LEVEL_TEXTURE =
             Identifier.of("librainworldmc", "grabtex");
@@ -60,34 +60,36 @@ public final class DeathRainWeatherRenderer {
         if (rainIntensity < MIN_RENDER_INTENSITY) {
             return;
         }
+
         float rainDirection = resolveGlobalRainDirection();
-
         RainBorderTransition transition = findNearestRainBorderTransition(world, camera);
+
+        renderBorderVolumes(world, camera, matrices, rainIntensity, rainDirection);
+
         float coverage = computeScreenRainCoverage(transition);
-
-        renderBorderCurtains(world, camera, matrices, rainIntensity, rainDirection);
-
         if (coverage > 0.0f) {
-            float axis = 0.0f;
-            float flip = transition.rainOnPositiveSide ? 0.0f : 1.0f;
-            renderScreenRainOverlay(world, camera, matrices, coverage, axis, flip, rainIntensity, rainDirection);
+            float flip = transition.rainOnPositiveSide() ? 0.0f : 1.0f;
+            renderScreenRainOverlay(world, camera, matrices, coverage, 0.0f, flip, rainIntensity, rainDirection);
         }
     }
 
-    private static void renderBorderCurtains(World world,
-                                             Camera camera,
-                                             MatrixStack matrices,
-                                             float rainIntensity,
-                                             float rainDirection) {
+    private static void renderBorderVolumes(
+            World world,
+            Camera camera,
+            MatrixStack matrices,
+            float rainIntensity,
+            float rainDirection
+    ) {
         MinecraftClient client = MinecraftClient.getInstance();
         BlockPos anchor = client.player.getBlockPos();
         int playerY = anchor.getY();
 
         BlockPos.Mutable here = new BlockPos.Mutable();
         BlockPos.Mutable neighbor = new BlockPos.Mutable();
+        Vec3d rainVector = resolveHorizontalRainVector(rainDirection);
 
-        for (int dz = -DEBUG_RADIUS; dz <= DEBUG_RADIUS; dz++) {
-            for (int dx = -DEBUG_RADIUS; dx <= DEBUG_RADIUS; dx++) {
+        for (int dz = -RENDER_RADIUS; dz <= RENDER_RADIUS; dz++) {
+            for (int dx = -RENDER_RADIUS; dx <= RENDER_RADIUS; dx++) {
                 int worldX = anchor.getX() + dx;
                 int worldZ = anchor.getZ() + dz;
 
@@ -96,270 +98,110 @@ public final class DeathRainWeatherRenderer {
 
                 neighbor.set(worldX + 1, playerY, worldZ);
                 boolean openEast = isOpenToSky(world, neighbor);
-
                 if (openHere != openEast) {
-                    if (!openHere) {
-                        CoverSpan cover = getCoverSpan(world, worldX, worldZ, playerY);
-                        if (cover != null) {
-                            float bottomY = getDryFloorTopY(world, worldX, worldZ, playerY);
-                            CurtainAnchor currentAnchor = computeCurtainAnchor(cover, rainIntensity, rainDirection);
-                            float topY = currentAnchor.topY();
+                    int dryX = openHere ? worldX + 1 : worldX;
+                    int dryZ = worldZ;
+                    double borderX = worldX + 1.0 + (openHere ? FACE_EPSILON : -FACE_EPSILON);
+                    Vec3d borderNormal = openHere ? new Vec3d(-1.0, 0.0, 0.0) : new Vec3d(1.0, 0.0, 0.0);
 
-                            if (topY > bottomY + 0.05f) {
-                                float borderX = worldX + 1.0f - FACE_EPSILON;
+                    ProjectedQuad current = buildProjectedBorderQuad(
+                            world,
+                            playerY,
+                            dryX,
+                            dryZ,
+                            new Vec3d(borderX, 0.0, worldZ),
+                            new Vec3d(borderX, 0.0, worldZ + 1.0),
+                            borderNormal,
+                            rainIntensity,
+                            rainVector
+                    );
 
-                                renderRainCurtainImmediate(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        borderX,
-                                        worldZ,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        CurtainOrientation.NORTH_SOUTH,
-                                        false,
-                                        rainIntensity,
-                                        rainDirection
-                                );
+                    if (current != null) {
+                        ProjectedQuad sourceCap = buildSourceCapQuad(
+                                world,
+                                playerY,
+                                dryX,
+                                dryZ,
+                                new Vec3d(borderX, 0.0, worldZ),
+                                new Vec3d(borderX, 0.0, worldZ + 1.0),
+                                borderNormal,
+                                rainIntensity,
+                                rainVector
+                        );
 
-                                renderNorthSouthJoinIfNeeded(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        borderX,
-                                        worldX,
-                                        worldZ,
-                                        playerY,
-                                        false,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        rainIntensity,
-                                        rainDirection
-                                );
-
-                                renderNorthSouthEndCapsIfNeeded(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        borderX,
-                                        worldX,
-                                        worldZ,
-                                        playerY,
-                                        false,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        rainIntensity,
-                                        rainDirection
-                                );
-                            }
+                        if (sourceCap != null) {
+                            renderQuadImmediate(world, camera, matrices, sourceCap.a(), sourceCap.b(), sourceCap.c(), sourceCap.d(), rainIntensity, rainDirection);
                         }
-                    } else {
-                        CoverSpan cover = getCoverSpan(world, worldX + 1, worldZ, playerY);
-                        if (cover != null) {
-                            float bottomY = getDryFloorTopY(world, worldX + 1, worldZ, playerY);
-                            CurtainAnchor currentAnchor = computeCurtainAnchor(cover, rainIntensity, rainDirection);
-                            float topY = currentAnchor.topY();
 
-                            if (topY > bottomY + 0.05f) {
-                                float borderX = worldX + 1.0f + FACE_EPSILON;
+                        renderQuadImmediate(world, camera, matrices, current.a(), current.b(), current.c(), current.d(), rainIntensity, rainDirection);
 
-                                renderRainCurtainImmediate(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        borderX,
-                                        worldZ,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        CurtainOrientation.NORTH_SOUTH,
-                                        true,
-                                        rainIntensity,
-                                        rainDirection
-                                );
+                        ProjectedQuad next = buildNorthSouthNeighborQuad(
+                                world,
+                                playerY,
+                                worldX,
+                                worldZ + 1,
+                                borderNormal,
+                                rainIntensity,
+                                rainVector
+                        );
 
-                                renderNorthSouthJoinIfNeeded(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        borderX,
-                                        worldX,
-                                        worldZ,
-                                        playerY,
-                                        true,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        rainIntensity,
-                                        rainDirection
-                                );
-
-                                renderNorthSouthEndCapsIfNeeded(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        borderX,
-                                        worldX,
-                                        worldZ,
-                                        playerY,
-                                        true,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        rainIntensity,
-                                        rainDirection
-                                );
-                            }
+                        if (next != null) {
+                            renderJoinIfNeeded(world, camera, matrices, current.b(), next.a(), next.d(), current.c(), rainIntensity, rainDirection);
                         }
                     }
                 }
 
                 neighbor.set(worldX, playerY, worldZ + 1);
                 boolean openSouth = isOpenToSky(world, neighbor);
-
                 if (openHere != openSouth) {
-                    if (!openHere) {
-                        CoverSpan cover = getCoverSpan(world, worldX, worldZ, playerY);
-                        if (cover != null) {
-                            float bottomY = getDryFloorTopY(world, worldX, worldZ, playerY);
-                            CurtainAnchor currentAnchor = computeCurtainAnchor(cover, rainIntensity, rainDirection);
-                            float topY = currentAnchor.topY();
+                    int dryX = worldX;
+                    int dryZ = openHere ? worldZ + 1 : worldZ;
+                    double borderZ = worldZ + 1.0 + (openHere ? FACE_EPSILON : -FACE_EPSILON);
+                    Vec3d borderNormal = openHere ? new Vec3d(0.0, 0.0, -1.0) : new Vec3d(0.0, 0.0, 1.0);
 
-                            if (topY > bottomY + 0.05f) {
-                                float borderZ = worldZ + 1.0f - FACE_EPSILON;
+                    ProjectedQuad current = buildProjectedBorderQuad(
+                            world,
+                            playerY,
+                            dryX,
+                            dryZ,
+                            new Vec3d(worldX, 0.0, borderZ),
+                            new Vec3d(worldX + 1.0, 0.0, borderZ),
+                            borderNormal,
+                            rainIntensity,
+                            rainVector
+                    );
 
-                                renderRainCurtainImmediate(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        worldX,
-                                        borderZ,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        CurtainOrientation.EAST_WEST,
-                                        true,
-                                        rainIntensity,
-                                        rainDirection
-                                );
+                    if (current != null) {
+                        ProjectedQuad sourceCap = buildSourceCapQuad(
+                                world,
+                                playerY,
+                                dryX,
+                                dryZ,
+                                new Vec3d(worldX, 0.0, borderZ),
+                                new Vec3d(worldX + 1.0, 0.0, borderZ),
+                                borderNormal,
+                                rainIntensity,
+                                rainVector
+                        );
 
-                                renderEastWestJoinIfNeeded(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        borderZ,
-                                        worldX,
-                                        worldZ,
-                                        playerY,
-                                        true,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        rainIntensity,
-                                        rainDirection
-                                );
-
-                                renderEastWestEndCapsIfNeeded(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        borderZ,
-                                        worldX,
-                                        worldZ,
-                                        playerY,
-                                        true,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        rainIntensity,
-                                        rainDirection
-                                );
-                            }
+                        if (sourceCap != null) {
+                            renderQuadImmediate(world, camera, matrices, sourceCap.a(), sourceCap.b(), sourceCap.c(), sourceCap.d(), rainIntensity, rainDirection);
                         }
-                    } else {
-                        CoverSpan cover = getCoverSpan(world, worldX, worldZ + 1, playerY);
-                        if (cover != null) {
-                            float bottomY = getDryFloorTopY(world, worldX, worldZ + 1, playerY);
-                            CurtainAnchor currentAnchor = computeCurtainAnchor(cover, rainIntensity, rainDirection);
-                            float topY = currentAnchor.topY();
 
-                            if (topY > bottomY + 0.05f) {
-                                float borderZ = worldZ + 1.0f + FACE_EPSILON;
+                        renderQuadImmediate(world, camera, matrices, current.a(), current.b(), current.c(), current.d(), rainIntensity, rainDirection);
 
-                                renderRainCurtainImmediate(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        worldX,
-                                        borderZ,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        CurtainOrientation.EAST_WEST,
-                                        false,
-                                        rainIntensity,
-                                        rainDirection
-                                );
+                        ProjectedQuad next = buildEastWestNeighborQuad(
+                                world,
+                                playerY,
+                                worldX + 1,
+                                worldZ,
+                                borderNormal,
+                                rainIntensity,
+                                rainVector
+                        );
 
-                                renderEastWestJoinIfNeeded(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        borderZ,
-                                        worldX,
-                                        worldZ,
-                                        playerY,
-                                        false,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        rainIntensity,
-                                        rainDirection
-                                );
-
-                                renderEastWestEndCapsIfNeeded(
-                                        world,
-                                        matrices,
-                                        camera,
-                                        LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                                        borderZ,
-                                        worldX,
-                                        worldZ,
-                                        playerY,
-                                        false,
-                                        topY,
-                                        bottomY,
-                                        currentAnchor.topX(),
-                                        currentAnchor.topZ(),
-                                        rainIntensity,
-                                        rainDirection
-                                );
-                            }
+                        if (next != null) {
+                            renderJoinIfNeeded(world, camera, matrices, current.b(), next.a(), next.d(), current.c(), rainIntensity, rainDirection);
                         }
                     }
                 }
@@ -367,41 +209,370 @@ public final class DeathRainWeatherRenderer {
         }
     }
 
-    private enum CurtainOrientation {
-        NORTH_SOUTH,
-        EAST_WEST
+    private static ProjectedQuad buildProjectedBorderQuad(
+            World world,
+            int playerY,
+            int dryX,
+            int dryZ,
+            Vec3d footprintEdgeStart,
+            Vec3d footprintEdgeEnd,
+            Vec3d borderNormal,
+            float rainIntensity,
+            Vec3d rainVector
+    ) {
+        CoverSpan cover = getCoverSpan(world, dryX, dryZ, playerY);
+        if (cover == null) {
+            return null;
+        }
+
+        float floorY = getDryFloorTopY(world, dryX, dryZ, playerY);
+        float startY0 = chooseSourceCornerY(cover, dryX, dryZ, footprintEdgeStart, rainVector);
+        float startY1 = chooseSourceCornerY(cover, dryX, dryZ, footprintEdgeEnd, rainVector);
+
+        if (startY0 <= floorY + MIN_START_HEIGHT_ABOVE_FLOOR
+                && startY1 <= floorY + MIN_START_HEIGHT_ABOVE_FLOOR) {
+            return null;
+        }
+
+        Vec3d projectedOffset0 = computeProjectedOffset(rainVector, startY0 - floorY, rainIntensity);
+        Vec3d projectedOffset1 = computeProjectedOffset(rainVector, startY1 - floorY, rainIntensity);
+
+        Vec3d a = footprintEdgeStart.add(0.0, startY0, 0.0);
+        Vec3d b = footprintEdgeEnd.add(0.0, startY1, 0.0);
+        Vec3d c = footprintEdgeEnd.add(projectedOffset1).add(0.0, floorY, 0.0);
+        Vec3d d = footprintEdgeStart.add(projectedOffset0).add(0.0, floorY, 0.0);
+        return new ProjectedQuad(a, b, c, d);
+    }
+
+    private static ProjectedQuad buildSourceCapQuad(
+            World world,
+            int playerY,
+            int dryX,
+            int dryZ,
+            Vec3d footprintEdgeStart,
+            Vec3d footprintEdgeEnd,
+            Vec3d borderNormal,
+            float rainIntensity,
+            Vec3d rainVector
+    ) {
+        CoverSpan cover = getCoverSpan(world, dryX, dryZ, playerY);
+        if (cover == null) {
+            return null;
+        }
+
+        if (cover.topY() - cover.undersideY() <= MIN_COVER_THICKNESS) {
+            return null;
+        }
+
+        float floorY = getDryFloorTopY(world, dryX, dryZ, playerY);
+        float startY0 = chooseSourceCornerY(cover, dryX, dryZ, footprintEdgeStart, rainVector);
+        float startY1 = chooseSourceCornerY(cover, dryX, dryZ, footprintEdgeEnd, rainVector);
+
+        if (startY0 <= floorY + MIN_START_HEIGHT_ABOVE_FLOOR
+                && startY1 <= floorY + MIN_START_HEIGHT_ABOVE_FLOOR) {
+            return null;
+        }
+
+        boolean needsCap0 = Math.abs(startY0 - cover.undersideY()) <= 1.0e-4f;
+        boolean needsCap1 = Math.abs(startY1 - cover.undersideY()) <= 1.0e-4f;
+        if (!needsCap0 && !needsCap1) {
+            return null;
+        }
+
+        Vec3d a = footprintEdgeStart.add(0.0, cover.topY(), 0.0);
+        Vec3d b = footprintEdgeEnd.add(0.0, cover.topY(), 0.0);
+        Vec3d c = footprintEdgeEnd.add(0.0, startY1, 0.0);
+        Vec3d d = footprintEdgeStart.add(0.0, startY0, 0.0);
+        return new ProjectedQuad(a, b, c, d);
+    }
+
+    private static ProjectedQuad buildNorthSouthNeighborQuad(
+            World world,
+            int playerY,
+            int worldX,
+            int worldZ,
+            Vec3d expectedBorderNormal,
+            float rainIntensity,
+            Vec3d rainVector
+    ) {
+        BlockPos.Mutable here = new BlockPos.Mutable(worldX, playerY, worldZ);
+        BlockPos.Mutable east = new BlockPos.Mutable(worldX + 1, playerY, worldZ);
+
+        boolean openHere = isOpenToSky(world, here);
+        boolean openEast = isOpenToSky(world, east);
+        if (openHere == openEast) {
+            return null;
+        }
+
+        Vec3d borderNormal = openHere ? new Vec3d(-1.0, 0.0, 0.0) : new Vec3d(1.0, 0.0, 0.0);
+        if (!sameDirection(borderNormal, expectedBorderNormal)) {
+            return null;
+        }
+
+        int dryX = openHere ? worldX + 1 : worldX;
+        int dryZ = worldZ;
+        double borderX = worldX + 1.0 + (openHere ? FACE_EPSILON : -FACE_EPSILON);
+
+        return buildProjectedBorderQuad(
+                world,
+                playerY,
+                dryX,
+                dryZ,
+                new Vec3d(borderX, 0.0, worldZ),
+                new Vec3d(borderX, 0.0, worldZ + 1.0),
+                borderNormal,
+                rainIntensity,
+                rainVector
+        );
+    }
+
+    private static ProjectedQuad buildEastWestNeighborQuad(
+            World world,
+            int playerY,
+            int worldX,
+            int worldZ,
+            Vec3d expectedBorderNormal,
+            float rainIntensity,
+            Vec3d rainVector
+    ) {
+        BlockPos.Mutable here = new BlockPos.Mutable(worldX, playerY, worldZ);
+        BlockPos.Mutable south = new BlockPos.Mutable(worldX, playerY, worldZ + 1);
+
+        boolean openHere = isOpenToSky(world, here);
+        boolean openSouth = isOpenToSky(world, south);
+        if (openHere == openSouth) {
+            return null;
+        }
+
+        Vec3d borderNormal = openHere ? new Vec3d(0.0, 0.0, -1.0) : new Vec3d(0.0, 0.0, 1.0);
+        if (!sameDirection(borderNormal, expectedBorderNormal)) {
+            return null;
+        }
+
+        int dryX = worldX;
+        int dryZ = openHere ? worldZ + 1 : worldZ;
+        double borderZ = worldZ + 1.0 + (openHere ? FACE_EPSILON : -FACE_EPSILON);
+
+        return buildProjectedBorderQuad(
+                world,
+                playerY,
+                dryX,
+                dryZ,
+                new Vec3d(worldX, 0.0, borderZ),
+                new Vec3d(worldX + 1.0, 0.0, borderZ),
+                borderNormal,
+                rainIntensity,
+                rainVector
+        );
+    }
+
+    private static void renderJoinIfNeeded(
+            World world,
+            Camera camera,
+            MatrixStack matrices,
+            Vec3d currentTop,
+            Vec3d nextTop,
+            Vec3d nextBottom,
+            Vec3d currentBottom,
+            float rainIntensity,
+            float rainDirection
+    ) {
+        if (pointsMatch(currentTop, nextTop) && pointsMatch(currentBottom, nextBottom)) {
+            return;
+        }
+
+        renderQuadImmediate(
+                world,
+                camera,
+                matrices,
+                currentTop,
+                nextTop,
+                nextBottom,
+                currentBottom,
+                rainIntensity,
+                rainDirection
+        );
+    }
+
+    private static float chooseSourceCornerY(
+            CoverSpan cover,
+            int dryX,
+            int dryZ,
+            Vec3d corner,
+            Vec3d rainVector
+    ) {
+        if (cover.topY() - cover.undersideY() <= MIN_COVER_THICKNESS) {
+            return cover.topY();
+        }
+
+        double centerX = dryX + 0.5;
+        double centerZ = dryZ + 0.5;
+        double dx = corner.x - centerX;
+        double dz = corner.z - centerZ;
+        double horizontalDot = dx * rainVector.x + dz * rainVector.z;
+        return horizontalDot >= 0.0 ? cover.topY() : cover.undersideY();
+    }
+
+    private static Vec3d computeProjectedOffset(Vec3d rainVector, float height, float rainIntensity) {
+        if (height <= 0.0f || rainVector.lengthSquared() < 1.0e-6) {
+            return Vec3d.ZERO;
+        }
+
+        float leanPerBlock = lerp(0.16f, 0.30f, clamp01(rainIntensity));
+        Vec3d offset = rainVector.multiply(height * leanPerBlock);
+
+        double length = offset.length();
+        if (length > MAX_CURTAIN_LEAN) {
+            offset = offset.multiply(MAX_CURTAIN_LEAN / length);
+        }
+
+        return offset;
+    }
+
+    private static Vec3d resolveHorizontalRainVector(float rainDirection) {
+        float dirX = MathHelper.clamp(rainDirection, -1.0f, 1.0f);
+        return new Vec3d(dirX, 0.0, 0.0);
+    }
+
+    private static boolean sameDirection(Vec3d a, Vec3d b) {
+        return a.squaredDistanceTo(b) <= JOIN_EPSILON;
+    }
+
+    private static boolean pointsMatch(Vec3d a, Vec3d b) {
+        return a.squaredDistanceTo(b) <= JOIN_EPSILON;
+    }
+
+    private static void renderQuadImmediate(
+            World world,
+            Camera camera,
+            MatrixStack matrices,
+            Vec3d a,
+            Vec3d b,
+            Vec3d c,
+            Vec3d d,
+            float rainIntensity,
+            float rainDirection
+    ) {
+        try {
+            float centerX = (float) ((a.x + b.x + c.x + d.x) * 0.25);
+            float centerY = (float) ((a.y + b.y + c.y + d.y) * 0.25);
+            float centerZ = (float) ((a.z + b.z + c.z + d.z) * 0.25);
+
+            bindDeathRainShader(
+                    world,
+                    camera,
+                    centerX,
+                    centerY,
+                    centerZ,
+                    1.0f,
+                    0.0f,
+                    0.0f,
+                    rainIntensity,
+                    rainDirection
+            );
+
+            beginWorldRainSheetState();
+
+            matrices.push();
+            Vec3d cam = camera.getPos();
+            matrices.translate(-cam.x, -cam.y, -cam.z);
+            Matrix4f matrix = matrices.peek().getPositionMatrix();
+
+            Tessellator tessellator = Tessellator.getInstance();
+            BufferBuilder buffer = tessellator.begin(
+                    VertexFormat.DrawMode.QUADS,
+                    VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
+            );
+
+            emitQuad(
+                    buffer,
+                    matrix,
+                    a,
+                    b,
+                    c,
+                    d,
+                    LightmapTextureManager.MAX_LIGHT_COORDINATE,
+                    255,
+                    255,
+                    255,
+                    computeRenderAlpha(rainIntensity)
+            );
+
+            BufferRenderer.drawWithGlobalProgram(buffer.end());
+            matrices.pop();
+            endWorldRainSheetState();
+        } catch (Throwable t) {
+            System.err.println("[Karmagate/DeathRain] Exception while rendering rain border quad");
+            t.printStackTrace();
+            endWorldRainSheetState();
+        }
+    }
+
+    private static void emitQuad(
+            BufferBuilder buffer,
+            Matrix4f matrix,
+            Vec3d a,
+            Vec3d b,
+            Vec3d c,
+            Vec3d d,
+            int light,
+            int red,
+            int green,
+            int blue,
+            int alpha
+    ) {
+        Vec3d normal = b.subtract(a).crossProduct(d.subtract(a));
+        if (normal.lengthSquared() < 1.0e-6) {
+            normal = new Vec3d(0.0, 1.0, 0.0);
+        } else {
+            normal = normal.normalize();
+        }
+
+        float nx = (float) normal.x;
+        float ny = (float) normal.y;
+        float nz = (float) normal.z;
+
+        buffer.vertex(matrix, (float) a.x, (float) a.y, (float) a.z)
+                .color(red, green, blue, alpha)
+                .texture(0.0f, 0.0f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
+
+        buffer.vertex(matrix, (float) b.x, (float) b.y, (float) b.z)
+                .color(red, green, blue, alpha)
+                .texture(1.0f, 0.0f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
+
+        buffer.vertex(matrix, (float) c.x, (float) c.y, (float) c.z)
+                .color(red, green, blue, alpha)
+                .texture(1.0f, 1.0f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
+
+        buffer.vertex(matrix, (float) d.x, (float) d.y, (float) d.z)
+                .color(red, green, blue, alpha)
+                .texture(0.0f, 1.0f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
+    }
+
+    private enum BorderAxis {
+        X,
+        Z
     }
 
     private record CoverSpan(float undersideY, float topY) {
     }
 
-    private record CurtainAnchor(float topY, float topX, float topZ) {
+    private record ProjectedQuad(Vec3d a, Vec3d b, Vec3d c, Vec3d d) {
     }
 
-    /**
-     * Compatibility mode:
-     * - X carries the current signed rain direction
-     * - Z stays locked to 0 until rain direction becomes 3D
-     * - top edge anchors either to the underside lip or, when angle permits,
-     *   to the roof-top lip of the covering block
-     */
-    private record CurtainShear(float topX, float bottomX, float topZ, float bottomZ) {
-    }
-
-    private static final class RainBorderTransition {
-        final boolean valid;
-        final CurtainOrientation orientation;
-        final boolean rainOnPositiveSide;
-        final float borderCoord;
-        final float penetration;
-
-        private RainBorderTransition(boolean valid, CurtainOrientation orientation, boolean rainOnPositiveSide, float borderCoord, float penetration) {
-            this.valid = valid;
-            this.orientation = orientation;
-            this.rainOnPositiveSide = rainOnPositiveSide;
-            this.borderCoord = borderCoord;
-            this.penetration = penetration;
-        }
+    private record RainBorderTransition(boolean valid, BorderAxis axis, boolean rainOnPositiveSide, float penetration) {
     }
 
     private static RainBorderTransition findNearestRainBorderTransition(World world, Camera camera) {
@@ -415,11 +586,11 @@ public final class DeathRainWeatherRenderer {
         BlockPos.Mutable here = new BlockPos.Mutable();
         BlockPos.Mutable neighbor = new BlockPos.Mutable();
 
-        float bestAbsPenetration = Float.MAX_VALUE;
-        RainBorderTransition best = new RainBorderTransition(false, CurtainOrientation.NORTH_SOUTH, false, 0.0f, 0.0f);
+        float bestPenetration = Float.MAX_VALUE;
+        RainBorderTransition best = new RainBorderTransition(false, BorderAxis.X, false, 0.0f);
 
-        for (int dz = -DEBUG_RADIUS; dz <= DEBUG_RADIUS; dz++) {
-            for (int dx = -DEBUG_RADIUS; dx <= DEBUG_RADIUS; dx++) {
+        for (int dz = -RENDER_RADIUS; dz <= RENDER_RADIUS; dz++) {
+            for (int dx = -RENDER_RADIUS; dx <= RENDER_RADIUS; dx++) {
                 int worldX = centerX + dx;
                 int worldZ = centerZ + dz;
 
@@ -428,29 +599,25 @@ public final class DeathRainWeatherRenderer {
 
                 neighbor.set(worldX + 1, centerY, worldZ);
                 boolean openEast = isOpenToSky(world, neighbor);
-
                 if (openHere != openEast) {
                     float borderX = worldX + 1.0f;
                     boolean rainOnPositive = openEast;
-                    float signedPenetration = rainOnPositive ? (float) cam.x - borderX : borderX - (float) cam.x;
-
-                    if (signedPenetration >= 0.0f && signedPenetration < bestAbsPenetration) {
-                        bestAbsPenetration = signedPenetration;
-                        best = new RainBorderTransition(true, CurtainOrientation.NORTH_SOUTH, rainOnPositive, borderX, signedPenetration);
+                    float penetration = rainOnPositive ? (float) cam.x - borderX : borderX - (float) cam.x;
+                    if (penetration >= 0.0f && penetration < bestPenetration) {
+                        bestPenetration = penetration;
+                        best = new RainBorderTransition(true, BorderAxis.X, rainOnPositive, penetration);
                     }
                 }
 
                 neighbor.set(worldX, centerY, worldZ + 1);
                 boolean openSouth = isOpenToSky(world, neighbor);
-
                 if (openHere != openSouth) {
                     float borderZ = worldZ + 1.0f;
                     boolean rainOnPositive = openSouth;
-                    float signedPenetration = rainOnPositive ? (float) cam.z - borderZ : borderZ - (float) cam.z;
-
-                    if (signedPenetration >= 0.0f && signedPenetration < bestAbsPenetration) {
-                        bestAbsPenetration = signedPenetration;
-                        best = new RainBorderTransition(true, CurtainOrientation.EAST_WEST, rainOnPositive, borderZ, signedPenetration);
+                    float penetration = rainOnPositive ? (float) cam.z - borderZ : borderZ - (float) cam.z;
+                    if (penetration >= 0.0f && penetration < bestPenetration) {
+                        bestPenetration = penetration;
+                        best = new RainBorderTransition(true, BorderAxis.Z, rainOnPositive, penetration);
                     }
                 }
             }
@@ -460,99 +627,10 @@ public final class DeathRainWeatherRenderer {
     }
 
     private static float computeScreenRainCoverage(RainBorderTransition transition) {
-        if (!transition.valid) return 0.0f;
-        return Math.min(1.0f, transition.penetration / SCREEN_RAIN_TRANSITION_DISTANCE);
-    }
-
-    private static float computePitchStretch(Camera camera) {
-        float pitch = Math.abs(camera.getPitch());
-        return 1.0f + (pitch / 90.0f) * 2.0f;
-    }
-
-    private static CurtainAnchor computeCurtainAnchor(CoverSpan cover, float rainIntensity, float rainDirection) {
-        float intensity = clamp01(rainIntensity);
-        float dirX = MathHelper.clamp(rainDirection, -1.0f, 1.0f);
-
-        if (Math.abs(dirX) < 0.0001f) {
-            return new CurtainAnchor(cover.undersideY(), 0.0f, 0.0f);
+        if (!transition.valid()) {
+            return 0.0f;
         }
-
-        float leanPerBlock = lerp(0.16f, 0.30f, intensity);
-        float coverThickness = Math.max(0.0f, cover.topY() - cover.undersideY());
-        float horizontalTravelAcrossCover = Math.abs(dirX * leanPerBlock * coverThickness);
-
-        // Only promote to the roof-top lip if the slanted path can actually clear
-        // the full cover thickness horizontally.
-        if (horizontalTravelAcrossCover >= TOP_LIP_CLEARANCE_THRESHOLD) {
-            return new CurtainAnchor(
-                    cover.topY(),
-                    -Math.signum(dirX),
-                    0.0f
-            );
-        }
-
-        return new CurtainAnchor(cover.undersideY(), 0.0f, 0.0f);
-    }
-
-    private static CurtainShear computeCurtainShear(
-            float topY,
-            float bottomY,
-            float topX,
-            float topZ,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        float height = Math.max(0.0f, topY - bottomY);
-        float intensity = clamp01(rainIntensity);
-
-        float dirX = MathHelper.clamp(rainDirection, -1.0f, 1.0f);
-        float leanPerBlock = lerp(0.16f, 0.30f, intensity);
-
-        float bottomX = MathHelper.clamp(
-                topX + dirX * height * leanPerBlock,
-                -MAX_CURTAIN_LEAN,
-                MAX_CURTAIN_LEAN
-        );
-
-        float bottomZ = topZ;
-
-        return new CurtainShear(topX, bottomX, topZ, bottomZ);
-    }
-
-    private static boolean hasNorthSouthCurtainAt(World world, int worldX, int worldZ, int playerY, boolean positiveFacing) {
-        BlockPos.Mutable here = new BlockPos.Mutable(worldX, playerY, worldZ);
-        BlockPos.Mutable east = new BlockPos.Mutable(worldX + 1, playerY, worldZ);
-
-        boolean openHere = isOpenToSky(world, here);
-        boolean openEast = isOpenToSky(world, east);
-
-        return positiveFacing ? (openHere && !openEast) : (!openHere && openEast);
-    }
-
-    private static boolean hasEastWestCurtainAt(World world, int worldX, int worldZ, int playerY, boolean positiveFacing) {
-        BlockPos.Mutable here = new BlockPos.Mutable(worldX, playerY, worldZ);
-        BlockPos.Mutable south = new BlockPos.Mutable(worldX, playerY, worldZ + 1);
-
-        boolean openHere = isOpenToSky(world, here);
-        boolean openSouth = isOpenToSky(world, south);
-
-        return positiveFacing ? (!openHere && openSouth) : (openHere && !openSouth);
-    }
-
-    private static boolean isNorthSouthEndSheltered(World world, int worldX, int worldZ, int playerY, boolean positiveFacing, boolean positiveEnd) {
-        int coveredX = positiveFacing ? (worldX + 1) : worldX;
-        int sideZ = positiveEnd ? (worldZ + 1) : (worldZ - 1);
-
-        BlockPos.Mutable pos = new BlockPos.Mutable(coveredX, playerY, sideZ);
-        return !isOpenToSky(world, pos);
-    }
-
-    private static boolean isEastWestEndSheltered(World world, int worldX, int worldZ, int playerY, boolean positiveFacing, boolean positiveEnd) {
-        int coveredZ = positiveFacing ? worldZ : (worldZ + 1);
-        int sideX = positiveEnd ? (worldX + 1) : (worldX - 1);
-
-        BlockPos.Mutable pos = new BlockPos.Mutable(sideX, playerY, coveredZ);
-        return !isOpenToSky(world, pos);
+        return Math.min(1.0f, transition.penetration() / SCREEN_RAIN_TRANSITION_DISTANCE);
     }
 
     private static void beginWorldRainSheetState() {
@@ -564,7 +642,7 @@ public final class DeathRainWeatherRenderer {
     }
 
     private static void endWorldRainSheetState() {
-        RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
+        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
         RenderSystem.depthMask(true);
         RenderSystem.enableCull();
     }
@@ -581,23 +659,20 @@ public final class DeathRainWeatherRenderer {
             float rainIntensity01,
             float rainDirectionSigned
     ) {
-        float[] spriteRect = new float[]{0f, 0f, 1f, 1f};
-        float[] rippleGold = new float[]{0f, 0f, 0f, 0f};
+        float[] spriteRect = new float[]{0.0f, 0.0f, 1.0f, 1.0f};
+        float[] rippleGold = new float[]{0.0f, 0.0f, 0.0f, 0.0f};
 
-        float rainDirection = rainDirectionSigned;
-        float rainEverywhere = 1.0f;
         float rainIntensity = clamp01(rainIntensity01);
-        float waterLevel = 0.0f;
         float scale = lerp(12.0f, 8.0f, rainIntensity);
         float pitchStretch = computePitchStretch(camera);
 
         CoreShaderRenderer.bindShader$DeathRain(
                 spriteRect,
                 rippleGold,
-                rainDirection,
-                rainEverywhere,
+                rainDirectionSigned,
+                1.0f,
                 rainIntensity,
-                waterLevel,
+                0.0f,
                 scale,
                 pitchStretch,
                 screenCoverage,
@@ -620,747 +695,12 @@ public final class DeathRainWeatherRenderer {
         float red = ((waterColor >> 16) & 0xFF) / 255.0f;
         float green = ((waterColor >> 8) & 0xFF) / 255.0f;
         float blue = (waterColor & 0xFF) / 255.0f;
-
         RenderSystem.setShaderColor(red, green, blue, 1.0f);
     }
 
-    private static void renderRainCurtainImmediate(
-            World world,
-            MatrixStack matrices,
-            Camera camera,
-            int packedLight,
-            float worldX,
-            float worldZ,
-            float topY,
-            float bottomY,
-            float topX,
-            float topZ,
-            CurtainOrientation orientation,
-            boolean positiveFacing,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        try {
-            bindDeathRainShader(
-                    world,
-                    camera,
-                    worldX,
-                    (topY + bottomY) * 0.5f,
-                    worldZ,
-                    1.0f,
-                    0.0f,
-                    0.0f,
-                    rainIntensity,
-                    rainDirection
-            );
-
-            int r = 255;
-            int g = 255;
-            int b = 255;
-            int a = computeRenderAlpha(rainIntensity);
-
-            CurtainShear shear = computeCurtainShear(topY, bottomY, topX, topZ, rainIntensity, rainDirection);
-
-            beginWorldRainSheetState();
-
-            matrices.push();
-
-            matrices.translate(
-                    worldX - camera.getPos().x,
-                    -camera.getPos().y,
-                    worldZ - camera.getPos().z
-            );
-
-            Matrix4f m = matrices.peek().getPositionMatrix();
-
-            Tessellator tessellator = Tessellator.getInstance();
-            BufferBuilder buffer = tessellator.begin(
-                    VertexFormat.DrawMode.QUADS,
-                    VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
-            );
-
-            if (orientation == CurtainOrientation.NORTH_SOUTH) {
-                emitCurtainPlaneNS(
-                        buffer,
-                        m,
-                        topY,
-                        bottomY,
-                        packedLight,
-                        r, g, b, a,
-                        positiveFacing,
-                        shear
-                );
-            } else {
-                emitCurtainPlaneEW(
-                        buffer,
-                        m,
-                        topY,
-                        bottomY,
-                        packedLight,
-                        r, g, b, a,
-                        positiveFacing,
-                        shear
-                );
-            }
-
-            BufferRenderer.drawWithGlobalProgram(buffer.end());
-            matrices.pop();
-
-            endWorldRainSheetState();
-        } catch (Throwable t) {
-            System.err.println("[Karmagate/DeathRain] Exception while rendering rain curtain at "
-                    + worldX + ", " + worldZ
-                    + " topY=" + topY
-                    + " bottomY=" + bottomY
-                    + " orientation=" + orientation
-                    + " positiveFacing=" + positiveFacing);
-            t.printStackTrace();
-            endWorldRainSheetState();
-        }
-    }
-
-    private static void renderNorthSouthJoinIfNeeded(
-            World world,
-            MatrixStack matrices,
-            Camera camera,
-            int packedLight,
-            float borderX,
-            int worldX,
-            int worldZ,
-            int playerY,
-            boolean positiveFacing,
-            float currentTopY,
-            float currentBottomY,
-            float currentTopX,
-            float currentTopZ,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        int nextZ = worldZ + 1;
-
-        BlockPos.Mutable here = new BlockPos.Mutable(worldX, playerY, nextZ);
-        BlockPos.Mutable east = new BlockPos.Mutable(worldX + 1, playerY, nextZ);
-
-        boolean openHere = isOpenToSky(world, here);
-        boolean openEast = isOpenToSky(world, east);
-
-        if (openHere == openEast) {
-            return;
-        }
-
-        CoverSpan nextCover;
-        float nextBottomY;
-
-        if (positiveFacing) {
-            if (!(openHere && !openEast)) {
-                return;
-            }
-
-            nextCover = getCoverSpan(world, worldX + 1, nextZ, playerY);
-            if (nextCover == null) {
-                return;
-            }
-            nextBottomY = getDryFloorTopY(world, worldX + 1, nextZ, playerY);
-        } else {
-            if (!(!openHere && openEast)) {
-                return;
-            }
-
-            nextCover = getCoverSpan(world, worldX, nextZ, playerY);
-            if (nextCover == null) {
-                return;
-            }
-            nextBottomY = getDryFloorTopY(world, worldX, nextZ, playerY);
-        }
-
-        CurtainAnchor nextAnchor = computeCurtainAnchor(nextCover, rainIntensity, rainDirection);
-        float nextTopY = nextAnchor.topY();
-        float nextTopX = nextAnchor.topX();
-        float nextTopZ = nextAnchor.topZ();
-
-        if (nextTopY <= nextBottomY + 0.05f) {
-            return;
-        }
-
-        if (Math.abs(currentTopY - nextTopY) < CURTAIN_JOIN_EPSILON
-                && Math.abs(currentBottomY - nextBottomY) < CURTAIN_JOIN_EPSILON
-                && Math.abs(currentTopX - nextTopX) < CURTAIN_JOIN_EPSILON) {
-            return;
-        }
-
-        CurtainShear currentShear = computeCurtainShear(currentTopY, currentBottomY, currentTopX, currentTopZ, rainIntensity, rainDirection);
-        CurtainShear nextShear = computeCurtainShear(nextTopY, nextBottomY, nextTopX, nextTopZ, rainIntensity, rainDirection);
-
-        renderNorthSouthJoinImmediate(
-                world,
-                matrices,
-                camera,
-                packedLight,
-                borderX,
-                worldZ + 1.0f,
-                currentTopY,
-                currentBottomY,
-                nextTopY,
-                nextBottomY,
-                currentShear,
-                nextShear,
-                rainIntensity,
-                rainDirection
-        );
-    }
-
-    private static void renderEastWestJoinIfNeeded(
-            World world,
-            MatrixStack matrices,
-            Camera camera,
-            int packedLight,
-            float borderZ,
-            int worldX,
-            int worldZ,
-            int playerY,
-            boolean positiveFacing,
-            float currentTopY,
-            float currentBottomY,
-            float currentTopX,
-            float currentTopZ,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        int nextX = worldX + 1;
-
-        BlockPos.Mutable here = new BlockPos.Mutable(nextX, playerY, worldZ);
-        BlockPos.Mutable south = new BlockPos.Mutable(nextX, playerY, worldZ + 1);
-
-        boolean openHere = isOpenToSky(world, here);
-        boolean openSouth = isOpenToSky(world, south);
-
-        if (openHere == openSouth) {
-            return;
-        }
-
-        CoverSpan nextCover;
-        float nextBottomY;
-
-        if (positiveFacing) {
-            if (!(!openHere && openSouth)) {
-                return;
-            }
-
-            nextCover = getCoverSpan(world, nextX, worldZ, playerY);
-            if (nextCover == null) {
-                return;
-            }
-            nextBottomY = getDryFloorTopY(world, nextX, worldZ, playerY);
-        } else {
-            if (!(openHere && !openSouth)) {
-                return;
-            }
-
-            nextCover = getCoverSpan(world, nextX, worldZ + 1, playerY);
-            if (nextCover == null) {
-                return;
-            }
-            nextBottomY = getDryFloorTopY(world, nextX, worldZ + 1, playerY);
-        }
-
-        CurtainAnchor nextAnchor = computeCurtainAnchor(nextCover, rainIntensity, rainDirection);
-        float nextTopY = nextAnchor.topY();
-        float nextTopX = nextAnchor.topX();
-        float nextTopZ = nextAnchor.topZ();
-
-        if (nextTopY <= nextBottomY + 0.05f) {
-            return;
-        }
-
-        if (Math.abs(currentTopY - nextTopY) < CURTAIN_JOIN_EPSILON
-                && Math.abs(currentBottomY - nextBottomY) < CURTAIN_JOIN_EPSILON
-                && Math.abs(currentTopX - nextTopX) < CURTAIN_JOIN_EPSILON) {
-            return;
-        }
-
-        CurtainShear currentShear = computeCurtainShear(currentTopY, currentBottomY, currentTopX, currentTopZ, rainIntensity, rainDirection);
-        CurtainShear nextShear = computeCurtainShear(nextTopY, nextBottomY, nextTopX, nextTopZ, rainIntensity, rainDirection);
-
-        renderEastWestJoinImmediate(
-                world,
-                matrices,
-                camera,
-                packedLight,
-                worldX + 1.0f,
-                borderZ,
-                currentTopY,
-                currentBottomY,
-                nextTopY,
-                nextBottomY,
-                currentShear,
-                nextShear,
-                rainIntensity,
-                rainDirection
-        );
-    }
-
-    private static void renderNorthSouthJoinImmediate(
-            World world,
-            MatrixStack matrices,
-            Camera camera,
-            int packedLight,
-            float worldX,
-            float worldZ,
-            float currentTopY,
-            float currentBottomY,
-            float nextTopY,
-            float nextBottomY,
-            CurtainShear currentShear,
-            CurtainShear nextShear,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        try {
-            bindDeathRainShader(
-                    world,
-                    camera,
-                    worldX,
-                    (currentTopY + currentBottomY + nextTopY + nextBottomY) * 0.25f,
-                    worldZ,
-                    1.0f,
-                    0.0f,
-                    0.0f,
-                    rainIntensity,
-                    rainDirection
-            );
-
-            int r = 255;
-            int g = 255;
-            int b = 255;
-            int a = computeRenderAlpha(rainIntensity);
-
-            beginWorldRainSheetState();
-
-            matrices.push();
-            matrices.translate(
-                    worldX - camera.getPos().x,
-                    -camera.getPos().y,
-                    worldZ - camera.getPos().z
-            );
-
-            Matrix4f m = matrices.peek().getPositionMatrix();
-
-            Tessellator tessellator = Tessellator.getInstance();
-            BufferBuilder buffer = tessellator.begin(
-                    VertexFormat.DrawMode.QUADS,
-                    VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
-            );
-
-            buffer.vertex(m, currentShear.topX(), currentTopY, currentShear.topZ())
-                    .color(r, g, b, a).texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                    .light(packedLight).normal(0.0f, 0.0f, 1.0f);
-
-            buffer.vertex(m, nextShear.topX(), nextTopY, nextShear.topZ())
-                    .color(r, g, b, a).texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                    .light(packedLight).normal(0.0f, 0.0f, 1.0f);
-
-            buffer.vertex(m, nextShear.bottomX(), nextBottomY, nextShear.bottomZ())
-                    .color(r, g, b, a).texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                    .light(packedLight).normal(0.0f, 0.0f, 1.0f);
-
-            buffer.vertex(m, currentShear.bottomX(), currentBottomY, currentShear.bottomZ())
-                    .color(r, g, b, a).texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                    .light(packedLight).normal(0.0f, 0.0f, 1.0f);
-
-            BufferRenderer.drawWithGlobalProgram(buffer.end());
-            matrices.pop();
-
-            endWorldRainSheetState();
-        } catch (Throwable t) {
-            System.err.println("[Karmagate/DeathRain] Exception while rendering NS join quad");
-            t.printStackTrace();
-            endWorldRainSheetState();
-        }
-    }
-
-    private static void renderEastWestJoinImmediate(
-            World world,
-            MatrixStack matrices,
-            Camera camera,
-            int packedLight,
-            float worldX,
-            float worldZ,
-            float currentTopY,
-            float currentBottomY,
-            float nextTopY,
-            float nextBottomY,
-            CurtainShear currentShear,
-            CurtainShear nextShear,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        try {
-            bindDeathRainShader(
-                    world,
-                    camera,
-                    worldX,
-                    (currentTopY + currentBottomY + nextTopY + nextBottomY) * 0.25f,
-                    worldZ,
-                    1.0f,
-                    0.0f,
-                    0.0f,
-                    rainIntensity,
-                    rainDirection
-            );
-
-            int r = 255;
-            int g = 255;
-            int b = 255;
-            int a = computeRenderAlpha(rainIntensity);
-
-            beginWorldRainSheetState();
-
-            matrices.push();
-            matrices.translate(
-                    worldX - camera.getPos().x,
-                    -camera.getPos().y,
-                    worldZ - camera.getPos().z
-            );
-
-            Matrix4f m = matrices.peek().getPositionMatrix();
-
-            Tessellator tessellator = Tessellator.getInstance();
-            BufferBuilder buffer = tessellator.begin(
-                    VertexFormat.DrawMode.QUADS,
-                    VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
-            );
-
-            buffer.vertex(m, currentShear.topX(), currentTopY, currentShear.topZ())
-                    .color(r, g, b, a).texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                    .light(packedLight).normal(1.0f, 0.0f, 0.0f);
-
-            buffer.vertex(m, nextShear.topX(), nextTopY, nextShear.topZ())
-                    .color(r, g, b, a).texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                    .light(packedLight).normal(1.0f, 0.0f, 0.0f);
-
-            buffer.vertex(m, nextShear.bottomX(), nextBottomY, nextShear.bottomZ())
-                    .color(r, g, b, a).texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                    .light(packedLight).normal(1.0f, 0.0f, 0.0f);
-
-            buffer.vertex(m, currentShear.bottomX(), currentBottomY, currentShear.bottomZ())
-                    .color(r, g, b, a).texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                    .light(packedLight).normal(1.0f, 0.0f, 0.0f);
-
-            BufferRenderer.drawWithGlobalProgram(buffer.end());
-            matrices.pop();
-
-            endWorldRainSheetState();
-        } catch (Throwable t) {
-            System.err.println("[Karmagate/DeathRain] Exception while rendering EW join quad");
-            t.printStackTrace();
-            endWorldRainSheetState();
-        }
-    }
-
-    private static void renderNorthSouthEndCapsIfNeeded(
-            World world,
-            MatrixStack matrices,
-            Camera camera,
-            int packedLight,
-            float borderX,
-            int worldX,
-            int worldZ,
-            int playerY,
-            boolean positiveFacing,
-            float topY,
-            float bottomY,
-            float topX,
-            float topZ,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        CurtainShear shear = computeCurtainShear(topY, bottomY, topX, topZ, rainIntensity, rainDirection);
-
-        boolean northContinues = hasNorthSouthCurtainAt(world, worldX, worldZ - 1, playerY, positiveFacing);
-        boolean southContinues = hasNorthSouthCurtainAt(world, worldX, worldZ + 1, playerY, positiveFacing);
-
-        boolean northSheltered = isNorthSouthEndSheltered(world, worldX, worldZ, playerY, positiveFacing, false);
-        boolean southSheltered = isNorthSouthEndSheltered(world, worldX, worldZ, playerY, positiveFacing, true);
-
-        if (!northContinues && northSheltered) {
-            renderNorthSouthEndCapImmediate(
-                    world,
-                    matrices,
-                    camera,
-                    packedLight,
-                    borderX,
-                    worldZ,
-                    topY,
-                    bottomY,
-                    shear,
-                    false,
-                    rainIntensity,
-                    rainDirection
-            );
-        }
-
-        if (!southContinues && southSheltered) {
-            renderNorthSouthEndCapImmediate(
-                    world,
-                    matrices,
-                    camera,
-                    packedLight,
-                    borderX,
-                    worldZ + 1.0f,
-                    topY,
-                    bottomY,
-                    shear,
-                    true,
-                    rainIntensity,
-                    rainDirection
-            );
-        }
-    }
-
-    private static void renderEastWestEndCapsIfNeeded(
-            World world,
-            MatrixStack matrices,
-            Camera camera,
-            int packedLight,
-            float borderZ,
-            int worldX,
-            int worldZ,
-            int playerY,
-            boolean positiveFacing,
-            float topY,
-            float bottomY,
-            float topX,
-            float topZ,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        CurtainShear shear = computeCurtainShear(topY, bottomY, topX, topZ, rainIntensity, rainDirection);
-
-        boolean westContinues = hasEastWestCurtainAt(world, worldX - 1, worldZ, playerY, positiveFacing);
-        boolean eastContinues = hasEastWestCurtainAt(world, worldX + 1, worldZ, playerY, positiveFacing);
-
-        boolean westSheltered = isEastWestEndSheltered(world, worldX, worldZ, playerY, positiveFacing, false);
-        boolean eastSheltered = isEastWestEndSheltered(world, worldX, worldZ, playerY, positiveFacing, true);
-
-        if (!westContinues && westSheltered) {
-            renderEastWestEndCapImmediate(
-                    world,
-                    matrices,
-                    camera,
-                    packedLight,
-                    worldX,
-                    borderZ,
-                    topY,
-                    bottomY,
-                    shear,
-                    false,
-                    rainIntensity,
-                    rainDirection
-            );
-        }
-
-        if (!eastContinues && eastSheltered) {
-            renderEastWestEndCapImmediate(
-                    world,
-                    matrices,
-                    camera,
-                    packedLight,
-                    worldX + 1.0f,
-                    borderZ,
-                    topY,
-                    bottomY,
-                    shear,
-                    true,
-                    rainIntensity,
-                    rainDirection
-            );
-        }
-    }
-
-    private static void renderNorthSouthEndCapImmediate(
-            World world,
-            MatrixStack matrices,
-            Camera camera,
-            int packedLight,
-            float worldX,
-            float worldZ,
-            float topY,
-            float bottomY,
-            CurtainShear shear,
-            boolean positiveEnd,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        try {
-            bindDeathRainShader(
-                    world,
-                    camera,
-                    worldX,
-                    (topY + bottomY) * 0.5f,
-                    worldZ,
-                    1.0f,
-                    0.0f,
-                    0.0f,
-                    rainIntensity,
-                    rainDirection
-            );
-
-            int r = 255;
-            int g = 255;
-            int b = 255;
-            int a = computeRenderAlpha(rainIntensity);
-
-            beginWorldRainSheetState();
-
-            matrices.push();
-            matrices.translate(
-                    worldX - camera.getPos().x,
-                    -camera.getPos().y,
-                    worldZ - camera.getPos().z
-            );
-
-            Matrix4f m = matrices.peek().getPositionMatrix();
-
-            Tessellator tessellator = Tessellator.getInstance();
-            BufferBuilder buffer = tessellator.begin(
-                    VertexFormat.DrawMode.QUADS,
-                    VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
-            );
-
-            float nx = 0.0f;
-            float ny = 0.0f;
-            float nz = positiveEnd ? 1.0f : -1.0f;
-
-            if (positiveEnd) {
-                buffer.vertex(m, 0.0f,             topY,    0.0f)
-                        .color(r, g, b, a).texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, shear.topX(),     topY,    shear.topZ())
-                        .color(r, g, b, a).texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, shear.bottomX(),  bottomY, shear.bottomZ())
-                        .color(r, g, b, a).texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, 0.0f,             bottomY, 0.0f)
-                        .color(r, g, b, a).texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-            } else {
-                buffer.vertex(m, shear.topX(),     topY,    shear.topZ())
-                        .color(r, g, b, a).texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, 0.0f,             topY,    0.0f)
-                        .color(r, g, b, a).texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, 0.0f,             bottomY, 0.0f)
-                        .color(r, g, b, a).texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, shear.bottomX(),  bottomY, shear.bottomZ())
-                        .color(r, g, b, a).texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-            }
-
-            BufferRenderer.drawWithGlobalProgram(buffer.end());
-            matrices.pop();
-
-            endWorldRainSheetState();
-        } catch (Throwable t) {
-            System.err.println("[Karmagate/DeathRain] Exception while rendering NS end cap");
-            t.printStackTrace();
-            endWorldRainSheetState();
-        }
-    }
-
-    private static void renderEastWestEndCapImmediate(
-            World world,
-            MatrixStack matrices,
-            Camera camera,
-            int packedLight,
-            float worldX,
-            float worldZ,
-            float topY,
-            float bottomY,
-            CurtainShear shear,
-            boolean positiveEnd,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        try {
-            bindDeathRainShader(
-                    world,
-                    camera,
-                    worldX,
-                    (topY + bottomY) * 0.5f,
-                    worldZ,
-                    1.0f,
-                    0.0f,
-                    0.0f,
-                    rainIntensity,
-                    rainDirection
-            );
-
-            int r = 255;
-            int g = 255;
-            int b = 255;
-            int a = computeRenderAlpha(rainIntensity);
-
-            beginWorldRainSheetState();
-
-            matrices.push();
-            matrices.translate(
-                    worldX - camera.getPos().x,
-                    -camera.getPos().y,
-                    worldZ - camera.getPos().z
-            );
-
-            Matrix4f m = matrices.peek().getPositionMatrix();
-
-            Tessellator tessellator = Tessellator.getInstance();
-            BufferBuilder buffer = tessellator.begin(
-                    VertexFormat.DrawMode.QUADS,
-                    VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
-            );
-
-            float nx = positiveEnd ? 1.0f : -1.0f;
-            float ny = 0.0f;
-            float nz = 0.0f;
-
-            if (positiveEnd) {
-                buffer.vertex(m, 0.0f,             topY,    0.0f)
-                        .color(r, g, b, a).texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, shear.topX(),     topY,    shear.topZ())
-                        .color(r, g, b, a).texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, shear.bottomX(),  bottomY, shear.bottomZ())
-                        .color(r, g, b, a).texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, 0.0f,             bottomY, 0.0f)
-                        .color(r, g, b, a).texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-            } else {
-                buffer.vertex(m, shear.topX(),     topY,    shear.topZ())
-                        .color(r, g, b, a).texture(0f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, 0.0f,             topY,    0.0f)
-                        .color(r, g, b, a).texture(1f, 0f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, 0.0f,             bottomY, 0.0f)
-                        .color(r, g, b, a).texture(1f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-                buffer.vertex(m, shear.bottomX(),  bottomY, shear.bottomZ())
-                        .color(r, g, b, a).texture(0f, 1f).overlay(OverlayTexture.DEFAULT_UV)
-                        .light(packedLight).normal(nx, ny, nz);
-            }
-
-            BufferRenderer.drawWithGlobalProgram(buffer.end());
-            matrices.pop();
-
-            endWorldRainSheetState();
-        } catch (Throwable t) {
-            System.err.println("[Karmagate/DeathRain] Exception while rendering EW end cap");
-            t.printStackTrace();
-            endWorldRainSheetState();
-        }
+    private static float computePitchStretch(Camera camera) {
+        float pitch = Math.abs(camera.getPitch());
+        return 1.0f + (pitch / 90.0f) * 2.0f;
     }
 
     private static void renderScreenRainOverlay(
@@ -1396,7 +736,7 @@ public final class DeathRainWeatherRenderer {
 
             matrices.push();
             matrices.loadIdentity();
-            Matrix4f m = matrices.peek().getPositionMatrix();
+            Matrix4f matrix = matrices.peek().getPositionMatrix();
 
             Tessellator tessellator = Tessellator.getInstance();
             BufferBuilder buffer = tessellator.begin(
@@ -1407,30 +747,30 @@ public final class DeathRainWeatherRenderer {
             int light = LightmapTextureManager.MAX_LIGHT_COORDINATE;
             int alpha = computeRenderAlpha(rainIntensity);
 
-            buffer.vertex(m, -1.0f,  1.0f, 0.0f)
+            buffer.vertex(matrix, -1.0f, 1.0f, 0.0f)
                     .color(255, 255, 255, alpha)
-                    .texture(0f, 0f)
+                    .texture(0.0f, 0.0f)
                     .overlay(OverlayTexture.DEFAULT_UV)
                     .light(light)
                     .normal(0.0f, 0.0f, -1.0f);
 
-            buffer.vertex(m,  1.0f,  1.0f, 0.0f)
+            buffer.vertex(matrix, 1.0f, 1.0f, 0.0f)
                     .color(255, 255, 255, alpha)
-                    .texture(1f, 0f)
+                    .texture(1.0f, 0.0f)
                     .overlay(OverlayTexture.DEFAULT_UV)
                     .light(light)
                     .normal(0.0f, 0.0f, -1.0f);
 
-            buffer.vertex(m,  1.0f, -1.0f, 0.0f)
+            buffer.vertex(matrix, 1.0f, -1.0f, 0.0f)
                     .color(255, 255, 255, alpha)
-                    .texture(1f, 1f)
+                    .texture(1.0f, 1.0f)
                     .overlay(OverlayTexture.DEFAULT_UV)
                     .light(light)
                     .normal(0.0f, 0.0f, -1.0f);
 
-            buffer.vertex(m, -1.0f, -1.0f, 0.0f)
+            buffer.vertex(matrix, -1.0f, -1.0f, 0.0f)
                     .color(255, 255, 255, alpha)
-                    .texture(0f, 1f)
+                    .texture(0.0f, 1.0f)
                     .overlay(OverlayTexture.DEFAULT_UV)
                     .light(light)
                     .normal(0.0f, 0.0f, -1.0f);
@@ -1438,95 +778,15 @@ public final class DeathRainWeatherRenderer {
             BufferRenderer.drawWithGlobalProgram(buffer.end());
             matrices.pop();
 
-            RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
+            RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
             RenderSystem.depthMask(true);
             RenderSystem.enableCull();
         } catch (Throwable t) {
             System.err.println("[Karmagate/DeathRain] Exception while rendering screen rain overlay");
             t.printStackTrace();
-            RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
+            RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
             RenderSystem.depthMask(true);
             RenderSystem.enableCull();
-        }
-    }
-
-    private static void emitCurtainPlaneNS(
-            BufferBuilder buffer,
-            Matrix4f m,
-            float topY,
-            float bottomY,
-            int light,
-            int r, int g, int b, int a,
-            boolean positiveFacing,
-            CurtainShear shear
-    ) {
-        float xTop = shear.topX();
-        float xBottom = shear.bottomX();
-
-        float z0 = 0.0f + shear.topZ();
-        float z1 = 1.0f + shear.topZ();
-        float z0b = 0.0f + shear.bottomZ();
-        float z1b = 1.0f + shear.bottomZ();
-
-        float u0 = 0.0f;
-        float u1 = 1.0f;
-        float v0 = 0.0f;
-        float v1 = 1.0f;
-
-        float nx = positiveFacing ? 1.0f : -1.0f;
-        float ny = 0.0f;
-        float nz = 0.0f;
-
-        if (positiveFacing) {
-            buffer.vertex(m, xTop,    topY,    z0 ).color(r, g, b, a).texture(u0, v0).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, xTop,    topY,    z1 ).color(r, g, b, a).texture(u1, v0).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, xBottom, bottomY, z1b).color(r, g, b, a).texture(u1, v1).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, xBottom, bottomY, z0b).color(r, g, b, a).texture(u0, v1).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-        } else {
-            buffer.vertex(m, xTop,    topY,    z1 ).color(r, g, b, a).texture(u0, v0).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, xTop,    topY,    z0 ).color(r, g, b, a).texture(u1, v0).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, xBottom, bottomY, z0b).color(r, g, b, a).texture(u1, v1).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, xBottom, bottomY, z1b).color(r, g, b, a).texture(u0, v1).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-        }
-    }
-
-    private static void emitCurtainPlaneEW(
-            BufferBuilder buffer,
-            Matrix4f m,
-            float topY,
-            float bottomY,
-            int light,
-            int r, int g, int b, int a,
-            boolean positiveFacing,
-            CurtainShear shear
-    ) {
-        float x0Top = 0.0f + shear.topX();
-        float x1Top = 1.0f + shear.topX();
-        float x0Bottom = 0.0f + shear.bottomX();
-        float x1Bottom = 1.0f + shear.bottomX();
-
-        float zTop = shear.topZ();
-        float zBottom = shear.bottomZ();
-
-        float u0 = 0.0f;
-        float u1 = 1.0f;
-        float v0 = 0.0f;
-        float v1 = 1.0f;
-
-        float nx = 0.0f;
-        float ny = 0.0f;
-        float nz = positiveFacing ? 1.0f : -1.0f;
-
-        if (positiveFacing) {
-            buffer.vertex(m, x0Top,    topY,    zTop   ).color(r, g, b, a).texture(u0, v0).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, x1Top,    topY,    zTop   ).color(r, g, b, a).texture(u1, v0).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, x1Bottom, bottomY, zBottom).color(r, g, b, a).texture(u1, v1).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, x0Bottom, bottomY, zBottom).color(r, g, b, a).texture(u0, v1).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-        } else {
-            buffer.vertex(m, x1Top,    topY,    zTop   ).color(r, g, b, a).texture(u0, v0).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, x0Top,    topY,    zTop   ).color(r, g, b, a).texture(u1, v0).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, x0Bottom, bottomY, zBottom).color(r, g, b, a).texture(u1, v1).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
-            buffer.vertex(m, x1Bottom, bottomY, zBottom).color(r, g, b, a).texture(u0, v1).overlay(OverlayTexture.DEFAULT_UV).light(light).normal(nx, ny, nz);
         }
     }
 
@@ -1555,6 +815,27 @@ public final class DeathRainWeatherRenderer {
         }
 
         return null;
+    }
+
+    private static float getDryFloorTopY(World world, int x, int z, int playerY) {
+        BlockPos.Mutable pos = new BlockPos.Mutable();
+
+        for (int y = playerY; y >= world.getBottomY(); y--) {
+            pos.set(x, y, z);
+
+            if (world.getBlockState(pos).isAir()) {
+                continue;
+            }
+
+            VoxelShape shape = world.getBlockState(pos).getCollisionShape(world, pos);
+            if (shape.isEmpty()) {
+                continue;
+            }
+
+            return (float) (y + shape.getMax(Direction.Axis.Y));
+        }
+
+        return world.getBottomY();
     }
 
     private static float resolveGlobalRainIntensity() {
@@ -1599,27 +880,5 @@ public final class DeathRainWeatherRenderer {
 
     private static float lerp(float start, float end, float delta) {
         return start + (end - start) * delta;
-    }
-
-    private static float getDryFloorTopY(World world, int x, int z, int playerY) {
-        BlockPos.Mutable pos = new BlockPos.Mutable();
-
-        for (int y = playerY; y >= world.getBottomY(); y--) {
-            pos.set(x, y, z);
-
-            if (world.getBlockState(pos).isAir()) {
-                continue;
-            }
-
-            VoxelShape shape = world.getBlockState(pos).getCollisionShape(world, pos);
-            if (shape.isEmpty()) {
-                continue;
-            }
-
-            double maxY = shape.getMax(Direction.Axis.Y);
-            return (float) (y + maxY);
-        }
-
-        return world.getBottomY();
     }
 }
