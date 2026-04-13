@@ -21,11 +21,16 @@ public final class DeathRainWeatherRenderer {
     private static final int RADIUS_BLOCKS = 12;
 
     // Horizontal travel per 1 block of vertical drop.
-    private static final float LIGHT_VECTOR_X = (float) Math.tan(Math.toRadians(0.0f));
-    private static final float LIGHT_VECTOR_Z = (float) Math.tan(Math.toRadians(0.0f));
+    private static final float LIGHT_VECTOR_X = (float) Math.tan(Math.toRadians(10.0f));
+    private static final float LIGHT_VECTOR_Z = (float) Math.tan(Math.toRadians(10.0f));
 
     private static final float EPSILON = 1.0e-4f;
     private static final float BLOCK_EPSILON = 0.001f;
+
+    private static final int SHADOW_RED = 255;
+    private static final int SHADOW_GREEN = 0;
+    private static final int SHADOW_BLUE = 0;
+    private static final int SHADOW_ALPHA = 96;
 
     private DeathRainWeatherRenderer() {
     }
@@ -41,7 +46,7 @@ public final class DeathRainWeatherRenderer {
 
         MinecraftClient client = MinecraftClient.getInstance();
         VertexConsumerProvider.Immediate immediate = client.getBufferBuilders().getEntityVertexConsumers();
-        VertexConsumer lines = immediate.getBuffer(RenderLayer.LINES);
+        VertexConsumer quads = immediate.getBuffer(RenderLayer.getDebugQuads());
 
         Vec3d camPos = camera.getPos();
         int baseX = MathHelper.floor(camPos.x);
@@ -72,15 +77,15 @@ public final class DeathRainWeatherRenderer {
                     boolean bottomCaster = isBottomShadowCaster(world, x, y, z);
 
                     if (topCaster) {
-                        emitTopPerimeterShadows(world, lines, mat, x, y, z);
+                        emitTopPerimeterShadows(world, quads, mat, x, y, z);
                     }
 
                     if (bottomCaster) {
-                        emitBottomPerimeterShadows(world, lines, mat, x, y, z);
+                        emitBottomPerimeterShadows(world, quads, mat, x, y, z);
                     }
 
                     if (topCaster && bottomCaster) {
-                        emitReceiverStitchShadows(world, lines, mat, x, y, z);
+                        emitReceiverStitchShadow(world, quads, mat, x, y, z);
                     }
                 }
             }
@@ -182,154 +187,147 @@ public final class DeathRainWeatherRenderer {
         }
     }
 
-    private static void emitReceiverStitchShadows(
-        World world,
-        VertexConsumer vc,
-        Matrix4f mat,
-        int x,
-        int y,
-        int z
-) {
-    // Only needed when the light has both horizontal components.
-    if (Math.abs(LIGHT_VECTOR_X) <= EPSILON || Math.abs(LIGHT_VECTOR_Z) <= EPSILON) {
-        return;
-    }
-
-    // Stitch the same two bottom-silhouette sides, but only at the endpoint
-    // away from the shared back corner. That gives exactly 2 added lines.
-    if (LIGHT_VECTOR_X > EPSILON && LIGHT_VECTOR_Z > EPSILON) {
-        // west + north, shared corner = (x, z)
-        if (!isOpaqueFullCube(world, x - 1, y, z)) {
-            stitchReceiverAlongZ(world, vc, mat, x, y, z, z + 1.0f, false); // max Z only
-        }
-        if (!isOpaqueFullCube(world, x, y, z - 1)) {
-            stitchReceiverAlongX(world, vc, mat, z, y, x, x + 1.0f, false); // max X only
-        }
-        return;
-    }
-
-    if (LIGHT_VECTOR_X > EPSILON && LIGHT_VECTOR_Z < -EPSILON) {
-        // west + south, shared corner = (x, z + 1)
-        if (!isOpaqueFullCube(world, x - 1, y, z)) {
-            stitchReceiverAlongZ(world, vc, mat, x, y, z, z + 1.0f, true); // min Z only
-        }
-        if (!isOpaqueFullCube(world, x, y, z + 1)) {
-            stitchReceiverAlongX(world, vc, mat, z + 1.0f, y, x, x + 1.0f, false); // max X only
-        }
-        return;
-    }
-
-    if (LIGHT_VECTOR_X < -EPSILON && LIGHT_VECTOR_Z > EPSILON) {
-        // east + north, shared corner = (x + 1, z)
-        if (!isOpaqueFullCube(world, x + 1, y, z)) {
-            stitchReceiverAlongZ(world, vc, mat, x + 1.0f, y, z, z + 1.0f, false); // max Z only
-        }
-        if (!isOpaqueFullCube(world, x, y, z - 1)) {
-            stitchReceiverAlongX(world, vc, mat, z, y, x, x + 1.0f, true); // min X only
-        }
-        return;
-    }
-
-    // LIGHT_VECTOR_X < 0 && LIGHT_VECTOR_Z < 0
-    if (!isOpaqueFullCube(world, x + 1, y, z)) {
-        stitchReceiverAlongZ(world, vc, mat, x + 1.0f, y, z, z + 1.0f, true); // min Z only
-    }
-    if (!isOpaqueFullCube(world, x, y, z + 1)) {
-        stitchReceiverAlongX(world, vc, mat, z + 1.0f, y, x, x + 1.0f, true); // min X only
-    }
-}
-
-private static void stitchReceiverAlongZ(
-        World world,
-        VertexConsumer vc,
-        Matrix4f mat,
-        float x,
-        int layerY,
-        float z0,
-        float z1,
-        boolean useMinEndpoint
-) {
-    float minZ = Math.min(z0, z1);
-    float maxZ = Math.max(z0, z1);
-    float edgeLen = maxZ - minZ;
-    if (edgeLen <= EPSILON) {
-        return;
-    }
-
-    List<Interval> topVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY);
-    List<Interval> bottomVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY - 1);
-
-    for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
-        float t0 = snap(overlap.min);
-        float t1 = snap(overlap.max);
-        if (t1 - t0 <= EPSILON) {
-            continue;
+    private static void emitReceiverStitchShadow(
+            World world,
+            VertexConsumer vc,
+            Matrix4f mat,
+            int x,
+            int y,
+            int z
+    ) {
+        if (Math.abs(LIGHT_VECTOR_X) <= EPSILON || Math.abs(LIGHT_VECTOR_Z) <= EPSILON) {
+            return;
         }
 
-        float topSrcZ = minZ + edgeLen * (useMinEndpoint ? t0 : t1);
-        float bottomSrcZ = minZ + edgeLen * (useMinEndpoint ? t0 : t1);
+        CornerPatch first = null;
+        CornerPatch second = null;
 
-        bottomSrcZ += useMinEndpoint
-                ? computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ, true)
-                : -computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ, false);
-
-        Vector3f topRecv = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY, topSrcZ + LIGHT_VECTOR_Z);
-        Vector3f botRecv = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY - 1, bottomSrcZ + LIGHT_VECTOR_Z);
-
-        if (topRecv == null || botRecv == null) {
-            continue;
+        if (LIGHT_VECTOR_X > EPSILON && LIGHT_VECTOR_Z > EPSILON) {
+            if (!isOpaqueFullCube(world, x - 1, y, z)) {
+                first = findCornerPatchAlongZ(world, x, y, z, z + 1.0f, false);
+            }
+            if (!isOpaqueFullCube(world, x, y, z - 1)) {
+                second = findCornerPatchAlongX(world, z, y, x, x + 1.0f, false);
+            }
+        } else if (LIGHT_VECTOR_X > EPSILON) {
+            if (!isOpaqueFullCube(world, x - 1, y, z)) {
+                first = findCornerPatchAlongZ(world, x, y, z, z + 1.0f, true);
+            }
+            if (!isOpaqueFullCube(world, x, y, z + 1)) {
+                second = findCornerPatchAlongX(world, z + 1.0f, y, x, x + 1.0f, false);
+            }
+        } else if (LIGHT_VECTOR_Z > EPSILON) {
+            if (!isOpaqueFullCube(world, x + 1, y, z)) {
+                first = findCornerPatchAlongZ(world, x + 1.0f, y, z, z + 1.0f, false);
+            }
+            if (!isOpaqueFullCube(world, x, y, z - 1)) {
+                second = findCornerPatchAlongX(world, z, y, x, x + 1.0f, true);
+            }
+        } else {
+            if (!isOpaqueFullCube(world, x + 1, y, z)) {
+                first = findCornerPatchAlongZ(world, x + 1.0f, y, z, z + 1.0f, true);
+            }
+            if (!isOpaqueFullCube(world, x, y, z + 1)) {
+                second = findCornerPatchAlongX(world, z + 1.0f, y, x, x + 1.0f, true);
+            }
         }
 
-        emitLine(vc, mat, topRecv.x, topRecv.y, topRecv.z, botRecv.x, botRecv.y, botRecv.z);
-    }
-}
-
-private static void stitchReceiverAlongX(
-        World world,
-        VertexConsumer vc,
-        Matrix4f mat,
-        float z,
-        int layerY,
-        float x0,
-        float x1,
-        boolean useMinEndpoint
-) {
-    float minX = Math.min(x0, x1);
-    float maxX = Math.max(x0, x1);
-    float edgeLen = maxX - minX;
-    if (edgeLen <= EPSILON) {
-        return;
+        emitCornerPatch(vc, mat, first);
+        emitCornerPatch(vc, mat, second);
     }
 
-    List<Interval> topVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY);
-    List<Interval> bottomVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY - 1);
-
-    for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
-        float t0 = snap(overlap.min);
-        float t1 = snap(overlap.max);
-        if (t1 - t0 <= EPSILON) {
-            continue;
+    private static CornerPatch findCornerPatchAlongZ(
+            World world,
+            float x,
+            int layerY,
+            float z0,
+            float z1,
+            boolean useMinEndpoint
+    ) {
+        float minZ = Math.min(z0, z1);
+        float maxZ = Math.max(z0, z1);
+        float edgeLen = maxZ - minZ;
+        if (edgeLen <= EPSILON) {
+            return null;
         }
 
-        float topSrcX = minX + edgeLen * (useMinEndpoint ? t0 : t1);
-        float bottomSrcX = minX + edgeLen * (useMinEndpoint ? t0 : t1);
+        List<Interval> topVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY);
+        List<Interval> bottomVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY - 1);
 
-        bottomSrcX += useMinEndpoint
-                ? computeBottomInsetAlongX(world, layerY, bottomSrcX, z, true)
-                : -computeBottomInsetAlongX(world, layerY, bottomSrcX, z, false);
+        for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
+            float t0 = snap(overlap.min);
+            float t1 = snap(overlap.max);
+            if (t1 - t0 <= EPSILON) {
+                continue;
+            }
 
-        Vector3f topRecv = projectToReceiver(world, topSrcX + LIGHT_VECTOR_X, layerY, z + LIGHT_VECTOR_Z);
-        Vector3f botRecv = projectToReceiver(world, bottomSrcX + LIGHT_VECTOR_X, layerY - 1, z + LIGHT_VECTOR_Z);
+            float topSrcZ = minZ + edgeLen * (useMinEndpoint ? t0 : t1);
+            float bottomSrcZ = minZ + edgeLen * (useMinEndpoint ? t0 : t1);
 
-        if (topRecv == null || botRecv == null) {
-            continue;
+            bottomSrcZ += useMinEndpoint
+                    ? computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ, true)
+                    : -computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ, false);
+
+            Vector3f topSource = new Vector3f(x, layerY + 1.0f, topSrcZ);
+            Vector3f bottomSource = new Vector3f(x, layerY, bottomSrcZ);
+            Vector3f topRecv = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY, topSrcZ + LIGHT_VECTOR_Z);
+            Vector3f botRecv = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY - 1, bottomSrcZ + LIGHT_VECTOR_Z);
+
+            if (topRecv != null && botRecv != null
+                    && !isDiagonalSplitCorner(world, layerY, topSource.x, topSource.z)) {
+                return new CornerPatch(topSource, bottomSource, topRecv, botRecv);
+            }
         }
 
-        emitLine(vc, mat, topRecv.x, topRecv.y, topRecv.z, botRecv.x, botRecv.y, botRecv.z);
+        return null;
     }
-}
 
-    // Edge parallel to Z at constant X.
+    private static CornerPatch findCornerPatchAlongX(
+            World world,
+            float z,
+            int layerY,
+            float x0,
+            float x1,
+            boolean useMinEndpoint
+    ) {
+        float minX = Math.min(x0, x1);
+        float maxX = Math.max(x0, x1);
+        float edgeLen = maxX - minX;
+        if (edgeLen <= EPSILON) {
+            return null;
+        }
+
+        List<Interval> topVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY);
+        List<Interval> bottomVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY - 1);
+
+        for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
+            float t0 = snap(overlap.min);
+            float t1 = snap(overlap.max);
+            if (t1 - t0 <= EPSILON) {
+                continue;
+            }
+
+            float topSrcX = minX + edgeLen * (useMinEndpoint ? t0 : t1);
+            float bottomSrcX = minX + edgeLen * (useMinEndpoint ? t0 : t1);
+
+            bottomSrcX += useMinEndpoint
+                    ? computeBottomInsetAlongX(world, layerY, bottomSrcX, z, true)
+                    : -computeBottomInsetAlongX(world, layerY, bottomSrcX, z, false);
+
+            Vector3f topSource = new Vector3f(topSrcX, layerY + 1.0f, z);
+            Vector3f bottomSource = new Vector3f(bottomSrcX, layerY, z);
+            Vector3f topRecv = projectToReceiver(world, topSrcX + LIGHT_VECTOR_X, layerY, z + LIGHT_VECTOR_Z);
+            Vector3f botRecv = projectToReceiver(world, bottomSrcX + LIGHT_VECTOR_X, layerY - 1, z + LIGHT_VECTOR_Z);
+
+            if (topRecv != null && botRecv != null
+                    && !isDiagonalSplitCorner(world, layerY, topSource.x, topSource.z)) {
+                return new CornerPatch(topSource, bottomSource, topRecv, botRecv);
+            }
+        }
+
+        return null;
+    }
+
     private static void castEdgeAlongZ(
             World world,
             VertexConsumer vc,
@@ -380,9 +378,9 @@ private static void stitchReceiverAlongX(
             }
 
             float exitX = x + LIGHT_VECTOR_X;
+            float exitY = sourceY - 1.0f;
             float exitZ0 = srcZ0 + LIGHT_VECTOR_Z;
             float exitZ1 = srcZ1 + LIGHT_VECTOR_Z;
-            float exitY = sourceY - 1.0f;
 
             Vector3f recv0 = projectToReceiver(world, exitX, exitY, exitZ0);
             Vector3f recv1 = projectToReceiver(world, exitX, exitY, exitZ1);
@@ -390,17 +388,17 @@ private static void stitchReceiverAlongX(
                 continue;
             }
 
-            emitLine(vc, mat, x, sourceY, srcZ0, x, sourceY, srcZ1);
-            emitLine(vc, mat, x, sourceY, srcZ0, exitX, exitY, exitZ0);
-            emitLine(vc, mat, x, sourceY, srcZ1, exitX, exitY, exitZ1);
-            emitLine(vc, mat, exitX, exitY, exitZ0, exitX, exitY, exitZ1);
-            emitLine(vc, mat, exitX, exitY, exitZ0, recv0.x, recv0.y, recv0.z);
-            emitLine(vc, mat, exitX, exitY, exitZ1, recv1.x, recv1.y, recv1.z);
-            emitLine(vc, mat, recv0.x, recv0.y, recv0.z, recv1.x, recv1.y, recv1.z);
+            emitQuad(
+                    vc,
+                    mat,
+                    x, sourceY, srcZ0,
+                    x, sourceY, srcZ1,
+                    recv1.x, recv1.y, recv1.z,
+                    recv0.x, recv0.y, recv0.z
+            );
         }
     }
 
-    // Edge parallel to X at constant Z.
     private static void castEdgeAlongX(
             World world,
             VertexConsumer vc,
@@ -450,10 +448,10 @@ private static void stitchReceiverAlongX(
                 }
             }
 
+            float exitY = sourceY - 1.0f;
+            float exitZ = z + LIGHT_VECTOR_Z;
             float exitX0 = srcX0 + LIGHT_VECTOR_X;
             float exitX1 = srcX1 + LIGHT_VECTOR_X;
-            float exitZ = z + LIGHT_VECTOR_Z;
-            float exitY = sourceY - 1.0f;
 
             Vector3f recv0 = projectToReceiver(world, exitX0, exitY, exitZ);
             Vector3f recv1 = projectToReceiver(world, exitX1, exitY, exitZ);
@@ -461,121 +459,14 @@ private static void stitchReceiverAlongX(
                 continue;
             }
 
-            emitLine(vc, mat, srcX0, sourceY, z, srcX1, sourceY, z);
-            emitLine(vc, mat, srcX0, sourceY, z, exitX0, exitY, exitZ);
-            emitLine(vc, mat, srcX1, sourceY, z, exitX1, exitY, exitZ);
-            emitLine(vc, mat, exitX0, exitY, exitZ, exitX1, exitY, exitZ);
-            emitLine(vc, mat, exitX0, exitY, exitZ, recv0.x, recv0.y, recv0.z);
-            emitLine(vc, mat, exitX1, exitY, exitZ, recv1.x, recv1.y, recv1.z);
-            emitLine(vc, mat, recv0.x, recv0.y, recv0.z, recv1.x, recv1.y, recv1.z);
-        }
-    }
-
-    private static void stitchReceiverAlongZ(
-            World world,
-            VertexConsumer vc,
-            Matrix4f mat,
-            float x,
-            int layerY,
-            float z0,
-            float z1
-    ) {
-        float minZ = Math.min(z0, z1);
-        float maxZ = Math.max(z0, z1);
-        float edgeLen = maxZ - minZ;
-        if (edgeLen <= EPSILON) {
-            return;
-        }
-
-        List<Interval> topVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY);
-        List<Interval> bottomVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY - 1);
-
-        for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
-            float t0 = snap(overlap.min);
-            float t1 = snap(overlap.max);
-            if (t1 - t0 <= EPSILON) {
-                continue;
-            }
-
-            float topSrcZ0 = minZ + edgeLen * t0;
-            float topSrcZ1 = minZ + edgeLen * t1;
-
-            float bottomSrcZ0 = minZ + edgeLen * t0;
-            float bottomSrcZ1 = minZ + edgeLen * t1;
-
-            bottomSrcZ0 += computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ0, true);
-            bottomSrcZ1 -= computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ1, false);
-
-            if (bottomSrcZ1 - bottomSrcZ0 <= EPSILON) {
-                continue;
-            }
-
-            Vector3f topRecv0 = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY,     topSrcZ0 + LIGHT_VECTOR_Z);
-            Vector3f topRecv1 = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY,     topSrcZ1 + LIGHT_VECTOR_Z);
-            Vector3f botRecv0 = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY - 1, bottomSrcZ0 + LIGHT_VECTOR_Z);
-            Vector3f botRecv1 = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY - 1, bottomSrcZ1 + LIGHT_VECTOR_Z);
-
-            if (topRecv0 == null || topRecv1 == null || botRecv0 == null || botRecv1 == null) {
-                continue;
-            }
-
-            // The top and bottom receiver edges already exist from the two shadow sets.
-            // These two extra lines are the missing stitch sides of the receiver quad.
-            emitLine(vc, mat, topRecv0.x, topRecv0.y, topRecv0.z, botRecv0.x, botRecv0.y, botRecv0.z);
-            emitLine(vc, mat, topRecv1.x, topRecv1.y, topRecv1.z, botRecv1.x, botRecv1.y, botRecv1.z);
-        }
-    }
-
-    private static void stitchReceiverAlongX(
-            World world,
-            VertexConsumer vc,
-            Matrix4f mat,
-            float z,
-            int layerY,
-            float x0,
-            float x1
-    ) {
-        float minX = Math.min(x0, x1);
-        float maxX = Math.max(x0, x1);
-        float edgeLen = maxX - minX;
-        if (edgeLen <= EPSILON) {
-            return;
-        }
-
-        List<Interval> topVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY);
-        List<Interval> bottomVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY - 1);
-
-        for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
-            float t0 = snap(overlap.min);
-            float t1 = snap(overlap.max);
-            if (t1 - t0 <= EPSILON) {
-                continue;
-            }
-
-            float topSrcX0 = minX + edgeLen * t0;
-            float topSrcX1 = minX + edgeLen * t1;
-
-            float bottomSrcX0 = minX + edgeLen * t0;
-            float bottomSrcX1 = minX + edgeLen * t1;
-
-            bottomSrcX0 += computeBottomInsetAlongX(world, layerY, bottomSrcX0, z, true);
-            bottomSrcX1 -= computeBottomInsetAlongX(world, layerY, bottomSrcX1, z, false);
-
-            if (bottomSrcX1 - bottomSrcX0 <= EPSILON) {
-                continue;
-            }
-
-            Vector3f topRecv0 = projectToReceiver(world, topSrcX0 + LIGHT_VECTOR_X, layerY,     z + LIGHT_VECTOR_Z);
-            Vector3f topRecv1 = projectToReceiver(world, topSrcX1 + LIGHT_VECTOR_X, layerY,     z + LIGHT_VECTOR_Z);
-            Vector3f botRecv0 = projectToReceiver(world, bottomSrcX0 + LIGHT_VECTOR_X, layerY - 1, z + LIGHT_VECTOR_Z);
-            Vector3f botRecv1 = projectToReceiver(world, bottomSrcX1 + LIGHT_VECTOR_X, layerY - 1, z + LIGHT_VECTOR_Z);
-
-            if (topRecv0 == null || topRecv1 == null || botRecv0 == null || botRecv1 == null) {
-                continue;
-            }
-
-            emitLine(vc, mat, topRecv0.x, topRecv0.y, topRecv0.z, botRecv0.x, botRecv0.y, botRecv0.z);
-            emitLine(vc, mat, topRecv1.x, topRecv1.y, topRecv1.z, botRecv1.x, botRecv1.y, botRecv1.z);
+            emitQuad(
+                    vc,
+                    mat,
+                    srcX0, sourceY, z,
+                    srcX1, sourceY, z,
+                    recv1.x, recv1.y, recv1.z,
+                    recv0.x, recv0.y, recv0.z
+            );
         }
     }
 
@@ -711,9 +602,9 @@ private static void stitchReceiverAlongX(
         int gridZ = Math.round(cornerZ);
 
         boolean nw = isBottomFaceExposed(world, gridX - 1, layerY, gridZ - 1);
-        boolean ne = isBottomFaceExposed(world, gridX,     layerY, gridZ - 1);
+        boolean ne = isBottomFaceExposed(world, gridX, layerY, gridZ - 1);
         boolean sw = isBottomFaceExposed(world, gridX - 1, layerY, gridZ);
-        boolean se = isBottomFaceExposed(world, gridX,     layerY, gridZ);
+        boolean se = isBottomFaceExposed(world, gridX, layerY, gridZ);
 
         int count = 0;
         if (nw) count++;
@@ -736,6 +627,29 @@ private static void stitchReceiverAlongX(
 
     private static boolean isNearInteger(float value) {
         return Math.abs(value - Math.round(value)) <= EPSILON;
+    }
+
+    private static boolean isDiagonalSplitCorner(
+            World world,
+            int layerY,
+            float cornerX,
+            float cornerZ
+    ) {
+        if (!isNearInteger(cornerX) || !isNearInteger(cornerZ)) {
+            return false;
+        }
+
+        int gridX = Math.round(cornerX);
+        int gridZ = Math.round(cornerZ);
+
+        boolean nw = isOpaqueFullCube(world, gridX - 1, layerY, gridZ - 1);
+        boolean ne = isOpaqueFullCube(world, gridX,     layerY, gridZ - 1);
+        boolean sw = isOpaqueFullCube(world, gridX - 1, layerY, gridZ);
+        boolean se = isOpaqueFullCube(world, gridX,     layerY, gridZ);
+
+        boolean diagonalA = nw && se && !ne && !sw;
+        boolean diagonalB = ne && sw && !nw && !se;
+        return diagonalA || diagonalB;
     }
 
     private static Interval clipSweepAgainstBlock(
@@ -871,37 +785,83 @@ private static void stitchReceiverAlongX(
         return null;
     }
 
-    private static void emitLine(
-            VertexConsumer vc,
-            Matrix4f mat,
-            float x1,
-            float y1,
-            float z1,
-            float x2,
-            float y2,
-            float z2
-    ) {
-        float dx = x2 - x1;
-        float dy = y2 - y1;
-        float dz = z2 - z1;
-
-        float lenSq = dx * dx + dy * dy + dz * dz;
-        float nx = 0.0f;
-        float ny = 1.0f;
-        float nz = 0.0f;
-        if (lenSq > 1.0e-6f) {
-            float invLen = MathHelper.inverseSqrt(lenSq);
-            nx = dx * invLen;
-            ny = dy * invLen;
-            nz = dz * invLen;
+    private static void emitCornerPatch(VertexConsumer vc, Matrix4f mat, CornerPatch patch) {
+        if (patch == null) {
+            return;
         }
 
-        vc.vertex(mat, x1, y1, z1)
-                .color(255, 0, 0, 255)
-                .normal(nx, ny, nz);
+        emitQuad(
+                vc,
+                mat,
+                patch.topSource.x, patch.topSource.y, patch.topSource.z,
+                patch.bottomSource.x, patch.bottomSource.y, patch.bottomSource.z,
+                patch.bottomReceiver.x, patch.bottomReceiver.y, patch.bottomReceiver.z,
+                patch.topReceiver.x, patch.topReceiver.y, patch.topReceiver.z
+        );
+    }
 
-        vc.vertex(mat, x2, y2, z2)
-                .color(255, 0, 0, 255)
+    private static void emitQuad(
+            VertexConsumer vc,
+            Matrix4f mat,
+            float ax,
+            float ay,
+            float az,
+            float bx,
+            float by,
+            float bz,
+            float cx,
+            float cy,
+            float cz,
+            float dx,
+            float dy,
+            float dz
+    ) {
+        float abx = bx - ax;
+        float aby = by - ay;
+        float abz = bz - az;
+        float adx = dx - ax;
+        float ady = dy - ay;
+        float adz = dz - az;
+
+        float nx = aby * adz - abz * ady;
+        float ny = abz * adx - abx * adz;
+        float nz = abx * ady - aby * adx;
+
+        float lenSq = nx * nx + ny * ny + nz * nz;
+        if (lenSq > 1.0e-6f) {
+            float invLen = MathHelper.inverseSqrt(lenSq);
+            nx *= invLen;
+            ny *= invLen;
+            nz *= invLen;
+        } else {
+            nx = 0.0f;
+            ny = 1.0f;
+            nz = 0.0f;
+        }
+
+        emitQuadVertex(vc, mat, ax, ay, az, nx, ny, nz);
+        emitQuadVertex(vc, mat, bx, by, bz, nx, ny, nz);
+        emitQuadVertex(vc, mat, cx, cy, cz, nx, ny, nz);
+        emitQuadVertex(vc, mat, dx, dy, dz, nx, ny, nz);
+
+        emitQuadVertex(vc, mat, dx, dy, dz, -nx, -ny, -nz);
+        emitQuadVertex(vc, mat, cx, cy, cz, -nx, -ny, -nz);
+        emitQuadVertex(vc, mat, bx, by, bz, -nx, -ny, -nz);
+        emitQuadVertex(vc, mat, ax, ay, az, -nx, -ny, -nz);
+    }
+
+    private static void emitQuadVertex(
+            VertexConsumer vc,
+            Matrix4f mat,
+            float x,
+            float y,
+            float z,
+            float nx,
+            float ny,
+            float nz
+    ) {
+        vc.vertex(mat, x, y, z)
+                .color(SHADOW_RED, SHADOW_GREEN, SHADOW_BLUE, SHADOW_ALPHA)
                 .normal(nx, ny, nz);
     }
 
@@ -912,6 +872,20 @@ private static void stitchReceiverAlongX(
         Interval(float min, float max) {
             this.min = min;
             this.max = max;
+        }
+    }
+
+    private static final class CornerPatch {
+        final Vector3f topSource;
+        final Vector3f bottomSource;
+        final Vector3f topReceiver;
+        final Vector3f bottomReceiver;
+
+        CornerPatch(Vector3f topSource, Vector3f bottomSource, Vector3f topReceiver, Vector3f bottomReceiver) {
+            this.topSource = topSource;
+            this.bottomSource = bottomSource;
+            this.topReceiver = topReceiver;
+            this.bottomReceiver = bottomReceiver;
         }
     }
 }
