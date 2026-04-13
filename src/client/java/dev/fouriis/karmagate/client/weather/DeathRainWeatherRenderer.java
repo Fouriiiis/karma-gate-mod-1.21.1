@@ -25,11 +25,21 @@ public final class DeathRainWeatherRenderer {
 	private static final float SHAFT_DEPTH_BLOCKS = 1.0f;
 	private static final float PROJECTION_SAMPLE_EPSILON = 0.001f;
 	private static final float SHADOW_CLIP_EPSILON = 1.0e-4f;
+	private static final float GEOMETRY_EPSILON = 1.0e-5f;
 
-	// Inset blocker cells very slightly so a shadow sweep that only grazes a voxel
-	// corner does not create a fake split interval.
+	// Inset blocker cells slightly so a ray that only grazes a voxel corner does not
+	// split the visible interval into fake micro-segments.
 	private static final float BLOCKER_INTERIOR_EPSILON = 0.001f;
 	private static final float INTERVAL_SNAP_EPSILON = 0.001f;
+
+	private static final int FACE_POS_X = 0;
+	private static final int FACE_NEG_X = 1;
+	private static final int FACE_POS_Y = 2;
+	private static final int FACE_NEG_Y = 3;
+	private static final int FACE_POS_Z = 4;
+	private static final int FACE_NEG_Z = 5;
+	private static final int FACE_COUNT = 6;
+
 
 	private static final float LIGHT_SLOPE_X =
 			(float) Math.tan(Math.toRadians(LIGHT_ANGLE_X_DEGREES));
@@ -42,6 +52,23 @@ public final class DeathRainWeatherRenderer {
 	private static final float LIGHT_DIR_X = LIGHT_SLOPE_X / LIGHT_DIR_LENGTH;
 	private static final float LIGHT_DIR_Y = -1.0f / LIGHT_DIR_LENGTH;
 	private static final float LIGHT_DIR_Z = LIGHT_SLOPE_Z / LIGHT_DIR_LENGTH;
+
+	private static final EdgeDescriptor[] SILHOUETTE_EDGES = new EdgeDescriptor[] {
+			new EdgeDescriptor(FACE_POS_Y, FACE_NEG_X, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f),
+			new EdgeDescriptor(FACE_POS_Y, FACE_POS_X, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f),
+			new EdgeDescriptor(FACE_POS_Y, FACE_NEG_Z, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f),
+			new EdgeDescriptor(FACE_POS_Y, FACE_POS_Z, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f),
+
+			new EdgeDescriptor(FACE_NEG_Y, FACE_NEG_X, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f),
+			new EdgeDescriptor(FACE_NEG_Y, FACE_POS_X, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f),
+			new EdgeDescriptor(FACE_NEG_Y, FACE_NEG_Z, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f),
+			new EdgeDescriptor(FACE_NEG_Y, FACE_POS_Z, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f),
+
+			new EdgeDescriptor(FACE_NEG_X, FACE_NEG_Z, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f),
+			new EdgeDescriptor(FACE_POS_X, FACE_NEG_Z, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f),
+			new EdgeDescriptor(FACE_NEG_X, FACE_POS_Z, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f),
+			new EdgeDescriptor(FACE_POS_X, FACE_POS_Z, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f)
+	};
 
 	private DeathRainWeatherRenderer() {
 	}
@@ -99,7 +126,7 @@ public final class DeathRainWeatherRenderer {
 					}
 
 					if (isOpaqueFullCube(world, x, y, z)) {
-						emitSolidBlockSilhouetteShadow(world, lines, mat, x, y, z, diagA, diagB);
+						emitSolidBlockSilhouetteShadow(world, lines, mat, x, y, z);
 					}
 				}
 			}
@@ -157,8 +184,7 @@ public final class DeathRainWeatherRenderer {
 	}
 
 	private static boolean isFaceExposedForSolidSilhouette(World world, int x, int y, int z) {
-		return isExposedAir(world, x, y, z)
-				&& !isOneBlockHole(world, x, y, z);
+		return isExposedAir(world, x, y, z) && !isOneBlockHole(world, x, y, z);
 	}
 
 	private static void emitSolidBlockSilhouetteShadow(
@@ -167,180 +193,65 @@ public final class DeathRainWeatherRenderer {
 			Matrix4f mat,
 			int blockX,
 			int blockY,
-			int blockZ,
-			Vector3f diagA,
-			Vector3f diagB
+			int blockZ
 	) {
 		if (!isSkyExposedAir(world, blockX, blockY + 1, blockZ)) {
 			return;
 		}
 
-		boolean posX = isFaceExposedForSolidSilhouette(world, blockX + 1, blockY, blockZ);
-		boolean negX = isFaceExposedForSolidSilhouette(world, blockX - 1, blockY, blockZ);
-		boolean posY = isFaceExposedForSolidSilhouette(world, blockX, blockY + 1, blockZ);
-		boolean negY = isFaceExposedForSolidSilhouette(world, blockX, blockY - 1, blockZ);
-		boolean posZ = isFaceExposedForSolidSilhouette(world, blockX, blockY, blockZ + 1);
-		boolean negZ = isFaceExposedForSolidSilhouette(world, blockX, blockY, blockZ - 1);
-
-		boolean frontPosX = isFrontFacing(1.0f, 0.0f, 0.0f);
-		boolean frontNegX = isFrontFacing(-1.0f, 0.0f, 0.0f);
-		boolean frontPosY = isFrontFacing(0.0f, 1.0f, 0.0f);
-		boolean frontNegY = isFrontFacing(0.0f, -1.0f, 0.0f);
-		boolean frontPosZ = isFrontFacing(0.0f, 0.0f, 1.0f);
-		boolean frontNegZ = isFrontFacing(0.0f, 0.0f, -1.0f);
-
-		float sampleNX = computeCornerSampleX(negX, posX, -1);
-		float samplePX = computeCornerSampleX(negX, posX, 1);
-		float sampleNZ = computeCornerSampleZ(negZ, posZ, -1);
-		float samplePZ = computeCornerSampleZ(negZ, posZ, 1);
-
-		// Top edges
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				posY, negX, frontPosY, frontNegX,
-				sampleNX, sampleNZ,
-				sampleNX, samplePZ,
-				blockX,     blockY + 1.0f, blockZ,
-				blockX,     blockY + 1.0f, blockZ + 1.0f);
-
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				posY, posX, frontPosY, frontPosX,
-				samplePX, sampleNZ,
-				samplePX, samplePZ,
-				blockX + 1.0f, blockY + 1.0f, blockZ,
-				blockX + 1.0f, blockY + 1.0f, blockZ + 1.0f);
-
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				posY, negZ, frontPosY, frontNegZ,
-				sampleNX, sampleNZ,
-				samplePX, sampleNZ,
-				blockX,         blockY + 1.0f, blockZ,
-				blockX + 1.0f, blockY + 1.0f, blockZ);
-
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				posY, posZ, frontPosY, frontPosZ,
-				sampleNX, samplePZ,
-				samplePX, samplePZ,
-				blockX,         blockY + 1.0f, blockZ + 1.0f,
-				blockX + 1.0f, blockY + 1.0f, blockZ + 1.0f);
-
-		// Bottom edges
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				negY, negX, frontNegY, frontNegX,
-				sampleNX, sampleNZ,
-				sampleNX, samplePZ,
-				blockX,     blockY, blockZ,
-				blockX,     blockY, blockZ + 1.0f);
-
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				negY, posX, frontNegY, frontPosX,
-				samplePX, sampleNZ,
-				samplePX, samplePZ,
-				blockX + 1.0f, blockY, blockZ,
-				blockX + 1.0f, blockY, blockZ + 1.0f);
-
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				negY, negZ, frontNegY, frontNegZ,
-				sampleNX, sampleNZ,
-				samplePX, sampleNZ,
-				blockX,         blockY, blockZ,
-				blockX + 1.0f, blockY, blockZ);
-
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				negY, posZ, frontNegY, frontPosZ,
-				sampleNX, samplePZ,
-				samplePX, samplePZ,
-				blockX,         blockY, blockZ + 1.0f,
-				blockX + 1.0f, blockY, blockZ + 1.0f);
-
-		// Vertical edges
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				negX, negZ, frontNegX, frontNegZ,
-				sampleNX, sampleNZ,
-				sampleNX, sampleNZ,
-				blockX, blockY,         blockZ,
-				blockX, blockY + 1.0f, blockZ);
-
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				posX, negZ, frontPosX, frontNegZ,
-				samplePX, sampleNZ,
-				samplePX, sampleNZ,
-				blockX + 1.0f, blockY,         blockZ,
-				blockX + 1.0f, blockY + 1.0f, blockZ);
-
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				negX, posZ, frontNegX, frontPosZ,
-				sampleNX, samplePZ,
-				sampleNX, samplePZ,
-				blockX, blockY,         blockZ + 1.0f,
-				blockX, blockY + 1.0f, blockZ + 1.0f);
-
-		emitSilhouetteEdgeIfNeeded(vc, mat, diagA, diagB, world,
-				posX, posZ, frontPosX, frontPosZ,
-				samplePX, samplePZ,
-				samplePX, samplePZ,
-				blockX + 1.0f, blockY,         blockZ + 1.0f,
-				blockX + 1.0f, blockY + 1.0f, blockZ + 1.0f);
+		boolean[] exposedFaces = gatherExposedFaces(world, blockX, blockY, blockZ);
+		for (EdgeDescriptor edge : SILHOUETTE_EDGES) {
+			emitSilhouetteEdgeIfNeeded(world, vc, mat, blockX, blockY, blockZ, exposedFaces, edge);
+		}
 	}
 
-	private static float computeCornerSampleX(boolean negXExposed, boolean posXExposed, int cornerXSign) {
-		if (cornerXSign < 0 && negXExposed) {
-			return -1.0f;
-		}
-		if (cornerXSign > 0 && posXExposed) {
-			return 1.0f;
-		}
-		return Math.signum(LIGHT_DIR_X);
-	}
-
-	private static float computeCornerSampleZ(boolean negZExposed, boolean posZExposed, int cornerZSign) {
-		if (cornerZSign < 0 && negZExposed) {
-			return -1.0f;
-		}
-		if (cornerZSign > 0 && posZExposed) {
-			return 1.0f;
-		}
-		return Math.signum(LIGHT_DIR_Z);
-	}
-
-	private static boolean isFrontFacing(float nx, float ny, float nz) {
-		return nx * LIGHT_DIR_X + ny * LIGHT_DIR_Y + nz * LIGHT_DIR_Z > 0.0f;
+	private static boolean[] gatherExposedFaces(World world, int blockX, int blockY, int blockZ) {
+		boolean[] exposed = new boolean[FACE_COUNT];
+		exposed[FACE_POS_X] = isFaceExposedForSolidSilhouette(world, blockX + 1, blockY, blockZ);
+		exposed[FACE_NEG_X] = isFaceExposedForSolidSilhouette(world, blockX - 1, blockY, blockZ);
+		exposed[FACE_POS_Y] = isFaceExposedForSolidSilhouette(world, blockX, blockY + 1, blockZ);
+		exposed[FACE_NEG_Y] = isFaceExposedForSolidSilhouette(world, blockX, blockY - 1, blockZ);
+		exposed[FACE_POS_Z] = isFaceExposedForSolidSilhouette(world, blockX, blockY, blockZ + 1);
+		exposed[FACE_NEG_Z] = isFaceExposedForSolidSilhouette(world, blockX, blockY, blockZ - 1);
+		return exposed;
 	}
 
 	private static void emitSilhouetteEdgeIfNeeded(
+			World world,
 			VertexConsumer vc,
 			Matrix4f mat,
-			Vector3f diagA,
-			Vector3f diagB,
-			World world,
-			boolean faceAExposed,
-			boolean faceBExposed,
-			boolean faceAFront,
-			boolean faceBFront,
-			float sampleAx,
-			float sampleAz,
-			float sampleBx,
-			float sampleBz,
-			float ax,
-			float ay,
-			float az,
-			float bx,
-			float by,
-			float bz
+			int blockX,
+			int blockY,
+			int blockZ,
+			boolean[] exposedFaces,
+			EdgeDescriptor edge
 	) {
-		if (!faceAExposed || !faceBExposed) {
+		if (!exposedFaces[edge.faceA] || !exposedFaces[edge.faceB]) {
 			return;
 		}
 
-		if (faceAFront == faceBFront) {
+		if (isFaceFrontFacing(edge.faceA) == isFaceFrontFacing(edge.faceB)) {
 			return;
 		}
+
+		float ax = blockX + edge.ax;
+		float ay = blockY + edge.ay;
+		float az = blockZ + edge.az;
+		float bx = blockX + edge.bx;
+		float by = blockY + edge.by;
+		float bz = blockZ + edge.bz;
+
+		float sampleAx = chooseProjectionSampleX(edge.ax, exposedFaces[FACE_NEG_X], exposedFaces[FACE_POS_X]);
+		float sampleAz = chooseProjectionSampleZ(edge.az, exposedFaces[FACE_NEG_Z], exposedFaces[FACE_POS_Z]);
+		float sampleBx = chooseProjectionSampleX(edge.bx, exposedFaces[FACE_NEG_X], exposedFaces[FACE_POS_X]);
+		float sampleBz = chooseProjectionSampleZ(edge.bz, exposedFaces[FACE_NEG_Z], exposedFaces[FACE_POS_Z]);
 
 		emitProjectedShadowEdge(
 				world,
 				vc,
 				mat,
-				diagA,
-				diagB,
+				edge.faceA,
+				edge.faceB,
 				sampleAx,
 				sampleAz,
 				sampleBx,
@@ -352,6 +263,38 @@ public final class DeathRainWeatherRenderer {
 				by,
 				bz
 		);
+	}
+
+	private static float chooseProjectionSampleX(float localX, boolean negXExposed, boolean posXExposed) {
+		if (localX < 0.5f && negXExposed) {
+			return -1.0f;
+		}
+		if (localX > 0.5f && posXExposed) {
+			return 1.0f;
+		}
+		return Math.signum(LIGHT_DIR_X);
+	}
+
+	private static float chooseProjectionSampleZ(float localZ, boolean negZExposed, boolean posZExposed) {
+		if (localZ < 0.5f && negZExposed) {
+			return -1.0f;
+		}
+		if (localZ > 0.5f && posZExposed) {
+			return 1.0f;
+		}
+		return Math.signum(LIGHT_DIR_Z);
+	}
+
+	private static boolean isFaceFrontFacing(int face) {
+		return switch (face) {
+			case FACE_POS_X -> LIGHT_DIR_X > 0.0f;
+			case FACE_NEG_X -> LIGHT_DIR_X < 0.0f;
+			case FACE_POS_Y -> LIGHT_DIR_Y > 0.0f;
+			case FACE_NEG_Y -> LIGHT_DIR_Y < 0.0f;
+			case FACE_POS_Z -> LIGHT_DIR_Z > 0.0f;
+			case FACE_NEG_Z -> LIGHT_DIR_Z < 0.0f;
+			default -> false;
+		};
 	}
 
 	private static void emitOneBlockHoleShadowOutline(
@@ -368,10 +311,10 @@ public final class DeathRainWeatherRenderer {
 		float exitY = holeY;
 
 		Vector3f[] topCorners = new Vector3f[] {
-				new Vector3f(holeX,     topY, holeZ),
+				new Vector3f(holeX, topY, holeZ),
 				new Vector3f(holeX + 1, topY, holeZ),
 				new Vector3f(holeX + 1, topY, holeZ + 1),
-				new Vector3f(holeX,     topY, holeZ + 1)
+				new Vector3f(holeX, topY, holeZ + 1)
 		};
 
 		Vector3f[] exitCorners = computeExitApertureCorners(holeX, exitY, holeZ);
@@ -388,29 +331,31 @@ public final class DeathRainWeatherRenderer {
 		}
 
 		for (int i = 0; i < 4; i++) {
-			emitCross(vc, mat, topCorners[i].x, topCorners[i].y, topCorners[i].z, diagA, diagB);
-			emitCross(vc, mat, exitCorners[i].x, exitCorners[i].y, exitCorners[i].z, diagA, diagB);
-			emitCross(vc, mat, projectedCorners[i].x, projectedCorners[i].y, projectedCorners[i].z, diagA, diagB);
+			emitCross(vc, mat, topCorners[i].x, topCorners[i].y, topCorners[i].z, diagA, diagB, DebugLineColor.HOLE_TOP_CROSS_A, DebugLineColor.HOLE_TOP_CROSS_B);
+			emitCross(vc, mat, exitCorners[i].x, exitCorners[i].y, exitCorners[i].z, diagA, diagB, DebugLineColor.HOLE_EXIT_CROSS_A, DebugLineColor.HOLE_EXIT_CROSS_B);
+			emitCross(vc, mat, projectedCorners[i].x, projectedCorners[i].y, projectedCorners[i].z, diagA, diagB, DebugLineColor.HOLE_RECEIVER_CROSS_A, DebugLineColor.HOLE_RECEIVER_CROSS_B);
 		}
 
-		emitLoop(vc, mat, topCorners);
-		emitLoop(vc, mat, exitCorners);
+		emitLoop(vc, mat, topCorners, DebugLineColor.HOLE_TOP_LOOP);
+		emitLoop(vc, mat, exitCorners, DebugLineColor.HOLE_EXIT_LOOP);
 
 		for (int i = 0; i < 4; i++) {
 			emitLine(
 					vc, mat,
 					topCorners[i].x, topCorners[i].y, topCorners[i].z,
-					exitCorners[i].x, exitCorners[i].y, exitCorners[i].z
+					exitCorners[i].x, exitCorners[i].y, exitCorners[i].z,
+					DebugLineColor.HOLE_SHAFT_CONNECTOR
 			);
 
 			emitLine(
 					vc, mat,
 					exitCorners[i].x, exitCorners[i].y, exitCorners[i].z,
-					projectedCorners[i].x, projectedCorners[i].y, projectedCorners[i].z
+					projectedCorners[i].x, projectedCorners[i].y, projectedCorners[i].z,
+					DebugLineColor.HOLE_RECEIVER_CONNECTOR
 			);
 		}
 
-		emitLoop(vc, mat, projectedCorners);
+		emitLoop(vc, mat, projectedCorners, DebugLineColor.HOLE_RECEIVER_LOOP);
 	}
 
 	private static Vector3f[] computeExitApertureCorners(int holeX, float exitY, int holeZ) {
@@ -419,7 +364,6 @@ public final class DeathRainWeatherRenderer {
 
 		float minX = holeX + Math.max(0.0f, offsetX);
 		float maxX = holeX + Math.min(1.0f, 1.0f + offsetX);
-
 		float minZ = holeZ + Math.max(0.0f, offsetZ);
 		float maxZ = holeZ + Math.min(1.0f, 1.0f + offsetZ);
 
@@ -439,8 +383,8 @@ public final class DeathRainWeatherRenderer {
 			World world,
 			VertexConsumer vc,
 			Matrix4f mat,
-			Vector3f diagA,
-			Vector3f diagB,
+			int faceA,
+			int faceB,
 			float sampleAx,
 			float sampleAz,
 			float sampleBx,
@@ -452,19 +396,11 @@ public final class DeathRainWeatherRenderer {
 			float by,
 			float bz
 	) {
-		// Horizontal X-edge
-		if (Math.abs(ay - by) < 1.0e-5f && Math.abs(az - bz) < 1.0e-5f && Math.abs(ax - bx) > 1.0e-5f) {
-			emitClippedHorizontalXShadowEdge(world, vc, mat, ax, ay, az, bx);
+		if (isHorizontalAxisAlignedEdge(ax, ay, az, bx, by, bz)) {
+			emitClippedHorizontalShadowEdge(world, vc, mat, faceA, faceB, ax, ay, az, bx, bz);
 			return;
 		}
 
-		// Horizontal Z-edge
-		if (Math.abs(ay - by) < 1.0e-5f && Math.abs(ax - bx) < 1.0e-5f && Math.abs(az - bz) > 1.0e-5f) {
-			emitClippedHorizontalZShadowEdge(world, vc, mat, ax, ay, az, bz);
-			return;
-		}
-
-		// Fallback for vertical / unusual edges.
 		emitProjectedShadowEdgeDirect(
 				world,
 				vc,
@@ -473,9 +409,23 @@ public final class DeathRainWeatherRenderer {
 				sampleAz,
 				sampleBx,
 				sampleBz,
-				ax, ay, az,
-				bx, by, bz
+				ax,
+				ay,
+				az,
+				bx,
+				by,
+				bz
 		);
+	}
+
+	private static boolean isHorizontalAxisAlignedEdge(float ax, float ay, float az, float bx, float by, float bz) {
+		if (Math.abs(ay - by) > GEOMETRY_EPSILON) {
+			return false;
+		}
+
+		boolean alongX = Math.abs(ax - bx) > GEOMETRY_EPSILON && Math.abs(az - bz) <= GEOMETRY_EPSILON;
+		boolean alongZ = Math.abs(az - bz) > GEOMETRY_EPSILON && Math.abs(ax - bx) <= GEOMETRY_EPSILON;
+		return alongX || alongZ;
 	}
 
 	private static void emitProjectedShadowEdgeDirect(
@@ -493,162 +443,119 @@ public final class DeathRainWeatherRenderer {
 			float by,
 			float bz
 	) {
-		Vector3f projA = projectPointToReceiver(world, ax, ay, az, sampleAx, sampleAz);
-		Vector3f projB = projectPointToReceiver(world, bx, by, bz, sampleBx, sampleBz);
+		Vector3f exitA = computeAdjustedExitPointForSourceCorner(world, ax, ay, az);
+		Vector3f exitB = computeAdjustedExitPointForSourceCorner(world, bx, by, bz);
 
+		Vector3f projA = projectPointToReceiver(world, exitA.x, exitA.y, exitA.z, sampleAx, sampleAz);
+		Vector3f projB = projectPointToReceiver(world, exitB.x, exitB.y, exitB.z, sampleBx, sampleBz);
 		if (projA == null || projB == null) {
 			return;
 		}
 
-		emitLine(vc, mat, ax, ay, az, bx, by, bz);
-		emitLine(vc, mat, ax, ay, az, projA.x, projA.y, projA.z);
-		emitLine(vc, mat, bx, by, bz, projB.x, projB.y, projB.z);
-		emitLine(vc, mat, projA.x, projA.y, projA.z, projB.x, projB.y, projB.z);
+		emitLine(vc, mat, ax, ay, az, bx, by, bz, DebugLineColor.SOURCE_EDGE);
+		emitLine(vc, mat, ax, ay, az, exitA.x, exitA.y, exitA.z, DebugLineColor.DIRECT_CONNECTOR_A);
+		emitLine(vc, mat, bx, by, bz, exitB.x, exitB.y, exitB.z, DebugLineColor.DIRECT_CONNECTOR_B);
+		emitLine(vc, mat, exitA.x, exitA.y, exitA.z, exitB.x, exitB.y, exitB.z, DebugLineColor.EXIT_EDGE);
+		emitLine(vc, mat, exitA.x, exitA.y, exitA.z, projA.x, projA.y, projA.z, DebugLineColor.RECEIVER_CONNECTOR_A);
+		emitLine(vc, mat, exitB.x, exitB.y, exitB.z, projB.x, projB.y, projB.z, DebugLineColor.RECEIVER_CONNECTOR_B);
+		emitLine(vc, mat, projA.x, projA.y, projA.z, projB.x, projB.y, projB.z, DebugLineColor.RECEIVER_EDGE);
 	}
 
-	private static void emitClippedHorizontalXShadowEdge(
+	private static Vector3f computeAdjustedExitPointForSourceCorner(
 			World world,
-			VertexConsumer vc,
-			Matrix4f mat,
-			float ax,
-			float ay,
-			float az,
-			float bx
+			float sourceX,
+			float sourceY,
+			float sourceZ
 	) {
-		float x0 = ax;
-		float x1 = bx;
-		float z0 = az;
+		float rawExitX = sourceX + LIGHT_SLOPE_X;
+		float rawExitZ = sourceZ + LIGHT_SLOPE_Z;
+		float exitY = sourceY - SHAFT_DEPTH_BLOCKS;
 
-		if (x1 < x0) {
-			float tmp = x0;
-			x0 = x1;
-			x1 = tmp;
+		if (!isNearInteger(sourceX) || !isNearInteger(sourceZ)) {
+			return new Vector3f(rawExitX, exitY, rawExitZ);
 		}
 
-		float edgeLen = x1 - x0;
-		if (edgeLen <= SHADOW_CLIP_EPSILON) {
-			return;
+		int ix = Math.round(sourceX);
+		int iz = Math.round(sourceZ);
+		int blockY = MathHelper.floor(sourceY - PROJECTION_SAMPLE_EPSILON);
+
+		boolean nw = isOpaqueFullCube(world, ix - 1, blockY, iz - 1);
+		boolean ne = isOpaqueFullCube(world, ix,     blockY, iz - 1);
+		boolean sw = isOpaqueFullCube(world, ix - 1, blockY, iz);
+		boolean se = isOpaqueFullCube(world, ix,     blockY, iz);
+
+		int solidCount = 0;
+		solidCount += nw ? 1 : 0;
+		solidCount += ne ? 1 : 0;
+		solidCount += sw ? 1 : 0;
+		solidCount += se ? 1 : 0;
+
+		if (solidCount != 3) {
+			return new Vector3f(rawExitX, exitY, rawExitZ);
 		}
 
-		float exitY = ay - 1.0f;
-		int clipBlockY = MathHelper.floor(ay - PROJECTION_SAMPLE_EPSILON);
+		float adjustedX = rawExitX;
+		float adjustedZ = rawExitZ;
 
-		ArrayList<ParamInterval> visible = new ArrayList<>();
-		visible.add(new ParamInterval(0.0f, 1.0f));
-
-		float minSweepX = Math.min(x0, x0 + LIGHT_SLOPE_X);
-		float maxSweepX = Math.max(x1, x1 + LIGHT_SLOPE_X);
-		float minSweepZ = Math.min(z0, z0 + LIGHT_SLOPE_Z);
-		float maxSweepZ = Math.max(z0, z0 + LIGHT_SLOPE_Z);
-
-		int minCellX = MathHelper.floor(minSweepX) - 1;
-		int maxCellX = MathHelper.floor(maxSweepX) + 1;
-		int minCellZ = MathHelper.floor(minSweepZ) - 1;
-		int maxCellZ = MathHelper.floor(maxSweepZ) + 1;
-
-		for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
-			for (int cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
-				ParamInterval blocked = computeBlockedIntervalForHorizontalXEdge(
-						world,
-						x0,
-						z0,
-						edgeLen,
-						clipBlockY,
-						cellX,
-						cellZ
-				);
-
-				if (blocked != null) {
-					subtractIntervalList(visible, blocked);
-					if (visible.isEmpty()) {
-						return;
-					}
-				}
-			}
+		if (!nw) {
+			adjustedX = Math.min(adjustedX, sourceX);
+			adjustedZ = Math.min(adjustedZ, sourceZ);
+		} else if (!ne) {
+			adjustedX = Math.max(adjustedX, sourceX);
+			adjustedZ = Math.min(adjustedZ, sourceZ);
+		} else if (!sw) {
+			adjustedX = Math.min(adjustedX, sourceX);
+			adjustedZ = Math.max(adjustedZ, sourceZ);
+		} else {
+			adjustedX = Math.max(adjustedX, sourceX);
+			adjustedZ = Math.max(adjustedZ, sourceZ);
 		}
 
-		for (ParamInterval interval : visible) {
-			float t0 = snapUnitInterval(interval.minT);
-			float t1 = snapUnitInterval(interval.maxT);
-
-			if (t1 - t0 <= SHADOW_CLIP_EPSILON) {
-				continue;
-			}
-
-			float srcAx = x0 + edgeLen * t0;
-			float srcBx = x0 + edgeLen * t1;
-			float srcY = ay;
-			float srcZ = z0;
-
-			float exitAx = srcAx + LIGHT_SLOPE_X;
-			float exitBx = srcBx + LIGHT_SLOPE_X;
-			float exitZ = srcZ + LIGHT_SLOPE_Z;
-
-			Vector3f projA = projectPointToReceiver(
-					world,
-					exitAx,
-					exitY,
-					exitZ,
-					Math.signum(LIGHT_DIR_X),
-					Math.signum(LIGHT_DIR_Z)
-			);
-			Vector3f projB = projectPointToReceiver(
-					world,
-					exitBx,
-					exitY,
-					exitZ,
-					Math.signum(LIGHT_DIR_X),
-					Math.signum(LIGHT_DIR_Z)
-			);
-
-			if (projA == null || projB == null) {
-				continue;
-			}
-
-			emitLine(vc, mat, srcAx, srcY, srcZ, srcBx, srcY, srcZ);
-			emitLine(vc, mat, srcAx, srcY, srcZ, exitAx, exitY, exitZ);
-			emitLine(vc, mat, srcBx, srcY, srcZ, exitBx, exitY, exitZ);
-			emitLine(vc, mat, exitAx, exitY, exitZ, exitBx, exitY, exitZ);
-			emitLine(vc, mat, exitAx, exitY, exitZ, projA.x, projA.y, projA.z);
-			emitLine(vc, mat, exitBx, exitY, exitZ, projB.x, projB.y, projB.z);
-			emitLine(vc, mat, projA.x, projA.y, projA.z, projB.x, projB.y, projB.z);
-		}
+		return new Vector3f(adjustedX, exitY, adjustedZ);
 	}
 
-	private static void emitClippedHorizontalZShadowEdge(
+	private static boolean isNearInteger(float value) {
+		return Math.abs(value - Math.round(value)) <= 1.0e-4f;
+	}
+
+	private static void emitClippedHorizontalShadowEdge(
 			World world,
 			VertexConsumer vc,
 			Matrix4f mat,
+			int faceA,
+			int faceB,
 			float ax,
 			float ay,
 			float az,
+			float bx,
 			float bz
 	) {
-		float z0 = az;
-		float z1 = bz;
-		float x0 = ax;
+		boolean alongX = Math.abs(ax - bx) > GEOMETRY_EPSILON;
+		float axisStart = alongX ? ax : az;
+		float axisEnd = alongX ? bx : bz;
+		float constantCoord = alongX ? az : ax;
 
-		if (z1 < z0) {
-			float tmp = z0;
-			z0 = z1;
-			z1 = tmp;
+		if (axisEnd < axisStart) {
+			float tmp = axisStart;
+			axisStart = axisEnd;
+			axisEnd = tmp;
 		}
 
-		float edgeLen = z1 - z0;
+		float edgeLen = axisEnd - axisStart;
 		if (edgeLen <= SHADOW_CLIP_EPSILON) {
 			return;
 		}
 
-		float exitY = ay - 1.0f;
+		float exitY = ay - SHAFT_DEPTH_BLOCKS;
 		int clipBlockY = MathHelper.floor(ay - PROJECTION_SAMPLE_EPSILON);
 
 		ArrayList<ParamInterval> visible = new ArrayList<>();
 		visible.add(new ParamInterval(0.0f, 1.0f));
 
-		float minSweepX = Math.min(x0, x0 + LIGHT_SLOPE_X);
-		float maxSweepX = Math.max(x0, x0 + LIGHT_SLOPE_X);
-		float minSweepZ = Math.min(z0, z0 + LIGHT_SLOPE_Z);
-		float maxSweepZ = Math.max(z1, z1 + LIGHT_SLOPE_Z);
+		float minSweepX = Math.min(Math.min(ax, bx), Math.min(ax + LIGHT_SLOPE_X, bx + LIGHT_SLOPE_X));
+		float maxSweepX = Math.max(Math.max(ax, bx), Math.max(ax + LIGHT_SLOPE_X, bx + LIGHT_SLOPE_X));
+		float minSweepZ = Math.min(Math.min(az, bz), Math.min(az + LIGHT_SLOPE_Z, bz + LIGHT_SLOPE_Z));
+		float maxSweepZ = Math.max(Math.max(az, bz), Math.max(az + LIGHT_SLOPE_Z, bz + LIGHT_SLOPE_Z));
 
 		int minCellX = MathHelper.floor(minSweepX) - 1;
 		int maxCellX = MathHelper.floor(maxSweepX) + 1;
@@ -657,10 +564,11 @@ public final class DeathRainWeatherRenderer {
 
 		for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
 			for (int cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
-				ParamInterval blocked = computeBlockedIntervalForHorizontalZEdge(
+				ParamInterval blocked = computeBlockedIntervalForHorizontalEdge(
 						world,
-						x0,
-						z0,
+						alongX,
+						axisStart,
+						constantCoord,
 						edgeLen,
 						clipBlockY,
 						cellX,
@@ -679,33 +587,35 @@ public final class DeathRainWeatherRenderer {
 		for (ParamInterval interval : visible) {
 			float t0 = snapUnitInterval(interval.minT);
 			float t1 = snapUnitInterval(interval.maxT);
-
 			if (t1 - t0 <= SHADOW_CLIP_EPSILON) {
 				continue;
 			}
 
-			float srcAz = z0 + edgeLen * t0;
-			float srcBz = z0 + edgeLen * t1;
-			float srcX = x0;
+			float edgeA = axisStart + edgeLen * t0;
+			float edgeB = axisStart + edgeLen * t1;
+
+			float srcAx = alongX ? edgeA : constantCoord;
+			float srcAz = alongX ? constantCoord : edgeA;
+			float srcBx = alongX ? edgeB : constantCoord;
+			float srcBz = alongX ? constantCoord : edgeB;
 			float srcY = ay;
 
-			float exitX = srcX + LIGHT_SLOPE_X;
-			float exitAz = srcAz + LIGHT_SLOPE_Z;
-			float exitBz = srcBz + LIGHT_SLOPE_Z;
+			Vector3f exitA = computeAdjustedExitPointForSourceCorner(world, srcAx, srcY, srcAz);
+			Vector3f exitB = computeAdjustedExitPointForSourceCorner(world, srcBx, srcY, srcBz);
 
 			Vector3f projA = projectPointToReceiver(
 					world,
-					exitX,
-					exitY,
-					exitAz,
+					exitA.x,
+					exitA.y,
+					exitA.z,
 					Math.signum(LIGHT_DIR_X),
 					Math.signum(LIGHT_DIR_Z)
 			);
 			Vector3f projB = projectPointToReceiver(
 					world,
-					exitX,
-					exitY,
-					exitBz,
+					exitB.x,
+					exitB.y,
+					exitB.z,
 					Math.signum(LIGHT_DIR_X),
 					Math.signum(LIGHT_DIR_Z)
 			);
@@ -714,20 +624,21 @@ public final class DeathRainWeatherRenderer {
 				continue;
 			}
 
-			emitLine(vc, mat, srcX, srcY, srcAz, srcX, srcY, srcBz);
-			emitLine(vc, mat, srcX, srcY, srcAz, exitX, exitY, exitAz);
-			emitLine(vc, mat, srcX, srcY, srcBz, exitX, exitY, exitBz);
-			emitLine(vc, mat, exitX, exitY, exitAz, exitX, exitY, exitBz);
-			emitLine(vc, mat, exitX, exitY, exitAz, projA.x, projA.y, projA.z);
-			emitLine(vc, mat, exitX, exitY, exitBz, projB.x, projB.y, projB.z);
-			emitLine(vc, mat, projA.x, projA.y, projA.z, projB.x, projB.y, projB.z);
+			emitLine(vc, mat, srcAx, srcY, srcAz, srcBx, srcY, srcBz, DebugLineColor.SOURCE_EDGE);
+			emitLine(vc, mat, srcAx, srcY, srcAz, exitA.x, exitA.y, exitA.z, DebugLineColor.SHAFT_CONNECTOR_A);
+			emitLine(vc, mat, srcBx, srcY, srcBz, exitB.x, exitB.y, exitB.z, DebugLineColor.SHAFT_CONNECTOR_B);
+			emitLine(vc, mat, exitA.x, exitA.y, exitA.z, exitB.x, exitB.y, exitB.z, DebugLineColor.EXIT_EDGE);
+			emitLine(vc, mat, exitA.x, exitA.y, exitA.z, projA.x, projA.y, projA.z, DebugLineColor.RECEIVER_CONNECTOR_A);
+			emitLine(vc, mat, exitB.x, exitB.y, exitB.z, projB.x, projB.y, projB.z, DebugLineColor.RECEIVER_CONNECTOR_B);
+			emitLine(vc, mat, projA.x, projA.y, projA.z, projB.x, projB.y, projB.z, DebugLineColor.RECEIVER_EDGE);
 		}
 	}
 
-	private static ParamInterval computeBlockedIntervalForHorizontalXEdge(
+	private static ParamInterval computeBlockedIntervalForHorizontalEdge(
 			World world,
-			float edgeStartX,
-			float edgeZ,
+			boolean alongX,
+			float edgeStart,
+			float edgeConstCoord,
 			float edgeLen,
 			int clipBlockY,
 			int blockX,
@@ -745,79 +656,46 @@ public final class DeathRainWeatherRenderer {
 		float uMin = SHADOW_CLIP_EPSILON;
 		float uMax = 1.0f - SHADOW_CLIP_EPSILON;
 
-		if (Math.abs(LIGHT_SLOPE_Z) < 1.0e-6f) {
-			if (!(edgeZ > blockMinZ && edgeZ < blockMaxZ)) {
+		if (alongX) {
+			if (Math.abs(LIGHT_SLOPE_Z) < GEOMETRY_EPSILON) {
+				if (!(edgeConstCoord > blockMinZ && edgeConstCoord < blockMaxZ)) {
+					return null;
+				}
+			} else {
+				float uz0 = (blockMinZ - edgeConstCoord) / LIGHT_SLOPE_Z;
+				float uz1 = (blockMaxZ - edgeConstCoord) / LIGHT_SLOPE_Z;
+				float zLo = Math.min(uz0, uz1);
+				float zHi = Math.max(uz0, uz1);
+
+				uMin = Math.max(uMin, zLo);
+				uMax = Math.min(uMax, zHi);
+				if (uMax <= uMin + SHADOW_CLIP_EPSILON) {
+					return null;
+				}
+			}
+
+			float shift0 = LIGHT_SLOPE_X * uMin;
+			float shift1 = LIGHT_SLOPE_X * uMax;
+			float minShift = Math.min(shift0, shift1);
+			float maxShift = Math.max(shift0, shift1);
+
+			float tMin = (blockMinX - edgeStart - maxShift) / edgeLen;
+			float tMax = (blockMaxX - edgeStart - minShift) / edgeLen;
+			return buildInterval(tMin, tMax);
+		}
+
+		if (Math.abs(LIGHT_SLOPE_X) < GEOMETRY_EPSILON) {
+			if (!(edgeConstCoord > blockMinX && edgeConstCoord < blockMaxX)) {
 				return null;
 			}
 		} else {
-			float uz0 = (blockMinZ - edgeZ) / LIGHT_SLOPE_Z;
-			float uz1 = (blockMaxZ - edgeZ) / LIGHT_SLOPE_Z;
-			float zLo = Math.min(uz0, uz1);
-			float zHi = Math.max(uz0, uz1);
-
-			uMin = Math.max(uMin, zLo);
-			uMax = Math.min(uMax, zHi);
-
-			if (uMax <= uMin + SHADOW_CLIP_EPSILON) {
-				return null;
-			}
-		}
-
-		float shift0 = LIGHT_SLOPE_X * uMin;
-		float shift1 = LIGHT_SLOPE_X * uMax;
-		float minShift = Math.min(shift0, shift1);
-		float maxShift = Math.max(shift0, shift1);
-
-		float tMin = (blockMinX - edgeStartX - maxShift) / edgeLen;
-		float tMax = (blockMaxX - edgeStartX - minShift) / edgeLen;
-
-		tMin = Math.max(0.0f, tMin);
-		tMax = Math.min(1.0f, tMax);
-
-		tMin = snapUnitInterval(tMin);
-		tMax = snapUnitInterval(tMax);
-
-		if (tMax <= tMin + SHADOW_CLIP_EPSILON) {
-			return null;
-		}
-
-		return new ParamInterval(tMin, tMax);
-	}
-
-	private static ParamInterval computeBlockedIntervalForHorizontalZEdge(
-			World world,
-			float edgeX,
-			float edgeStartZ,
-			float edgeLen,
-			int clipBlockY,
-			int blockX,
-			int blockZ
-	) {
-		if (!isOpaqueFullCube(world, blockX, clipBlockY, blockZ)) {
-			return null;
-		}
-
-		float blockMinX = blockX + BLOCKER_INTERIOR_EPSILON;
-		float blockMaxX = blockX + 1.0f - BLOCKER_INTERIOR_EPSILON;
-		float blockMinZ = blockZ + BLOCKER_INTERIOR_EPSILON;
-		float blockMaxZ = blockZ + 1.0f - BLOCKER_INTERIOR_EPSILON;
-
-		float uMin = SHADOW_CLIP_EPSILON;
-		float uMax = 1.0f - SHADOW_CLIP_EPSILON;
-
-		if (Math.abs(LIGHT_SLOPE_X) < 1.0e-6f) {
-			if (!(edgeX > blockMinX && edgeX < blockMaxX)) {
-				return null;
-			}
-		} else {
-			float ux0 = (blockMinX - edgeX) / LIGHT_SLOPE_X;
-			float ux1 = (blockMaxX - edgeX) / LIGHT_SLOPE_X;
+			float ux0 = (blockMinX - edgeConstCoord) / LIGHT_SLOPE_X;
+			float ux1 = (blockMaxX - edgeConstCoord) / LIGHT_SLOPE_X;
 			float xLo = Math.min(ux0, ux1);
 			float xHi = Math.max(ux0, ux1);
 
 			uMin = Math.max(uMin, xLo);
 			uMax = Math.min(uMax, xHi);
-
 			if (uMax <= uMin + SHADOW_CLIP_EPSILON) {
 				return null;
 			}
@@ -828,20 +706,18 @@ public final class DeathRainWeatherRenderer {
 		float minShift = Math.min(shift0, shift1);
 		float maxShift = Math.max(shift0, shift1);
 
-		float tMin = (blockMinZ - edgeStartZ - maxShift) / edgeLen;
-		float tMax = (blockMaxZ - edgeStartZ - minShift) / edgeLen;
+		float tMin = (blockMinZ - edgeStart - maxShift) / edgeLen;
+		float tMax = (blockMaxZ - edgeStart - minShift) / edgeLen;
+		return buildInterval(tMin, tMax);
+	}
 
-		tMin = Math.max(0.0f, tMin);
-		tMax = Math.min(1.0f, tMax);
-
-		tMin = snapUnitInterval(tMin);
-		tMax = snapUnitInterval(tMax);
-
-		if (tMax <= tMin + SHADOW_CLIP_EPSILON) {
+	private static ParamInterval buildInterval(float minT, float maxT) {
+		float snappedMin = snapUnitInterval(Math.max(0.0f, minT));
+		float snappedMax = snapUnitInterval(Math.min(1.0f, maxT));
+		if (snappedMax <= snappedMin + SHADOW_CLIP_EPSILON) {
 			return null;
 		}
-
-		return new ParamInterval(tMin, tMax);
+		return new ParamInterval(snappedMin, snappedMax);
 	}
 
 	private static void subtractIntervalList(ArrayList<ParamInterval> visible, ParamInterval blocked) {
@@ -868,26 +744,20 @@ public final class DeathRainWeatherRenderer {
 	}
 
 	private static void addIntervalIfValid(ArrayList<ParamInterval> out, float minT, float maxT) {
-		float snappedMin = snapUnitInterval(minT);
-		float snappedMax = snapUnitInterval(maxT);
-
-		if (snappedMax <= snappedMin + SHADOW_CLIP_EPSILON) {
-			return;
+		ParamInterval interval = buildInterval(minT, maxT);
+		if (interval != null) {
+			out.add(interval);
 		}
-
-		out.add(new ParamInterval(snappedMin, snappedMax));
 	}
 
 	private static float snapUnitInterval(float t) {
 		float clamped = MathHelper.clamp(t, 0.0f, 1.0f);
-
 		if (clamped <= INTERVAL_SNAP_EPSILON) {
 			return 0.0f;
 		}
 		if (clamped >= 1.0f - INTERVAL_SNAP_EPSILON) {
 			return 1.0f;
 		}
-
 		return clamped;
 	}
 
@@ -923,7 +793,6 @@ public final class DeathRainWeatherRenderer {
 				}
 
 				float travelDistance = verticalDrop / -LIGHT_DIR_Y;
-
 				return new Vector3f(
 						startX + LIGHT_DIR_X * travelDistance,
 						startY + LIGHT_DIR_Y * travelDistance,
@@ -935,11 +804,11 @@ public final class DeathRainWeatherRenderer {
 		return null;
 	}
 
-	private static void emitLoop(VertexConsumer vc, Matrix4f mat, Vector3f[] points) {
+	private static void emitLoop(VertexConsumer vc, Matrix4f mat, Vector3f[] points, DebugLineColor color) {
 		for (int i = 0; i < points.length; i++) {
 			Vector3f a = points[i];
 			Vector3f b = points[(i + 1) % points.length];
-			emitLine(vc, mat, a.x, a.y, a.z, b.x, b.y, b.z);
+			emitLine(vc, mat, a.x, a.y, a.z, b.x, b.y, b.z, color);
 		}
 	}
 
@@ -950,18 +819,22 @@ public final class DeathRainWeatherRenderer {
 			float py,
 			float pz,
 			Vector3f diagA,
-			Vector3f diagB
+			Vector3f diagB,
+			DebugLineColor colorA,
+			DebugLineColor colorB
 	) {
 		emitLine(
 				vc, mat,
 				px - diagA.x, py - diagA.y, pz - diagA.z,
-				px + diagA.x, py + diagA.y, pz + diagA.z
+				px + diagA.x, py + diagA.y, pz + diagA.z,
+				colorA
 		);
 
 		emitLine(
 				vc, mat,
 				px - diagB.x, py - diagB.y, pz - diagB.z,
-				px + diagB.x, py + diagB.y, pz + diagB.z
+				px + diagB.x, py + diagB.y, pz + diagB.z,
+				colorB
 		);
 	}
 
@@ -974,6 +847,20 @@ public final class DeathRainWeatherRenderer {
 			float x2,
 			float y2,
 			float z2
+	) {
+		emitLine(vc, mat, x1, y1, z1, x2, y2, z2, DebugLineColor.DEFAULT);
+	}
+
+	private static void emitLine(
+			VertexConsumer vc,
+			Matrix4f mat,
+			float x1,
+			float y1,
+			float z1,
+			float x2,
+			float y2,
+			float z2,
+			DebugLineColor color
 	) {
 		float dx = x2 - x1;
 		float dy = y2 - y1;
@@ -992,12 +879,69 @@ public final class DeathRainWeatherRenderer {
 		}
 
 		vc.vertex(mat, x1, y1, z1)
-				.color(255, 0, 0, 255)
+				.color(color.r, color.g, color.b, 255)
 				.normal(nx, ny, nz);
 
 		vc.vertex(mat, x2, y2, z2)
-				.color(255, 0, 0, 255)
+				.color(color.r, color.g, color.b, 255)
 				.normal(nx, ny, nz);
+	}
+
+
+	private enum DebugLineColor {
+		DEFAULT(255, 0, 0),
+		SOURCE_EDGE(255, 0, 0),
+		SHAFT_CONNECTOR_A(0, 255, 0),
+		SHAFT_CONNECTOR_B(0, 120, 255),
+		EXIT_EDGE(255, 255, 0),
+		RECEIVER_CONNECTOR_A(255, 0, 255),
+		RECEIVER_CONNECTOR_B(0, 255, 255),
+		RECEIVER_EDGE(255, 136, 0),
+		DIRECT_CONNECTOR_A(128, 255, 128),
+		DIRECT_CONNECTOR_B(128, 192, 255),
+		HOLE_TOP_LOOP(255, 255, 255),
+		HOLE_EXIT_LOOP(160, 160, 160),
+		HOLE_RECEIVER_LOOP(255, 200, 80),
+		HOLE_TOP_CROSS_A(255, 180, 180),
+		HOLE_TOP_CROSS_B(255, 120, 120),
+		HOLE_EXIT_CROSS_A(180, 255, 180),
+		HOLE_EXIT_CROSS_B(120, 255, 120),
+		HOLE_RECEIVER_CROSS_A(180, 180, 255),
+		HOLE_RECEIVER_CROSS_B(120, 120, 255),
+		HOLE_SHAFT_CONNECTOR(200, 255, 200),
+		HOLE_RECEIVER_CONNECTOR(200, 200, 255);
+
+		final int r;
+		final int g;
+		final int b;
+
+		DebugLineColor(int r, int g, int b) {
+			this.r = r;
+			this.g = g;
+			this.b = b;
+		}
+	}
+
+	private static final class EdgeDescriptor {
+		final int faceA;
+		final int faceB;
+		final float ax;
+		final float ay;
+		final float az;
+		final float bx;
+		final float by;
+		final float bz;
+
+		EdgeDescriptor(int faceA, int faceB, float ax, float ay, float az, float bx, float by, float bz) {
+			this.faceA = faceA;
+			this.faceB = faceB;
+			this.ax = ax;
+			this.ay = ay;
+			this.az = az;
+			this.bx = bx;
+			this.by = by;
+			this.bz = bz;
+		}
 	}
 
 	private static final class ParamInterval {
