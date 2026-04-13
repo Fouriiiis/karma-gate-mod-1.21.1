@@ -21,8 +21,8 @@ public final class DeathRainWeatherRenderer {
     private static final int RADIUS_BLOCKS = 12;
 
     // Horizontal travel per 1 block of vertical drop.
-    private static final float LIGHT_VECTOR_X = (float) Math.tan(Math.toRadians(20.0f));
-    private static final float LIGHT_VECTOR_Z = (float) Math.tan(Math.toRadians(20.0f));
+    private static final float LIGHT_VECTOR_X = (float) Math.tan(Math.toRadians(0.0f));
+    private static final float LIGHT_VECTOR_Z = (float) Math.tan(Math.toRadians(0.0f));
 
     private static final float EPSILON = 1.0e-4f;
     private static final float BLOCK_EPSILON = 0.001f;
@@ -68,12 +68,19 @@ public final class DeathRainWeatherRenderer {
                         continue;
                     }
 
-                    if (isTopShadowCaster(world, x, y, z)) {
+                    boolean topCaster = isTopShadowCaster(world, x, y, z);
+                    boolean bottomCaster = isBottomShadowCaster(world, x, y, z);
+
+                    if (topCaster) {
                         emitTopPerimeterShadows(world, lines, mat, x, y, z);
                     }
 
-                    if (isBottomShadowCaster(world, x, y, z)) {
+                    if (bottomCaster) {
                         emitBottomPerimeterShadows(world, lines, mat, x, y, z);
+                    }
+
+                    if (topCaster && bottomCaster) {
+                        emitReceiverStitchShadows(world, lines, mat, x, y, z);
                     }
                 }
             }
@@ -161,7 +168,6 @@ public final class DeathRainWeatherRenderer {
     ) {
         float sourceY = y;
 
-        // Bottom silhouette gating.
         if (LIGHT_VECTOR_X > EPSILON && !isOpaqueFullCube(world, x - 1, y, z)) {
             castEdgeAlongZ(world, vc, mat, x, sourceY, z, z + 1.0f, true, y);
         }
@@ -175,6 +181,153 @@ public final class DeathRainWeatherRenderer {
             castEdgeAlongX(world, vc, mat, z + 1.0f, sourceY, x, x + 1.0f, true, y);
         }
     }
+
+    private static void emitReceiverStitchShadows(
+        World world,
+        VertexConsumer vc,
+        Matrix4f mat,
+        int x,
+        int y,
+        int z
+) {
+    // Only needed when the light has both horizontal components.
+    if (Math.abs(LIGHT_VECTOR_X) <= EPSILON || Math.abs(LIGHT_VECTOR_Z) <= EPSILON) {
+        return;
+    }
+
+    // Stitch the same two bottom-silhouette sides, but only at the endpoint
+    // away from the shared back corner. That gives exactly 2 added lines.
+    if (LIGHT_VECTOR_X > EPSILON && LIGHT_VECTOR_Z > EPSILON) {
+        // west + north, shared corner = (x, z)
+        if (!isOpaqueFullCube(world, x - 1, y, z)) {
+            stitchReceiverAlongZ(world, vc, mat, x, y, z, z + 1.0f, false); // max Z only
+        }
+        if (!isOpaqueFullCube(world, x, y, z - 1)) {
+            stitchReceiverAlongX(world, vc, mat, z, y, x, x + 1.0f, false); // max X only
+        }
+        return;
+    }
+
+    if (LIGHT_VECTOR_X > EPSILON && LIGHT_VECTOR_Z < -EPSILON) {
+        // west + south, shared corner = (x, z + 1)
+        if (!isOpaqueFullCube(world, x - 1, y, z)) {
+            stitchReceiverAlongZ(world, vc, mat, x, y, z, z + 1.0f, true); // min Z only
+        }
+        if (!isOpaqueFullCube(world, x, y, z + 1)) {
+            stitchReceiverAlongX(world, vc, mat, z + 1.0f, y, x, x + 1.0f, false); // max X only
+        }
+        return;
+    }
+
+    if (LIGHT_VECTOR_X < -EPSILON && LIGHT_VECTOR_Z > EPSILON) {
+        // east + north, shared corner = (x + 1, z)
+        if (!isOpaqueFullCube(world, x + 1, y, z)) {
+            stitchReceiverAlongZ(world, vc, mat, x + 1.0f, y, z, z + 1.0f, false); // max Z only
+        }
+        if (!isOpaqueFullCube(world, x, y, z - 1)) {
+            stitchReceiverAlongX(world, vc, mat, z, y, x, x + 1.0f, true); // min X only
+        }
+        return;
+    }
+
+    // LIGHT_VECTOR_X < 0 && LIGHT_VECTOR_Z < 0
+    if (!isOpaqueFullCube(world, x + 1, y, z)) {
+        stitchReceiverAlongZ(world, vc, mat, x + 1.0f, y, z, z + 1.0f, true); // min Z only
+    }
+    if (!isOpaqueFullCube(world, x, y, z + 1)) {
+        stitchReceiverAlongX(world, vc, mat, z + 1.0f, y, x, x + 1.0f, true); // min X only
+    }
+}
+
+private static void stitchReceiverAlongZ(
+        World world,
+        VertexConsumer vc,
+        Matrix4f mat,
+        float x,
+        int layerY,
+        float z0,
+        float z1,
+        boolean useMinEndpoint
+) {
+    float minZ = Math.min(z0, z1);
+    float maxZ = Math.max(z0, z1);
+    float edgeLen = maxZ - minZ;
+    if (edgeLen <= EPSILON) {
+        return;
+    }
+
+    List<Interval> topVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY);
+    List<Interval> bottomVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY - 1);
+
+    for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
+        float t0 = snap(overlap.min);
+        float t1 = snap(overlap.max);
+        if (t1 - t0 <= EPSILON) {
+            continue;
+        }
+
+        float topSrcZ = minZ + edgeLen * (useMinEndpoint ? t0 : t1);
+        float bottomSrcZ = minZ + edgeLen * (useMinEndpoint ? t0 : t1);
+
+        bottomSrcZ += useMinEndpoint
+                ? computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ, true)
+                : -computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ, false);
+
+        Vector3f topRecv = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY, topSrcZ + LIGHT_VECTOR_Z);
+        Vector3f botRecv = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY - 1, bottomSrcZ + LIGHT_VECTOR_Z);
+
+        if (topRecv == null || botRecv == null) {
+            continue;
+        }
+
+        emitLine(vc, mat, topRecv.x, topRecv.y, topRecv.z, botRecv.x, botRecv.y, botRecv.z);
+    }
+}
+
+private static void stitchReceiverAlongX(
+        World world,
+        VertexConsumer vc,
+        Matrix4f mat,
+        float z,
+        int layerY,
+        float x0,
+        float x1,
+        boolean useMinEndpoint
+) {
+    float minX = Math.min(x0, x1);
+    float maxX = Math.max(x0, x1);
+    float edgeLen = maxX - minX;
+    if (edgeLen <= EPSILON) {
+        return;
+    }
+
+    List<Interval> topVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY);
+    List<Interval> bottomVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY - 1);
+
+    for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
+        float t0 = snap(overlap.min);
+        float t1 = snap(overlap.max);
+        if (t1 - t0 <= EPSILON) {
+            continue;
+        }
+
+        float topSrcX = minX + edgeLen * (useMinEndpoint ? t0 : t1);
+        float bottomSrcX = minX + edgeLen * (useMinEndpoint ? t0 : t1);
+
+        bottomSrcX += useMinEndpoint
+                ? computeBottomInsetAlongX(world, layerY, bottomSrcX, z, true)
+                : -computeBottomInsetAlongX(world, layerY, bottomSrcX, z, false);
+
+        Vector3f topRecv = projectToReceiver(world, topSrcX + LIGHT_VECTOR_X, layerY, z + LIGHT_VECTOR_Z);
+        Vector3f botRecv = projectToReceiver(world, bottomSrcX + LIGHT_VECTOR_X, layerY - 1, z + LIGHT_VECTOR_Z);
+
+        if (topRecv == null || botRecv == null) {
+            continue;
+        }
+
+        emitLine(vc, mat, topRecv.x, topRecv.y, topRecv.z, botRecv.x, botRecv.y, botRecv.z);
+    }
+}
 
     // Edge parallel to Z at constant X.
     private static void castEdgeAlongZ(
@@ -195,30 +348,16 @@ public final class DeathRainWeatherRenderer {
             return;
         }
 
-        List<Interval> visible = new ArrayList<>();
-        visible.add(new Interval(0.0f, 1.0f));
+        List<Interval> visible = computeVisibleIntervalsAlongZ(
+                world,
+                x,
+                minZ,
+                edgeLen,
+                MathHelper.floor(sourceY - EPSILON)
+        );
 
-        int clipLayerY = MathHelper.floor(sourceY - EPSILON);
-        float sweepMinX = Math.min(x, x + LIGHT_VECTOR_X);
-        float sweepMaxX = Math.max(x, x + LIGHT_VECTOR_X);
-        float sweepMinZ = Math.min(minZ, minZ + LIGHT_VECTOR_Z);
-        float sweepMaxZ = Math.max(maxZ, maxZ + LIGHT_VECTOR_Z);
-
-        int minCellX = MathHelper.floor(sweepMinX) - 1;
-        int maxCellX = MathHelper.floor(sweepMaxX) + 1;
-        int minCellZ = MathHelper.floor(sweepMinZ) - 1;
-        int maxCellZ = MathHelper.floor(sweepMaxZ) + 1;
-
-        for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
-            for (int cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
-                Interval blocked = clipSweepAgainstBlock(world, x, minZ, edgeLen, clipLayerY, cellX, cellZ, true);
-                if (blocked != null) {
-                    subtract(visible, blocked);
-                    if (visible.isEmpty()) {
-                        return;
-                    }
-                }
-            }
+        if (visible.isEmpty()) {
+            return;
         }
 
         for (Interval interval : visible) {
@@ -280,30 +419,16 @@ public final class DeathRainWeatherRenderer {
             return;
         }
 
-        List<Interval> visible = new ArrayList<>();
-        visible.add(new Interval(0.0f, 1.0f));
+        List<Interval> visible = computeVisibleIntervalsAlongX(
+                world,
+                z,
+                minX,
+                edgeLen,
+                MathHelper.floor(sourceY - EPSILON)
+        );
 
-        int clipLayerY = MathHelper.floor(sourceY - EPSILON);
-        float sweepMinX = Math.min(minX, minX + LIGHT_VECTOR_X);
-        float sweepMaxX = Math.max(maxX, maxX + LIGHT_VECTOR_X);
-        float sweepMinZ = Math.min(z, z + LIGHT_VECTOR_Z);
-        float sweepMaxZ = Math.max(z, z + LIGHT_VECTOR_Z);
-
-        int minCellX = MathHelper.floor(sweepMinX) - 1;
-        int maxCellX = MathHelper.floor(sweepMaxX) + 1;
-        int minCellZ = MathHelper.floor(sweepMinZ) - 1;
-        int maxCellZ = MathHelper.floor(sweepMaxZ) + 1;
-
-        for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
-            for (int cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
-                Interval blocked = clipSweepAgainstBlock(world, z, minX, edgeLen, clipLayerY, cellX, cellZ, false);
-                if (blocked != null) {
-                    subtract(visible, blocked);
-                    if (visible.isEmpty()) {
-                        return;
-                    }
-                }
-            }
+        if (visible.isEmpty()) {
+            return;
         }
 
         for (Interval interval : visible) {
@@ -344,6 +469,200 @@ public final class DeathRainWeatherRenderer {
             emitLine(vc, mat, exitX1, exitY, exitZ, recv1.x, recv1.y, recv1.z);
             emitLine(vc, mat, recv0.x, recv0.y, recv0.z, recv1.x, recv1.y, recv1.z);
         }
+    }
+
+    private static void stitchReceiverAlongZ(
+            World world,
+            VertexConsumer vc,
+            Matrix4f mat,
+            float x,
+            int layerY,
+            float z0,
+            float z1
+    ) {
+        float minZ = Math.min(z0, z1);
+        float maxZ = Math.max(z0, z1);
+        float edgeLen = maxZ - minZ;
+        if (edgeLen <= EPSILON) {
+            return;
+        }
+
+        List<Interval> topVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY);
+        List<Interval> bottomVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY - 1);
+
+        for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
+            float t0 = snap(overlap.min);
+            float t1 = snap(overlap.max);
+            if (t1 - t0 <= EPSILON) {
+                continue;
+            }
+
+            float topSrcZ0 = minZ + edgeLen * t0;
+            float topSrcZ1 = minZ + edgeLen * t1;
+
+            float bottomSrcZ0 = minZ + edgeLen * t0;
+            float bottomSrcZ1 = minZ + edgeLen * t1;
+
+            bottomSrcZ0 += computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ0, true);
+            bottomSrcZ1 -= computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ1, false);
+
+            if (bottomSrcZ1 - bottomSrcZ0 <= EPSILON) {
+                continue;
+            }
+
+            Vector3f topRecv0 = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY,     topSrcZ0 + LIGHT_VECTOR_Z);
+            Vector3f topRecv1 = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY,     topSrcZ1 + LIGHT_VECTOR_Z);
+            Vector3f botRecv0 = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY - 1, bottomSrcZ0 + LIGHT_VECTOR_Z);
+            Vector3f botRecv1 = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY - 1, bottomSrcZ1 + LIGHT_VECTOR_Z);
+
+            if (topRecv0 == null || topRecv1 == null || botRecv0 == null || botRecv1 == null) {
+                continue;
+            }
+
+            // The top and bottom receiver edges already exist from the two shadow sets.
+            // These two extra lines are the missing stitch sides of the receiver quad.
+            emitLine(vc, mat, topRecv0.x, topRecv0.y, topRecv0.z, botRecv0.x, botRecv0.y, botRecv0.z);
+            emitLine(vc, mat, topRecv1.x, topRecv1.y, topRecv1.z, botRecv1.x, botRecv1.y, botRecv1.z);
+        }
+    }
+
+    private static void stitchReceiverAlongX(
+            World world,
+            VertexConsumer vc,
+            Matrix4f mat,
+            float z,
+            int layerY,
+            float x0,
+            float x1
+    ) {
+        float minX = Math.min(x0, x1);
+        float maxX = Math.max(x0, x1);
+        float edgeLen = maxX - minX;
+        if (edgeLen <= EPSILON) {
+            return;
+        }
+
+        List<Interval> topVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY);
+        List<Interval> bottomVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY - 1);
+
+        for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
+            float t0 = snap(overlap.min);
+            float t1 = snap(overlap.max);
+            if (t1 - t0 <= EPSILON) {
+                continue;
+            }
+
+            float topSrcX0 = minX + edgeLen * t0;
+            float topSrcX1 = minX + edgeLen * t1;
+
+            float bottomSrcX0 = minX + edgeLen * t0;
+            float bottomSrcX1 = minX + edgeLen * t1;
+
+            bottomSrcX0 += computeBottomInsetAlongX(world, layerY, bottomSrcX0, z, true);
+            bottomSrcX1 -= computeBottomInsetAlongX(world, layerY, bottomSrcX1, z, false);
+
+            if (bottomSrcX1 - bottomSrcX0 <= EPSILON) {
+                continue;
+            }
+
+            Vector3f topRecv0 = projectToReceiver(world, topSrcX0 + LIGHT_VECTOR_X, layerY,     z + LIGHT_VECTOR_Z);
+            Vector3f topRecv1 = projectToReceiver(world, topSrcX1 + LIGHT_VECTOR_X, layerY,     z + LIGHT_VECTOR_Z);
+            Vector3f botRecv0 = projectToReceiver(world, bottomSrcX0 + LIGHT_VECTOR_X, layerY - 1, z + LIGHT_VECTOR_Z);
+            Vector3f botRecv1 = projectToReceiver(world, bottomSrcX1 + LIGHT_VECTOR_X, layerY - 1, z + LIGHT_VECTOR_Z);
+
+            if (topRecv0 == null || topRecv1 == null || botRecv0 == null || botRecv1 == null) {
+                continue;
+            }
+
+            emitLine(vc, mat, topRecv0.x, topRecv0.y, topRecv0.z, botRecv0.x, botRecv0.y, botRecv0.z);
+            emitLine(vc, mat, topRecv1.x, topRecv1.y, topRecv1.z, botRecv1.x, botRecv1.y, botRecv1.z);
+        }
+    }
+
+    private static List<Interval> computeVisibleIntervalsAlongZ(
+            World world,
+            float x,
+            float minZ,
+            float edgeLen,
+            int clipLayerY
+    ) {
+        List<Interval> visible = new ArrayList<>();
+        visible.add(new Interval(0.0f, 1.0f));
+
+        float sweepMinX = Math.min(x, x + LIGHT_VECTOR_X);
+        float sweepMaxX = Math.max(x, x + LIGHT_VECTOR_X);
+        float sweepMinZ = Math.min(minZ, minZ + LIGHT_VECTOR_Z);
+        float sweepMaxZ = Math.max(minZ + edgeLen, minZ + edgeLen + LIGHT_VECTOR_Z);
+
+        int minCellX = MathHelper.floor(sweepMinX) - 1;
+        int maxCellX = MathHelper.floor(sweepMaxX) + 1;
+        int minCellZ = MathHelper.floor(sweepMinZ) - 1;
+        int maxCellZ = MathHelper.floor(sweepMaxZ) + 1;
+
+        for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
+            for (int cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
+                Interval blocked = clipSweepAgainstBlock(world, x, minZ, edgeLen, clipLayerY, cellX, cellZ, true);
+                if (blocked != null) {
+                    subtract(visible, blocked);
+                    if (visible.isEmpty()) {
+                        return visible;
+                    }
+                }
+            }
+        }
+
+        return visible;
+    }
+
+    private static List<Interval> computeVisibleIntervalsAlongX(
+            World world,
+            float z,
+            float minX,
+            float edgeLen,
+            int clipLayerY
+    ) {
+        List<Interval> visible = new ArrayList<>();
+        visible.add(new Interval(0.0f, 1.0f));
+
+        float sweepMinX = Math.min(minX, minX + LIGHT_VECTOR_X);
+        float sweepMaxX = Math.max(minX + edgeLen, minX + edgeLen + LIGHT_VECTOR_X);
+        float sweepMinZ = Math.min(z, z + LIGHT_VECTOR_Z);
+        float sweepMaxZ = Math.max(z, z + LIGHT_VECTOR_Z);
+
+        int minCellX = MathHelper.floor(sweepMinX) - 1;
+        int maxCellX = MathHelper.floor(sweepMaxX) + 1;
+        int minCellZ = MathHelper.floor(sweepMinZ) - 1;
+        int maxCellZ = MathHelper.floor(sweepMaxZ) + 1;
+
+        for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
+            for (int cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
+                Interval blocked = clipSweepAgainstBlock(world, z, minX, edgeLen, clipLayerY, cellX, cellZ, false);
+                if (blocked != null) {
+                    subtract(visible, blocked);
+                    if (visible.isEmpty()) {
+                        return visible;
+                    }
+                }
+            }
+        }
+
+        return visible;
+    }
+
+    private static List<Interval> intersectIntervals(List<Interval> a, List<Interval> b) {
+        List<Interval> out = new ArrayList<>();
+
+        for (Interval ia : a) {
+            for (Interval ib : b) {
+                float min = Math.max(ia.min, ib.min);
+                float max = Math.min(ia.max, ib.max);
+                if (max - min > EPSILON) {
+                    out.add(new Interval(min, max));
+                }
+            }
+        }
+
+        return out;
     }
 
     private static float computeBottomInsetAlongZ(
@@ -402,7 +721,6 @@ public final class DeathRainWeatherRenderer {
         if (sw) count++;
         if (se) count++;
 
-        // Only treat exposed-bottom L-corners specially.
         if (count != 3) {
             return false;
         }
@@ -413,8 +731,6 @@ public final class DeathRainWeatherRenderer {
         int targetX = MathHelper.floor(sampleX);
         int targetZ = MathHelper.floor(sampleZ);
 
-        // If the light leaves through another exposed-bottom block in the local 2x2,
-        // the raw corner is invalid and must be inset along the edge direction.
         return isBottomFaceExposed(world, targetX, layerY, targetZ);
     }
 
