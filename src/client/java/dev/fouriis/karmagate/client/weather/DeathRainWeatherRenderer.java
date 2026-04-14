@@ -32,15 +32,14 @@ public final class DeathRainWeatherRenderer {
     private static final int SHADOW_BLUE = 0;
     private static final int SHADOW_ALPHA = 96;
 
+    private static final boolean ALONG_X = false;
+    private static final boolean ALONG_Z = true;
+
     private DeathRainWeatherRenderer() {
     }
 
     public static void render(World world, Camera camera, float tickDelta, MatrixStack matrices) {
-        if (world == null || camera == null || matrices == null) {
-            return;
-        }
-
-        if (!isDeathRainActive()) {
+        if (world == null || camera == null || matrices == null || !isDeathRainActive()) {
             return;
         }
 
@@ -61,15 +60,7 @@ public final class DeathRainWeatherRenderer {
         for (int x = baseX - RADIUS_BLOCKS; x <= baseX + RADIUS_BLOCKS; x++) {
             for (int y = baseY - RADIUS_BLOCKS; y <= baseY + RADIUS_BLOCKS; y++) {
                 for (int z = baseZ - RADIUS_BLOCKS; z <= baseZ + RADIUS_BLOCKS; z++) {
-                    double cx = x + 0.5;
-                    double cy = y + 0.5;
-                    double cz = z + 0.5;
-
-                    if (camPos.squaredDistanceTo(cx, cy, cz) > radiusSq) {
-                        continue;
-                    }
-
-                    if (!isOpaqueFullCube(world, x, y, z)) {
+                    if (!isInsideRadius(camPos, radiusSq, x, y, z) || !isOpaqueFullCube(world, x, y, z)) {
                         continue;
                     }
 
@@ -79,11 +70,9 @@ public final class DeathRainWeatherRenderer {
                     if (topCaster) {
                         emitTopPerimeterShadows(world, quads, mat, x, y, z);
                     }
-
                     if (bottomCaster) {
                         emitBottomPerimeterShadows(world, quads, mat, x, y, z);
                     }
-
                     if (topCaster && bottomCaster) {
                         emitReceiverStitchShadow(world, quads, mat, x, y, z);
                     }
@@ -95,13 +84,16 @@ public final class DeathRainWeatherRenderer {
         immediate.draw();
     }
 
+    private static boolean isInsideRadius(Vec3d camPos, int radiusSq, int x, int y, int z) {
+        return camPos.squaredDistanceTo(x + 0.5, y + 0.5, z + 0.5) <= radiusSq;
+    }
+
     private static boolean isDeathRainActive() {
         if (GlobalRainClientState.hasSync()) {
             return true;
         }
 
-        MinecraftClient client = MinecraftClient.getInstance();
-        return client.getServer() != null;
+        return MinecraftClient.getInstance().getServer() != null;
     }
 
     private static boolean isOpaqueFullCube(World world, int x, int y, int z) {
@@ -127,8 +119,7 @@ public final class DeathRainWeatherRenderer {
             return false;
         }
 
-        BlockPos above = new BlockPos(x, y + 1, z);
-        return isAir(world, x, y + 1, z) && world.isSkyVisible(above);
+        return isAir(world, x, y + 1, z) && world.isSkyVisible(new BlockPos(x, y + 1, z));
     }
 
     private static boolean isBottomShadowCaster(World world, int x, int y, int z) {
@@ -139,62 +130,53 @@ public final class DeathRainWeatherRenderer {
         return isOpaqueFullCube(world, x, y, z) && isAir(world, x, y - 1, z);
     }
 
-    private static void emitTopPerimeterShadows(
-            World world,
-            VertexConsumer vc,
-            Matrix4f mat,
-            int x,
-            int y,
-            int z
-    ) {
+    private static void emitTopPerimeterShadows(World world, VertexConsumer vc, Matrix4f mat, int x, int y, int z) {
         float sourceY = y + 1.0f;
 
-        if (!isOpaqueFullCube(world, x - 1, y, z)) {
-            castEdgeAlongZ(world, vc, mat, x, sourceY, z, z + 1.0f, false, y);
-        }
-        if (!isOpaqueFullCube(world, x + 1, y, z)) {
-            castEdgeAlongZ(world, vc, mat, x + 1.0f, sourceY, z, z + 1.0f, false, y);
-        }
-        if (!isOpaqueFullCube(world, x, y, z - 1)) {
-            castEdgeAlongX(world, vc, mat, z, sourceY, x, x + 1.0f, false, y);
-        }
-        if (!isOpaqueFullCube(world, x, y, z + 1)) {
-            castEdgeAlongX(world, vc, mat, z + 1.0f, sourceY, x, x + 1.0f, false, y);
-        }
+        emitEdgeIfOpen(world, vc, mat, x - 1, y, z, ALONG_Z, x, sourceY, z, z + 1.0f, false, y);
+        emitEdgeIfOpen(world, vc, mat, x + 1, y, z, ALONG_Z, x + 1.0f, sourceY, z, z + 1.0f, false, y);
+        emitEdgeIfOpen(world, vc, mat, x, y, z - 1, ALONG_X, z, sourceY, x, x + 1.0f, false, y);
+        emitEdgeIfOpen(world, vc, mat, x, y, z + 1, ALONG_X, z + 1.0f, sourceY, x, x + 1.0f, false, y);
     }
 
-    private static void emitBottomPerimeterShadows(
-            World world,
-            VertexConsumer vc,
-            Matrix4f mat,
-            int x,
-            int y,
-            int z
-    ) {
+    private static void emitBottomPerimeterShadows(World world, VertexConsumer vc, Matrix4f mat, int x, int y, int z) {
         float sourceY = y;
 
-        if (LIGHT_VECTOR_X > EPSILON && !isOpaqueFullCube(world, x - 1, y, z)) {
-            castEdgeAlongZ(world, vc, mat, x, sourceY, z, z + 1.0f, true, y);
+        if (LIGHT_VECTOR_X > EPSILON) {
+            emitEdgeIfOpen(world, vc, mat, x - 1, y, z, ALONG_Z, x, sourceY, z, z + 1.0f, true, y);
         }
-        if (LIGHT_VECTOR_X < -EPSILON && !isOpaqueFullCube(world, x + 1, y, z)) {
-            castEdgeAlongZ(world, vc, mat, x + 1.0f, sourceY, z, z + 1.0f, true, y);
+        if (LIGHT_VECTOR_X < -EPSILON) {
+            emitEdgeIfOpen(world, vc, mat, x + 1, y, z, ALONG_Z, x + 1.0f, sourceY, z, z + 1.0f, true, y);
         }
-        if (LIGHT_VECTOR_Z > EPSILON && !isOpaqueFullCube(world, x, y, z - 1)) {
-            castEdgeAlongX(world, vc, mat, z, sourceY, x, x + 1.0f, true, y);
+        if (LIGHT_VECTOR_Z > EPSILON) {
+            emitEdgeIfOpen(world, vc, mat, x, y, z - 1, ALONG_X, z, sourceY, x, x + 1.0f, true, y);
         }
-        if (LIGHT_VECTOR_Z < -EPSILON && !isOpaqueFullCube(world, x, y, z + 1)) {
-            castEdgeAlongX(world, vc, mat, z + 1.0f, sourceY, x, x + 1.0f, true, y);
+        if (LIGHT_VECTOR_Z < -EPSILON) {
+            emitEdgeIfOpen(world, vc, mat, x, y, z + 1, ALONG_X, z + 1.0f, sourceY, x, x + 1.0f, true, y);
         }
     }
 
-    private static void emitReceiverStitchShadow(
+    private static void emitEdgeIfOpen(
             World world,
             VertexConsumer vc,
             Matrix4f mat,
-            int x,
-            int y,
-            int z
+            int neighborX,
+            int neighborY,
+            int neighborZ,
+            boolean alongZ,
+            float fixedAxis,
+            float sourceY,
+            float edgeStart,
+            float edgeEnd,
+            boolean bottomPass,
+            int layerY
     ) {
+        if (!isOpaqueFullCube(world, neighborX, neighborY, neighborZ)) {
+            castEdge(world, vc, mat, alongZ, fixedAxis, sourceY, edgeStart, edgeEnd, bottomPass, layerY);
+        }
+    }
+
+    private static void emitReceiverStitchShadow(World world, VertexConsumer vc, Matrix4f mat, int x, int y, int z) {
         if (Math.abs(LIGHT_VECTOR_X) <= EPSILON || Math.abs(LIGHT_VECTOR_Z) <= EPSILON) {
             return;
         }
@@ -204,31 +186,31 @@ public final class DeathRainWeatherRenderer {
 
         if (LIGHT_VECTOR_X > EPSILON && LIGHT_VECTOR_Z > EPSILON) {
             if (!isOpaqueFullCube(world, x - 1, y, z)) {
-                first = findCornerPatchAlongZ(world, x, y, z, z + 1.0f, false);
+                first = findCornerPatch(world, ALONG_Z, x, y, z, z + 1.0f, false);
             }
             if (!isOpaqueFullCube(world, x, y, z - 1)) {
-                second = findCornerPatchAlongX(world, z, y, x, x + 1.0f, false);
+                second = findCornerPatch(world, ALONG_X, z, y, x, x + 1.0f, false);
             }
         } else if (LIGHT_VECTOR_X > EPSILON) {
             if (!isOpaqueFullCube(world, x - 1, y, z)) {
-                first = findCornerPatchAlongZ(world, x, y, z, z + 1.0f, true);
+                first = findCornerPatch(world, ALONG_Z, x, y, z, z + 1.0f, true);
             }
             if (!isOpaqueFullCube(world, x, y, z + 1)) {
-                second = findCornerPatchAlongX(world, z + 1.0f, y, x, x + 1.0f, false);
+                second = findCornerPatch(world, ALONG_X, z + 1.0f, y, x, x + 1.0f, false);
             }
         } else if (LIGHT_VECTOR_Z > EPSILON) {
             if (!isOpaqueFullCube(world, x + 1, y, z)) {
-                first = findCornerPatchAlongZ(world, x + 1.0f, y, z, z + 1.0f, false);
+                first = findCornerPatch(world, ALONG_Z, x + 1.0f, y, z, z + 1.0f, false);
             }
             if (!isOpaqueFullCube(world, x, y, z - 1)) {
-                second = findCornerPatchAlongX(world, z, y, x, x + 1.0f, true);
+                second = findCornerPatch(world, ALONG_X, z, y, x, x + 1.0f, true);
             }
         } else {
             if (!isOpaqueFullCube(world, x + 1, y, z)) {
-                first = findCornerPatchAlongZ(world, x + 1.0f, y, z, z + 1.0f, true);
+                first = findCornerPatch(world, ALONG_Z, x + 1.0f, y, z, z + 1.0f, true);
             }
             if (!isOpaqueFullCube(world, x, y, z + 1)) {
-                second = findCornerPatchAlongX(world, z + 1.0f, y, x, x + 1.0f, true);
+                second = findCornerPatch(world, ALONG_X, z + 1.0f, y, x, x + 1.0f, true);
             }
         }
 
@@ -236,23 +218,24 @@ public final class DeathRainWeatherRenderer {
         emitCornerPatch(vc, mat, second);
     }
 
-    private static CornerPatch findCornerPatchAlongZ(
+    private static CornerPatch findCornerPatch(
             World world,
-            float x,
+            boolean alongZ,
+            float fixedAxis,
             int layerY,
-            float z0,
-            float z1,
+            float edgeStart,
+            float edgeEnd,
             boolean useMinEndpoint
     ) {
-        float minZ = Math.min(z0, z1);
-        float maxZ = Math.max(z0, z1);
-        float edgeLen = maxZ - minZ;
+        float min = Math.min(edgeStart, edgeEnd);
+        float max = Math.max(edgeStart, edgeEnd);
+        float edgeLen = max - min;
         if (edgeLen <= EPSILON) {
             return null;
         }
 
-        List<Interval> topVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY);
-        List<Interval> bottomVisible = computeVisibleIntervalsAlongZ(world, x, minZ, edgeLen, layerY - 1);
+        List<Interval> topVisible = computeVisibleIntervals(world, alongZ, fixedAxis, min, edgeLen, layerY);
+        List<Interval> bottomVisible = computeVisibleIntervals(world, alongZ, fixedAxis, min, edgeLen, layerY - 1);
 
         for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
             float t0 = snap(overlap.min);
@@ -261,102 +244,73 @@ public final class DeathRainWeatherRenderer {
                 continue;
             }
 
-            float topSrcZ = minZ + edgeLen * (useMinEndpoint ? t0 : t1);
-            float bottomSrcZ = minZ + edgeLen * (useMinEndpoint ? t0 : t1);
+            float sourceEdgeValue = min + edgeLen * (useMinEndpoint ? t0 : t1);
+            float bottomEdgeValue = sourceEdgeValue;
 
-            bottomSrcZ += useMinEndpoint
-                    ? computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ, true)
-                    : -computeBottomInsetAlongZ(world, layerY, x, bottomSrcZ, false);
+            if (alongZ) {
+                bottomEdgeValue += useMinEndpoint
+                        ? computeBottomInset(world, layerY, fixedAxis, bottomEdgeValue, ALONG_Z, true)
+                        : -computeBottomInset(world, layerY, fixedAxis, bottomEdgeValue, ALONG_Z, false);
+            } else {
+                bottomEdgeValue += useMinEndpoint
+                        ? computeBottomInset(world, layerY, bottomEdgeValue, fixedAxis, ALONG_X, true)
+                        : -computeBottomInset(world, layerY, bottomEdgeValue, fixedAxis, ALONG_X, false);
+            }
 
-            Vector3f topSource = new Vector3f(x, layerY + 1.0f, topSrcZ);
-            Vector3f bottomSource = new Vector3f(x, layerY, bottomSrcZ);
-            Vector3f topRecv = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY, topSrcZ + LIGHT_VECTOR_Z);
-            Vector3f botRecv = projectToReceiver(world, x + LIGHT_VECTOR_X, layerY - 1, bottomSrcZ + LIGHT_VECTOR_Z);
+            Vector3f topSource;
+            Vector3f bottomSource;
+            Vector3f topReceiver;
+            Vector3f bottomReceiver;
 
-            if (topRecv != null && botRecv != null
-                    && !isDiagonalSplitCorner(world, layerY, topSource.x, topSource.z)) {
-                return new CornerPatch(topSource, bottomSource, topRecv, botRecv);
+            if (alongZ) {
+                topSource = new Vector3f(fixedAxis, layerY + 1.0f, sourceEdgeValue);
+                bottomSource = new Vector3f(fixedAxis, layerY, bottomEdgeValue);
+                topReceiver = projectToReceiver(world, fixedAxis + LIGHT_VECTOR_X, layerY, sourceEdgeValue + LIGHT_VECTOR_Z);
+                bottomReceiver = projectToReceiver(world, fixedAxis + LIGHT_VECTOR_X, layerY - 1, bottomEdgeValue + LIGHT_VECTOR_Z);
+            } else {
+                topSource = new Vector3f(sourceEdgeValue, layerY + 1.0f, fixedAxis);
+                bottomSource = new Vector3f(bottomEdgeValue, layerY, fixedAxis);
+                topReceiver = projectToReceiver(world, sourceEdgeValue + LIGHT_VECTOR_X, layerY, fixedAxis + LIGHT_VECTOR_Z);
+                bottomReceiver = projectToReceiver(world, bottomEdgeValue + LIGHT_VECTOR_X, layerY - 1, fixedAxis + LIGHT_VECTOR_Z);
+            }
+
+            if (topReceiver != null
+                    && bottomReceiver != null
+                    && !isDiagonalBottomHolePair(world, layerY, topSource.x, topSource.z)) {
+                return new CornerPatch(topSource, bottomSource, topReceiver, bottomReceiver);
             }
         }
 
         return null;
     }
 
-    private static CornerPatch findCornerPatchAlongX(
-            World world,
-            float z,
-            int layerY,
-            float x0,
-            float x1,
-            boolean useMinEndpoint
-    ) {
-        float minX = Math.min(x0, x1);
-        float maxX = Math.max(x0, x1);
-        float edgeLen = maxX - minX;
-        if (edgeLen <= EPSILON) {
-            return null;
-        }
-
-        List<Interval> topVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY);
-        List<Interval> bottomVisible = computeVisibleIntervalsAlongX(world, z, minX, edgeLen, layerY - 1);
-
-        for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
-            float t0 = snap(overlap.min);
-            float t1 = snap(overlap.max);
-            if (t1 - t0 <= EPSILON) {
-                continue;
-            }
-
-            float topSrcX = minX + edgeLen * (useMinEndpoint ? t0 : t1);
-            float bottomSrcX = minX + edgeLen * (useMinEndpoint ? t0 : t1);
-
-            bottomSrcX += useMinEndpoint
-                    ? computeBottomInsetAlongX(world, layerY, bottomSrcX, z, true)
-                    : -computeBottomInsetAlongX(world, layerY, bottomSrcX, z, false);
-
-            Vector3f topSource = new Vector3f(topSrcX, layerY + 1.0f, z);
-            Vector3f bottomSource = new Vector3f(bottomSrcX, layerY, z);
-            Vector3f topRecv = projectToReceiver(world, topSrcX + LIGHT_VECTOR_X, layerY, z + LIGHT_VECTOR_Z);
-            Vector3f botRecv = projectToReceiver(world, bottomSrcX + LIGHT_VECTOR_X, layerY - 1, z + LIGHT_VECTOR_Z);
-
-            if (topRecv != null && botRecv != null
-                    && !isDiagonalSplitCorner(world, layerY, topSource.x, topSource.z)) {
-                return new CornerPatch(topSource, bottomSource, topRecv, botRecv);
-            }
-        }
-
-        return null;
-    }
-
-    private static void castEdgeAlongZ(
+    private static void castEdge(
             World world,
             VertexConsumer vc,
             Matrix4f mat,
-            float x,
+            boolean alongZ,
+            float fixedAxis,
             float sourceY,
-            float z0,
-            float z1,
+            float edgeStart,
+            float edgeEnd,
             boolean bottomPass,
             int layerY
     ) {
-        float minZ = Math.min(z0, z1);
-        float maxZ = Math.max(z0, z1);
-        float edgeLen = maxZ - minZ;
+        float min = Math.min(edgeStart, edgeEnd);
+        float max = Math.max(edgeStart, edgeEnd);
+        float edgeLen = max - min;
         if (edgeLen <= EPSILON) {
             return;
         }
 
-        List<Interval> visible = computeVisibleIntervalsAlongZ(
+        List<Interval> visible = computeVisibleIntervals(
                 world,
-                x,
-                minZ,
+                alongZ,
+                fixedAxis,
+                min,
                 edgeLen,
                 MathHelper.floor(sourceY - EPSILON)
         );
-
-        if (visible.isEmpty()) {
-            return;
-        }
 
         for (Interval interval : visible) {
             float t0 = snap(interval.min);
@@ -365,125 +319,90 @@ public final class DeathRainWeatherRenderer {
                 continue;
             }
 
-            float srcZ0 = minZ + edgeLen * t0;
-            float srcZ1 = minZ + edgeLen * t1;
+            float start = min + edgeLen * t0;
+            float end = min + edgeLen * t1;
 
             if (bottomPass) {
-                srcZ0 += computeBottomInsetAlongZ(world, layerY, x, srcZ0, true);
-                srcZ1 -= computeBottomInsetAlongZ(world, layerY, x, srcZ1, false);
-
-                if (srcZ1 - srcZ0 <= EPSILON) {
-                    continue;
+                if (alongZ) {
+                    start += computeBottomInset(world, layerY, fixedAxis, start, ALONG_Z, true);
+                    end -= computeBottomInset(world, layerY, fixedAxis, end, ALONG_Z, false);
+                } else {
+                    start += computeBottomInset(world, layerY, start, fixedAxis, ALONG_X, true);
+                    end -= computeBottomInset(world, layerY, end, fixedAxis, ALONG_X, false);
                 }
-            }
 
-            float exitX = x + LIGHT_VECTOR_X;
-            float exitY = sourceY - 1.0f;
-            float exitZ0 = srcZ0 + LIGHT_VECTOR_Z;
-            float exitZ1 = srcZ1 + LIGHT_VECTOR_Z;
-
-            Vector3f recv0 = projectToReceiver(world, exitX, exitY, exitZ0);
-            Vector3f recv1 = projectToReceiver(world, exitX, exitY, exitZ1);
-            if (recv0 == null || recv1 == null) {
-                continue;
-            }
-
-            emitQuad(
-                    vc,
-                    mat,
-                    x, sourceY, srcZ0,
-                    x, sourceY, srcZ1,
-                    recv1.x, recv1.y, recv1.z,
-                    recv0.x, recv0.y, recv0.z
-            );
-        }
-    }
-
-    private static void castEdgeAlongX(
-            World world,
-            VertexConsumer vc,
-            Matrix4f mat,
-            float z,
-            float sourceY,
-            float x0,
-            float x1,
-            boolean bottomPass,
-            int layerY
-    ) {
-        float minX = Math.min(x0, x1);
-        float maxX = Math.max(x0, x1);
-        float edgeLen = maxX - minX;
-        if (edgeLen <= EPSILON) {
-            return;
-        }
-
-        List<Interval> visible = computeVisibleIntervalsAlongX(
-                world,
-                z,
-                minX,
-                edgeLen,
-                MathHelper.floor(sourceY - EPSILON)
-        );
-
-        if (visible.isEmpty()) {
-            return;
-        }
-
-        for (Interval interval : visible) {
-            float t0 = snap(interval.min);
-            float t1 = snap(interval.max);
-            if (t1 - t0 <= EPSILON) {
-                continue;
-            }
-
-            float srcX0 = minX + edgeLen * t0;
-            float srcX1 = minX + edgeLen * t1;
-
-            if (bottomPass) {
-                srcX0 += computeBottomInsetAlongX(world, layerY, srcX0, z, true);
-                srcX1 -= computeBottomInsetAlongX(world, layerY, srcX1, z, false);
-
-                if (srcX1 - srcX0 <= EPSILON) {
+                if (end - start <= EPSILON) {
                     continue;
                 }
             }
 
             float exitY = sourceY - 1.0f;
-            float exitZ = z + LIGHT_VECTOR_Z;
-            float exitX0 = srcX0 + LIGHT_VECTOR_X;
-            float exitX1 = srcX1 + LIGHT_VECTOR_X;
+            Vector3f recv0;
+            Vector3f recv1;
 
-            Vector3f recv0 = projectToReceiver(world, exitX0, exitY, exitZ);
-            Vector3f recv1 = projectToReceiver(world, exitX1, exitY, exitZ);
-            if (recv0 == null || recv1 == null) {
-                continue;
+            if (alongZ) {
+                float exitX = fixedAxis + LIGHT_VECTOR_X;
+                recv0 = projectToReceiver(world, exitX, exitY, start + LIGHT_VECTOR_Z);
+                recv1 = projectToReceiver(world, exitX, exitY, end + LIGHT_VECTOR_Z);
+                if (recv0 == null || recv1 == null) {
+                    continue;
+                }
+
+                emitQuad(
+                        vc,
+                        mat,
+                        fixedAxis, sourceY, start,
+                        fixedAxis, sourceY, end,
+                        recv1.x, recv1.y, recv1.z,
+                        recv0.x, recv0.y, recv0.z
+                );
+            } else {
+                float exitZ = fixedAxis + LIGHT_VECTOR_Z;
+                recv0 = projectToReceiver(world, start + LIGHT_VECTOR_X, exitY, exitZ);
+                recv1 = projectToReceiver(world, end + LIGHT_VECTOR_X, exitY, exitZ);
+                if (recv0 == null || recv1 == null) {
+                    continue;
+                }
+
+                emitQuad(
+                        vc,
+                        mat,
+                        start, sourceY, fixedAxis,
+                        end, sourceY, fixedAxis,
+                        recv1.x, recv1.y, recv1.z,
+                        recv0.x, recv0.y, recv0.z
+                );
             }
-
-            emitQuad(
-                    vc,
-                    mat,
-                    srcX0, sourceY, z,
-                    srcX1, sourceY, z,
-                    recv1.x, recv1.y, recv1.z,
-                    recv0.x, recv0.y, recv0.z
-            );
         }
     }
 
-    private static List<Interval> computeVisibleIntervalsAlongZ(
+    private static List<Interval> computeVisibleIntervals(
             World world,
-            float x,
-            float minZ,
+            boolean alongZ,
+            float fixedAxis,
+            float edgeStart,
             float edgeLen,
             int clipLayerY
     ) {
         List<Interval> visible = new ArrayList<>();
         visible.add(new Interval(0.0f, 1.0f));
 
-        float sweepMinX = Math.min(x, x + LIGHT_VECTOR_X);
-        float sweepMaxX = Math.max(x, x + LIGHT_VECTOR_X);
-        float sweepMinZ = Math.min(minZ, minZ + LIGHT_VECTOR_Z);
-        float sweepMaxZ = Math.max(minZ + edgeLen, minZ + edgeLen + LIGHT_VECTOR_Z);
+        float sweepMinX;
+        float sweepMaxX;
+        float sweepMinZ;
+        float sweepMaxZ;
+
+        if (alongZ) {
+            sweepMinX = Math.min(fixedAxis, fixedAxis + LIGHT_VECTOR_X);
+            sweepMaxX = Math.max(fixedAxis, fixedAxis + LIGHT_VECTOR_X);
+            sweepMinZ = Math.min(edgeStart, edgeStart + LIGHT_VECTOR_Z);
+            sweepMaxZ = Math.max(edgeStart + edgeLen, edgeStart + edgeLen + LIGHT_VECTOR_Z);
+        } else {
+            sweepMinX = Math.min(edgeStart, edgeStart + LIGHT_VECTOR_X);
+            sweepMaxX = Math.max(edgeStart + edgeLen, edgeStart + edgeLen + LIGHT_VECTOR_X);
+            sweepMinZ = Math.min(fixedAxis, fixedAxis + LIGHT_VECTOR_Z);
+            sweepMaxZ = Math.max(fixedAxis, fixedAxis + LIGHT_VECTOR_Z);
+        }
 
         int minCellX = MathHelper.floor(sweepMinX) - 1;
         int maxCellX = MathHelper.floor(sweepMaxX) + 1;
@@ -492,42 +411,7 @@ public final class DeathRainWeatherRenderer {
 
         for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
             for (int cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
-                Interval blocked = clipSweepAgainstBlock(world, x, minZ, edgeLen, clipLayerY, cellX, cellZ, true);
-                if (blocked != null) {
-                    subtract(visible, blocked);
-                    if (visible.isEmpty()) {
-                        return visible;
-                    }
-                }
-            }
-        }
-
-        return visible;
-    }
-
-    private static List<Interval> computeVisibleIntervalsAlongX(
-            World world,
-            float z,
-            float minX,
-            float edgeLen,
-            int clipLayerY
-    ) {
-        List<Interval> visible = new ArrayList<>();
-        visible.add(new Interval(0.0f, 1.0f));
-
-        float sweepMinX = Math.min(minX, minX + LIGHT_VECTOR_X);
-        float sweepMaxX = Math.max(minX + edgeLen, minX + edgeLen + LIGHT_VECTOR_X);
-        float sweepMinZ = Math.min(z, z + LIGHT_VECTOR_Z);
-        float sweepMaxZ = Math.max(z, z + LIGHT_VECTOR_Z);
-
-        int minCellX = MathHelper.floor(sweepMinX) - 1;
-        int maxCellX = MathHelper.floor(sweepMaxX) + 1;
-        int minCellZ = MathHelper.floor(sweepMinZ) - 1;
-        int maxCellZ = MathHelper.floor(sweepMaxZ) + 1;
-
-        for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
-            for (int cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
-                Interval blocked = clipSweepAgainstBlock(world, z, minX, edgeLen, clipLayerY, cellX, cellZ, false);
+                Interval blocked = clipSweepAgainstBlock(world, fixedAxis, edgeStart, edgeLen, clipLayerY, cellX, cellZ, alongZ);
                 if (blocked != null) {
                     subtract(visible, blocked);
                     if (visible.isEmpty()) {
@@ -556,44 +440,23 @@ public final class DeathRainWeatherRenderer {
         return out;
     }
 
-    private static float computeBottomInsetAlongZ(
+    private static float computeBottomInset(
             World world,
             int layerY,
             float cornerX,
             float cornerZ,
+            boolean alongZ,
             boolean minSide
     ) {
         if (!isBlockedBottomCorner(world, layerY, cornerX, cornerZ)) {
             return 0.0f;
         }
 
-        return minSide
-                ? Math.max(0.0f, LIGHT_VECTOR_Z)
-                : Math.max(0.0f, -LIGHT_VECTOR_Z);
+        float light = alongZ ? LIGHT_VECTOR_Z : LIGHT_VECTOR_X;
+        return minSide ? Math.max(0.0f, light) : Math.max(0.0f, -light);
     }
 
-    private static float computeBottomInsetAlongX(
-            World world,
-            int layerY,
-            float cornerX,
-            float cornerZ,
-            boolean minSide
-    ) {
-        if (!isBlockedBottomCorner(world, layerY, cornerX, cornerZ)) {
-            return 0.0f;
-        }
-
-        return minSide
-                ? Math.max(0.0f, LIGHT_VECTOR_X)
-                : Math.max(0.0f, -LIGHT_VECTOR_X);
-    }
-
-    private static boolean isBlockedBottomCorner(
-            World world,
-            int layerY,
-            float cornerX,
-            float cornerZ
-    ) {
+    private static boolean isBlockedBottomCorner(World world, int layerY, float cornerX, float cornerZ) {
         if (!isNearInteger(cornerX) || !isNearInteger(cornerZ)) {
             return false;
         }
@@ -612,29 +475,37 @@ public final class DeathRainWeatherRenderer {
         if (sw) count++;
         if (se) count++;
 
-        if (count != 3) {
+        boolean diagonalPair = isDiagonalBottomHolePair(world, layerY, cornerX, cornerZ);
+        if (count != 3 && !diagonalPair) {
             return false;
         }
 
         float sampleX = cornerX + Math.signum(LIGHT_VECTOR_X) * BLOCK_EPSILON;
         float sampleZ = cornerZ + Math.signum(LIGHT_VECTOR_Z) * BLOCK_EPSILON;
-
-        int targetX = MathHelper.floor(sampleX);
-        int targetZ = MathHelper.floor(sampleZ);
-
-        return isBottomFaceExposed(world, targetX, layerY, targetZ);
+        return isBottomFaceExposed(world, MathHelper.floor(sampleX), layerY, MathHelper.floor(sampleZ));
     }
 
     private static boolean isNearInteger(float value) {
         return Math.abs(value - Math.round(value)) <= EPSILON;
     }
 
-    private static boolean isDiagonalSplitCorner(
-            World world,
-            int layerY,
-            float cornerX,
-            float cornerZ
-    ) {
+    private static boolean isDiagonalBottomHolePair(World world, int layerY, float cornerX, float cornerZ) {
+        if (!isNearInteger(cornerX) || !isNearInteger(cornerZ)) {
+            return false;
+        }
+
+        int gridX = Math.round(cornerX);
+        int gridZ = Math.round(cornerZ);
+
+        boolean nw = isBottomFaceExposed(world, gridX - 1, layerY, gridZ - 1);
+        boolean ne = isBottomFaceExposed(world, gridX, layerY, gridZ - 1);
+        boolean sw = isBottomFaceExposed(world, gridX - 1, layerY, gridZ);
+        boolean se = isBottomFaceExposed(world, gridX, layerY, gridZ);
+
+        return (nw && se && !ne && !sw) || (ne && sw && !nw && !se);
+    }
+
+    private static boolean isDiagonalSplitCorner(World world, int layerY, float cornerX, float cornerZ) {
         if (!isNearInteger(cornerX) || !isNearInteger(cornerZ)) {
             return false;
         }
@@ -643,13 +514,11 @@ public final class DeathRainWeatherRenderer {
         int gridZ = Math.round(cornerZ);
 
         boolean nw = isOpaqueFullCube(world, gridX - 1, layerY, gridZ - 1);
-        boolean ne = isOpaqueFullCube(world, gridX,     layerY, gridZ - 1);
+        boolean ne = isOpaqueFullCube(world, gridX, layerY, gridZ - 1);
         boolean sw = isOpaqueFullCube(world, gridX - 1, layerY, gridZ);
-        boolean se = isOpaqueFullCube(world, gridX,     layerY, gridZ);
+        boolean se = isOpaqueFullCube(world, gridX, layerY, gridZ);
 
-        boolean diagonalA = nw && se && !ne && !sw;
-        boolean diagonalB = ne && sw && !nw && !se;
-        return diagonalA || diagonalB;
+        return (nw && se && !ne && !sw) || (ne && sw && !nw && !se);
     }
 
     private static Interval clipSweepAgainstBlock(
@@ -698,11 +567,7 @@ public final class DeathRainWeatherRenderer {
             float tMax = (blockMaxZ - edgeStart - minShift) / edgeLen;
             tMin = Math.max(0.0f, tMin);
             tMax = Math.min(1.0f, tMax);
-            if (tMax <= tMin + EPSILON) {
-                return null;
-            }
-
-            return new Interval(tMin, tMax);
+            return tMax <= tMin + EPSILON ? null : new Interval(tMin, tMax);
         }
 
         if (Math.abs(LIGHT_VECTOR_Z) < 1.0e-6f) {
@@ -728,11 +593,7 @@ public final class DeathRainWeatherRenderer {
         float tMax = (blockMaxX - edgeStart - minShift) / edgeLen;
         tMin = Math.max(0.0f, tMin);
         tMax = Math.min(1.0f, tMax);
-        if (tMax <= tMin + EPSILON) {
-            return null;
-        }
-
-        return new Interval(tMin, tMax);
+        return tMax <= tMin + EPSILON ? null : new Interval(tMin, tMax);
     }
 
     private static void subtract(List<Interval> visible, Interval blocked) {
