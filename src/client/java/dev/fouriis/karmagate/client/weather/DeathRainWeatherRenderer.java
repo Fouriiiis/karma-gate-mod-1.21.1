@@ -1,11 +1,20 @@
 package dev.fouriis.karmagate.client.weather;
 
+import com.mojang.blaze3d.systems.RenderSystem;
+import dev.fouriis.karmagate.rain.GlobalRain;
+import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.color.world.BiomeColors;
+import net.minecraft.client.render.BufferBuilder;
+import net.minecraft.client.render.BufferRenderer;
 import net.minecraft.client.render.Camera;
-import net.minecraft.client.render.RenderLayer;
-import net.minecraft.client.render.VertexConsumer;
-import net.minecraft.client.render.VertexConsumerProvider;
+import net.minecraft.client.render.LightmapTextureManager;
+import net.minecraft.client.render.OverlayTexture;
+import net.minecraft.client.render.Tessellator;
+import net.minecraft.client.render.VertexFormat;
+import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
@@ -26,14 +35,14 @@ public final class DeathRainWeatherRenderer {
 
     private static final float EPSILON = 1.0e-4f;
     private static final float BLOCK_EPSILON = 0.001f;
-
-    private static final int SHADOW_RED = 255;
-    private static final int SHADOW_GREEN = 0;
-    private static final int SHADOW_BLUE = 0;
-    private static final int SHADOW_ALPHA = 96;
+    private static final float MIN_RENDER_INTENSITY = 0.01f;
 
     private static final boolean ALONG_X = false;
     private static final boolean ALONG_Z = true;
+
+    private static final Identifier LEVEL_TEXTURE = Identifier.of("librainworldmc", "grabtex");
+    private static final Identifier NOISE_TEXTURE = Identifier.of("librainworldmc", "textures/rainworld/palettes/noise_hq.png");
+    private static final Identifier RAIN_TEXTURE = Identifier.of("minecraft", "textures/block/water_flow.png");
 
     private DeathRainWeatherRenderer() {
     }
@@ -43,19 +52,17 @@ public final class DeathRainWeatherRenderer {
             return;
         }
 
-        MinecraftClient client = MinecraftClient.getInstance();
-        VertexConsumerProvider.Immediate immediate = client.getBufferBuilders().getEntityVertexConsumers();
-        VertexConsumer quads = immediate.getBuffer(RenderLayer.getDebugQuads());
+        float rainIntensity = resolveGlobalRainIntensity();
+        if (rainIntensity < MIN_RENDER_INTENSITY) {
+            return;
+        }
+        float rainDirection = resolveGlobalRainDirection();
 
         Vec3d camPos = camera.getPos();
         int baseX = MathHelper.floor(camPos.x);
         int baseY = MathHelper.floor(camPos.y);
         int baseZ = MathHelper.floor(camPos.z);
         int radiusSq = RADIUS_BLOCKS * RADIUS_BLOCKS;
-
-        matrices.push();
-        matrices.translate(-camPos.x, -camPos.y, -camPos.z);
-        Matrix4f mat = matrices.peek().getPositionMatrix();
 
         for (int x = baseX - RADIUS_BLOCKS; x <= baseX + RADIUS_BLOCKS; x++) {
             for (int y = baseY - RADIUS_BLOCKS; y <= baseY + RADIUS_BLOCKS; y++) {
@@ -68,20 +75,17 @@ public final class DeathRainWeatherRenderer {
                     boolean bottomCaster = isBottomShadowCaster(world, x, y, z);
 
                     if (topCaster) {
-                        emitTopPerimeterShadows(world, quads, mat, x, y, z);
+                        emitTopPerimeterShadows(world, camera, matrices, x, y, z, rainIntensity, rainDirection);
                     }
                     if (bottomCaster) {
-                        emitBottomPerimeterShadows(world, quads, mat, x, y, z);
+                        emitBottomPerimeterShadows(world, camera, matrices, x, y, z, rainIntensity, rainDirection);
                     }
                     if (topCaster && bottomCaster) {
-                        emitReceiverStitchShadow(world, quads, mat, x, y, z);
+                        emitReceiverStitchShadow(world, camera, matrices, x, y, z, rainIntensity, rainDirection);
                     }
                 }
             }
         }
-
-        matrices.pop();
-        immediate.draw();
     }
 
     private static boolean isInsideRadius(Vec3d camPos, int radiusSq, int x, int y, int z) {
@@ -130,36 +134,54 @@ public final class DeathRainWeatherRenderer {
         return isOpaqueFullCube(world, x, y, z) && isAir(world, x, y - 1, z);
     }
 
-    private static void emitTopPerimeterShadows(World world, VertexConsumer vc, Matrix4f mat, int x, int y, int z) {
+    private static void emitTopPerimeterShadows(
+            World world,
+            Camera camera,
+            MatrixStack matrices,
+            int x,
+            int y,
+            int z,
+            float rainIntensity,
+            float rainDirection
+    ) {
         float sourceY = y + 1.0f;
 
-        emitEdgeIfOpen(world, vc, mat, x - 1, y, z, ALONG_Z, x, sourceY, z, z + 1.0f, false, y);
-        emitEdgeIfOpen(world, vc, mat, x + 1, y, z, ALONG_Z, x + 1.0f, sourceY, z, z + 1.0f, false, y);
-        emitEdgeIfOpen(world, vc, mat, x, y, z - 1, ALONG_X, z, sourceY, x, x + 1.0f, false, y);
-        emitEdgeIfOpen(world, vc, mat, x, y, z + 1, ALONG_X, z + 1.0f, sourceY, x, x + 1.0f, false, y);
+        emitEdgeIfOpen(world, camera, matrices, x - 1, y, z, ALONG_Z, x, sourceY, z, z + 1.0f, false, y, rainIntensity, rainDirection);
+        emitEdgeIfOpen(world, camera, matrices, x + 1, y, z, ALONG_Z, x + 1.0f, sourceY, z, z + 1.0f, false, y, rainIntensity, rainDirection);
+        emitEdgeIfOpen(world, camera, matrices, x, y, z - 1, ALONG_X, z, sourceY, x, x + 1.0f, false, y, rainIntensity, rainDirection);
+        emitEdgeIfOpen(world, camera, matrices, x, y, z + 1, ALONG_X, z + 1.0f, sourceY, x, x + 1.0f, false, y, rainIntensity, rainDirection);
     }
 
-    private static void emitBottomPerimeterShadows(World world, VertexConsumer vc, Matrix4f mat, int x, int y, int z) {
+    private static void emitBottomPerimeterShadows(
+            World world,
+            Camera camera,
+            MatrixStack matrices,
+            int x,
+            int y,
+            int z,
+            float rainIntensity,
+            float rainDirection
+    ) {
         float sourceY = y;
 
         if (LIGHT_VECTOR_X > EPSILON) {
-            emitEdgeIfOpen(world, vc, mat, x - 1, y, z, ALONG_Z, x, sourceY, z, z + 1.0f, true, y);
+            emitEdgeIfOpen(world, camera, matrices, x - 1, y, z, ALONG_Z, x, sourceY, z, z + 1.0f, true, y, rainIntensity, rainDirection);
         }
         if (LIGHT_VECTOR_X < -EPSILON) {
-            emitEdgeIfOpen(world, vc, mat, x + 1, y, z, ALONG_Z, x + 1.0f, sourceY, z, z + 1.0f, true, y);
+            emitEdgeIfOpen(world, camera, matrices, x + 1, y, z, ALONG_Z, x + 1.0f, sourceY, z, z + 1.0f, true, y, rainIntensity, rainDirection);
         }
         if (LIGHT_VECTOR_Z > EPSILON) {
-            emitEdgeIfOpen(world, vc, mat, x, y, z - 1, ALONG_X, z, sourceY, x, x + 1.0f, true, y);
+            emitEdgeIfOpen(world, camera, matrices, x, y, z - 1, ALONG_X, z, sourceY, x, x + 1.0f, true, y, rainIntensity, rainDirection);
         }
         if (LIGHT_VECTOR_Z < -EPSILON) {
-            emitEdgeIfOpen(world, vc, mat, x, y, z + 1, ALONG_X, z + 1.0f, sourceY, x, x + 1.0f, true, y);
+            emitEdgeIfOpen(world, camera, matrices, x, y, z + 1, ALONG_X, z + 1.0f, sourceY, x, x + 1.0f, true, y, rainIntensity, rainDirection);
         }
     }
 
     private static void emitEdgeIfOpen(
             World world,
-            VertexConsumer vc,
-            Matrix4f mat,
+            Camera camera,
+            MatrixStack matrices,
             int neighborX,
             int neighborY,
             int neighborZ,
@@ -169,14 +191,25 @@ public final class DeathRainWeatherRenderer {
             float edgeStart,
             float edgeEnd,
             boolean bottomPass,
-            int layerY
+            int layerY,
+            float rainIntensity,
+            float rainDirection
     ) {
         if (!isOpaqueFullCube(world, neighborX, neighborY, neighborZ)) {
-            castEdge(world, vc, mat, alongZ, fixedAxis, sourceY, edgeStart, edgeEnd, bottomPass, layerY);
+            castEdge(world, camera, matrices, alongZ, fixedAxis, sourceY, edgeStart, edgeEnd, bottomPass, layerY, rainIntensity, rainDirection);
         }
     }
 
-    private static void emitReceiverStitchShadow(World world, VertexConsumer vc, Matrix4f mat, int x, int y, int z) {
+    private static void emitReceiverStitchShadow(
+            World world,
+            Camera camera,
+            MatrixStack matrices,
+            int x,
+            int y,
+            int z,
+            float rainIntensity,
+            float rainDirection
+    ) {
         if (Math.abs(LIGHT_VECTOR_X) <= EPSILON || Math.abs(LIGHT_VECTOR_Z) <= EPSILON) {
             return;
         }
@@ -214,8 +247,8 @@ public final class DeathRainWeatherRenderer {
             }
         }
 
-        emitCornerPatch(vc, mat, first);
-        emitCornerPatch(vc, mat, second);
+        emitCornerPatch(world, camera, matrices, first, rainIntensity, rainDirection);
+        emitCornerPatch(world, camera, matrices, second, rainIntensity, rainDirection);
     }
 
     private static CornerPatch findCornerPatch(
@@ -286,15 +319,17 @@ public final class DeathRainWeatherRenderer {
 
     private static void castEdge(
             World world,
-            VertexConsumer vc,
-            Matrix4f mat,
+            Camera camera,
+            MatrixStack matrices,
             boolean alongZ,
             float fixedAxis,
             float sourceY,
             float edgeStart,
             float edgeEnd,
             boolean bottomPass,
-            int layerY
+            int layerY,
+            float rainIntensity,
+            float rainDirection
     ) {
         float min = Math.min(edgeStart, edgeEnd);
         float max = Math.max(edgeStart, edgeEnd);
@@ -348,13 +383,16 @@ public final class DeathRainWeatherRenderer {
                     continue;
                 }
 
-                emitQuad(
-                        vc,
-                        mat,
-                        fixedAxis, sourceY, start,
-                        fixedAxis, sourceY, end,
-                        recv1.x, recv1.y, recv1.z,
-                        recv0.x, recv0.y, recv0.z
+                renderQuadImmediate(
+                        world,
+                        camera,
+                        matrices,
+                        new Vec3d(fixedAxis, sourceY, start),
+                        new Vec3d(fixedAxis, sourceY, end),
+                        new Vec3d(recv1.x, recv1.y, recv1.z),
+                        new Vec3d(recv0.x, recv0.y, recv0.z),
+                        rainIntensity,
+                        rainDirection
                 );
             } else {
                 float exitZ = fixedAxis + LIGHT_VECTOR_Z;
@@ -364,13 +402,16 @@ public final class DeathRainWeatherRenderer {
                     continue;
                 }
 
-                emitQuad(
-                        vc,
-                        mat,
-                        start, sourceY, fixedAxis,
-                        end, sourceY, fixedAxis,
-                        recv1.x, recv1.y, recv1.z,
-                        recv0.x, recv0.y, recv0.z
+                renderQuadImmediate(
+                        world,
+                        camera,
+                        matrices,
+                        new Vec3d(start, sourceY, fixedAxis),
+                        new Vec3d(end, sourceY, fixedAxis),
+                        new Vec3d(recv1.x, recv1.y, recv1.z),
+                        new Vec3d(recv0.x, recv0.y, recv0.z),
+                        rainIntensity,
+                        rainDirection
                 );
             }
         }
@@ -505,22 +546,6 @@ public final class DeathRainWeatherRenderer {
         return (nw && se && !ne && !sw) || (ne && sw && !nw && !se);
     }
 
-    private static boolean isDiagonalSplitCorner(World world, int layerY, float cornerX, float cornerZ) {
-        if (!isNearInteger(cornerX) || !isNearInteger(cornerZ)) {
-            return false;
-        }
-
-        int gridX = Math.round(cornerX);
-        int gridZ = Math.round(cornerZ);
-
-        boolean nw = isOpaqueFullCube(world, gridX - 1, layerY, gridZ - 1);
-        boolean ne = isOpaqueFullCube(world, gridX, layerY, gridZ - 1);
-        boolean sw = isOpaqueFullCube(world, gridX - 1, layerY, gridZ);
-        boolean se = isOpaqueFullCube(world, gridX, layerY, gridZ);
-
-        return (nw && se && !ne && !sw) || (ne && sw && !nw && !se);
-    }
-
     private static Interval clipSweepAgainstBlock(
             World world,
             float fixedAxis,
@@ -646,84 +671,262 @@ public final class DeathRainWeatherRenderer {
         return null;
     }
 
-    private static void emitCornerPatch(VertexConsumer vc, Matrix4f mat, CornerPatch patch) {
+    private static void emitCornerPatch(
+            World world,
+            Camera camera,
+            MatrixStack matrices,
+            CornerPatch patch,
+            float rainIntensity,
+            float rainDirection
+    ) {
         if (patch == null) {
             return;
         }
 
-        emitQuad(
-                vc,
-                mat,
-                patch.topSource.x, patch.topSource.y, patch.topSource.z,
-                patch.bottomSource.x, patch.bottomSource.y, patch.bottomSource.z,
-                patch.bottomReceiver.x, patch.bottomReceiver.y, patch.bottomReceiver.z,
-                patch.topReceiver.x, patch.topReceiver.y, patch.topReceiver.z
+        renderQuadImmediate(
+                world,
+                camera,
+                matrices,
+                new Vec3d(patch.topSource.x, patch.topSource.y, patch.topSource.z),
+                new Vec3d(patch.bottomSource.x, patch.bottomSource.y, patch.bottomSource.z),
+                new Vec3d(patch.bottomReceiver.x, patch.bottomReceiver.y, patch.bottomReceiver.z),
+                new Vec3d(patch.topReceiver.x, patch.topReceiver.y, patch.topReceiver.z),
+                rainIntensity,
+                rainDirection
         );
     }
 
-    private static void emitQuad(
-            VertexConsumer vc,
-            Matrix4f mat,
-            float ax,
-            float ay,
-            float az,
-            float bx,
-            float by,
-            float bz,
-            float cx,
-            float cy,
-            float cz,
-            float dx,
-            float dy,
-            float dz
+    private static void renderQuadImmediate(
+            World world,
+            Camera camera,
+            MatrixStack matrices,
+            Vec3d a,
+            Vec3d b,
+            Vec3d c,
+            Vec3d d,
+            float rainIntensity,
+            float rainDirection
     ) {
-        float abx = bx - ax;
-        float aby = by - ay;
-        float abz = bz - az;
-        float adx = dx - ax;
-        float ady = dy - ay;
-        float adz = dz - az;
+        try {
+            float centerX = (float) ((a.x + b.x + c.x + d.x) * 0.25);
+            float centerY = (float) ((a.y + b.y + c.y + d.y) * 0.25);
+            float centerZ = (float) ((a.z + b.z + c.z + d.z) * 0.25);
 
-        float nx = aby * adz - abz * ady;
-        float ny = abz * adx - abx * adz;
-        float nz = abx * ady - aby * adx;
+            bindDeathRainShader(
+                    world,
+                    camera,
+                    centerX,
+                    centerY,
+                    centerZ,
+                    1.0f,
+                    0.0f,
+                    0.0f,
+                    rainIntensity,
+                    rainDirection
+            );
 
-        float lenSq = nx * nx + ny * ny + nz * nz;
-        if (lenSq > 1.0e-6f) {
-            float invLen = MathHelper.inverseSqrt(lenSq);
-            nx *= invLen;
-            ny *= invLen;
-            nz *= invLen;
-        } else {
-            nx = 0.0f;
-            ny = 1.0f;
-            nz = 0.0f;
+            beginWorldRainSheetState();
+
+            matrices.push();
+            Vec3d cam = camera.getPos();
+            matrices.translate(-cam.x, -cam.y, -cam.z);
+            Matrix4f matrix = matrices.peek().getPositionMatrix();
+
+            Tessellator tessellator = Tessellator.getInstance();
+            BufferBuilder buffer = tessellator.begin(
+                    VertexFormat.DrawMode.QUADS,
+                    VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
+            );
+
+            emitQuadVertices(
+                    buffer,
+                    matrix,
+                    a,
+                    b,
+                    c,
+                    d,
+                    LightmapTextureManager.MAX_LIGHT_COORDINATE,
+                    255,
+                    255,
+                    255,
+                    computeRenderAlpha(rainIntensity)
+            );
+
+            BufferRenderer.drawWithGlobalProgram(buffer.end());
+            matrices.pop();
+            endWorldRainSheetState();
+        } catch (Throwable t) {
+            System.err.println("[Karmagate/DeathRain] Exception while rendering rain border quad");
+            t.printStackTrace();
+            endWorldRainSheetState();
         }
-
-        emitQuadVertex(vc, mat, ax, ay, az, nx, ny, nz);
-        emitQuadVertex(vc, mat, bx, by, bz, nx, ny, nz);
-        emitQuadVertex(vc, mat, cx, cy, cz, nx, ny, nz);
-        emitQuadVertex(vc, mat, dx, dy, dz, nx, ny, nz);
-
-        emitQuadVertex(vc, mat, dx, dy, dz, -nx, -ny, -nz);
-        emitQuadVertex(vc, mat, cx, cy, cz, -nx, -ny, -nz);
-        emitQuadVertex(vc, mat, bx, by, bz, -nx, -ny, -nz);
-        emitQuadVertex(vc, mat, ax, ay, az, -nx, -ny, -nz);
     }
 
-    private static void emitQuadVertex(
-            VertexConsumer vc,
-            Matrix4f mat,
-            float x,
-            float y,
-            float z,
-            float nx,
-            float ny,
-            float nz
+    private static void emitQuadVertices(
+            BufferBuilder buffer,
+            Matrix4f matrix,
+            Vec3d a,
+            Vec3d b,
+            Vec3d c,
+            Vec3d d,
+            int light,
+            int red,
+            int green,
+            int blue,
+            int alpha
     ) {
-        vc.vertex(mat, x, y, z)
-                .color(SHADOW_RED, SHADOW_GREEN, SHADOW_BLUE, SHADOW_ALPHA)
+        Vec3d normal = b.subtract(a).crossProduct(d.subtract(a));
+        if (normal.lengthSquared() < 1.0e-6) {
+            normal = new Vec3d(0.0, 1.0, 0.0);
+        } else {
+            normal = normal.normalize();
+        }
+
+        float nx = (float) normal.x;
+        float ny = (float) normal.y;
+        float nz = (float) normal.z;
+
+        buffer.vertex(matrix, (float) a.x, (float) a.y, (float) a.z)
+                .color(red, green, blue, alpha)
+                .texture(0.0f, 0.0f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
                 .normal(nx, ny, nz);
+
+        buffer.vertex(matrix, (float) b.x, (float) b.y, (float) b.z)
+                .color(red, green, blue, alpha)
+                .texture(1.0f, 0.0f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
+
+        buffer.vertex(matrix, (float) c.x, (float) c.y, (float) c.z)
+                .color(red, green, blue, alpha)
+                .texture(1.0f, 1.0f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
+
+        buffer.vertex(matrix, (float) d.x, (float) d.y, (float) d.z)
+                .color(red, green, blue, alpha)
+                .texture(0.0f, 1.0f)
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(light)
+                .normal(nx, ny, nz);
+    }
+
+    private static void beginWorldRainSheetState() {
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.disableCull();
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthMask(true);
+    }
+
+    private static void endWorldRainSheetState() {
+        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
+        RenderSystem.depthMask(true);
+        RenderSystem.enableCull();
+    }
+
+    private static void bindDeathRainShader(
+            World world,
+            Camera camera,
+            float worldX,
+            float worldY,
+            float worldZ,
+            float screenCoverage,
+            float screenCoverageAxis,
+            float screenCoverageFlip,
+            float rainIntensity01,
+            float rainDirectionSigned
+    ) {
+        float[] spriteRect = new float[]{0.0f, 0.0f, 1.0f, 1.0f};
+        float[] rippleGold = new float[]{0.0f, 0.0f, 0.0f, 0.0f};
+
+        float rainIntensity = clamp01(rainIntensity01);
+        float scale = lerp(12.0f, 8.0f, rainIntensity);
+        float pitchStretch = computePitchStretch(camera);
+
+        CoreShaderRenderer.bindShader$DeathRain(
+                spriteRect,
+                rippleGold,
+                rainDirectionSigned,
+                1.0f,
+                rainIntensity,
+                0.0f,
+                scale,
+                pitchStretch,
+                screenCoverage,
+                screenCoverageAxis,
+                screenCoverageFlip,
+                RAIN_TEXTURE,
+                NOISE_TEXTURE,
+                LEVEL_TEXTURE,
+                null,
+                null,
+                false,
+                false,
+                false,
+                false
+        );
+
+        BlockPos tintPos = BlockPos.ofFloored(worldX, worldY, worldZ);
+        int waterColor = BiomeColors.getWaterColor(world, tintPos);
+
+        float red = ((waterColor >> 16) & 0xFF) / 255.0f;
+        float green = ((waterColor >> 8) & 0xFF) / 255.0f;
+        float blue = (waterColor & 0xFF) / 255.0f;
+        RenderSystem.setShaderColor(red, green, blue, 1.0f);
+    }
+
+    private static float computePitchStretch(Camera camera) {
+        float pitch = Math.abs(camera.getPitch());
+        return 1.0f + (pitch / 90.0f) * 2.0f;
+    }
+
+    private static float resolveGlobalRainIntensity() {
+        if (GlobalRainClientState.hasSync()) {
+            return clamp01(GlobalRainClientState.intensity());
+        }
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.getServer() != null) {
+            return clamp01(GlobalRain.get(client.getServer()).getIntensity());
+        }
+
+        return 0.0f;
+    }
+
+    private static float resolveGlobalRainDirection() {
+        if (GlobalRainClientState.hasSync()) {
+            return GlobalRainClientState.rainDirection();
+        }
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.getServer() != null) {
+            return GlobalRain.get(client.getServer()).getRainDirection();
+        }
+
+        return 0.0f;
+    }
+
+    private static int computeRenderAlpha(float rainIntensity) {
+        return (int) (80.0f + 175.0f * clamp01(rainIntensity));
+    }
+
+    private static float clamp01(float value) {
+        if (value < 0.0f) {
+            return 0.0f;
+        }
+        if (value > 1.0f) {
+            return 1.0f;
+        }
+        return value;
+    }
+
+    private static float lerp(float start, float end, float delta) {
+        return start + (end - start) * delta;
     }
 
     private static final class Interval {
