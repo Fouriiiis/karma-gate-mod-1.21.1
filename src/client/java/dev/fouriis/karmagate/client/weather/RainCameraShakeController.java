@@ -20,7 +20,7 @@ public final class RainCameraShakeController {
     private long ageTicks;
     private float microShake;
     private float screenShake;
-    private boolean noShake = true;
+    private boolean noShake = false;
 
     private RainCameraShakeController() {
     }

@@ -7,6 +7,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.color.world.BiomeColors;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
+import net.minecraft.client.render.BuiltBuffer;
 import net.minecraft.client.render.Camera;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.OverlayTexture;
@@ -14,31 +15,18 @@ import net.minecraft.client.render.Tessellator;
 import net.minecraft.client.render.VertexFormat;
 import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.World;
 import org.joml.Matrix4f;
-import org.joml.Vector3f;
-
-import java.util.ArrayList;
-import java.util.List;
 
 public final class DeathRainWeatherRenderer {
 
     private static final int RADIUS_BLOCKS = 12;
-
-    // Horizontal travel per 1 block of vertical drop.
-    private static final float LIGHT_VECTOR_X = (float) Math.tan(Math.toRadians(10.0f));
-    private static final float LIGHT_VECTOR_Z = (float) Math.tan(Math.toRadians(10.0f));
-
-    private static final float EPSILON = 1.0e-4f;
-    private static final float BLOCK_EPSILON = 0.001f;
+    private static final int HALF_HEIGHT_BLOCKS = 12;
     private static final float MIN_RENDER_INTENSITY = 0.01f;
-
-    private static final boolean ALONG_X = false;
-    private static final boolean ALONG_Z = true;
 
     private static final Identifier LEVEL_TEXTURE = Identifier.of("librainworldmc", "grabtex");
     private static final Identifier NOISE_TEXTURE = Identifier.of("librainworldmc", "textures/rainworld/palettes/noise_hq.png");
@@ -47,7 +35,7 @@ public final class DeathRainWeatherRenderer {
     private DeathRainWeatherRenderer() {
     }
 
-    public static void render(World world, Camera camera, float tickDelta, MatrixStack matrices) {
+    public static void render(ClientWorld world, Camera camera, float tickDelta, MatrixStack matrices) {
         if (world == null || camera == null || matrices == null || !isDeathRainActive()) {
             return;
         }
@@ -56,60 +44,167 @@ public final class DeathRainWeatherRenderer {
         if (rainIntensity < MIN_RENDER_INTENSITY) {
             return;
         }
+
         float rainDirection = resolveGlobalRainDirection();
+        int alpha = computeRenderAlpha(rainIntensity);
 
-        Vec3d camPos = camera.getPos();
-        int baseX = MathHelper.floor(camPos.x);
-        int baseY = MathHelper.floor(camPos.y);
-        int baseZ = MathHelper.floor(camPos.z);
+        Vec3d cameraPos = camera.getPos();
+        BlockPos center = BlockPos.ofFloored(cameraPos);
         int radiusSq = RADIUS_BLOCKS * RADIUS_BLOCKS;
+        int minY = center.getY() - HALF_HEIGHT_BLOCKS;
+        int maxY = center.getY() + HALF_HEIGHT_BLOCKS;
 
-        for (int x = baseX - RADIUS_BLOCKS; x <= baseX + RADIUS_BLOCKS; x++) {
-            for (int y = baseY - RADIUS_BLOCKS; y <= baseY + RADIUS_BLOCKS; y++) {
-                for (int z = baseZ - RADIUS_BLOCKS; z <= baseZ + RADIUS_BLOCKS; z++) {
-                    if (!isInsideRadius(camPos, radiusSq, x, y, z) || !isOpaqueFullCube(world, x, y, z)) {
+        matrices.push();
+        matrices.translate(-cameraPos.x, -cameraPos.y, -cameraPos.z);
+        Matrix4f matrix = matrices.peek().getPositionMatrix();
+
+        bindDeathRainShader(world, camera, center, rainIntensity, rainDirection);
+        beginWorldRainSheetState();
+
+        try {
+            Tessellator tessellator = Tessellator.getInstance();
+            BufferBuilder buffer = tessellator.begin(
+                    VertexFormat.DrawMode.QUADS,
+                    VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
+            );
+
+            // Faces on x + 1/2 planes, between (x, y, z) and (x + 1, y, z)
+            for (int dx = -RADIUS_BLOCKS; dx < RADIUS_BLOCKS; dx++) {
+                for (int dz = -RADIUS_BLOCKS; dz <= RADIUS_BLOCKS; dz++) {
+                    if (!insideRadius(dx, dz, radiusSq) || !insideRadius(dx + 1, dz, radiusSq)) {
                         continue;
                     }
 
-                    boolean topCaster = isTopShadowCaster(world, x, y, z);
-                    boolean bottomCaster = isBottomShadowCaster(world, x, y, z);
+                    int x = center.getX() + dx;
+                    int z = center.getZ() + dz;
 
-                    if (topCaster) {
-                        emitTopPerimeterShadows(world, camera, matrices, x, y, z, rainIntensity, rainDirection);
-                    }
-                    if (bottomCaster) {
-                        emitBottomPerimeterShadows(world, camera, matrices, x, y, z, rainIntensity, rainDirection);
-                    }
-                    if (topCaster && bottomCaster) {
-                        emitReceiverStitchShadow(world, camera, matrices, x, y, z, rainIntensity, rainDirection);
+                    int y = minY;
+                    while (y <= maxY) {
+                        int inward = anchoredBorderDirectionEastWest(world, x, y, z);
+                        if (inward == 0) {
+                            y++;
+                            continue;
+                        }
+
+                        int startY = y;
+                        y++;
+
+                        while (y <= maxY && borderDirectionEastWest(world, x, y, z) == inward) {
+                            y++;
+                        }
+
+                        emitEastWestQuad(buffer, matrix, x + 1.0, startY, y, z, inward, alpha);
                     }
                 }
             }
+
+            // Faces on z + 1/2 planes, between (x, y, z) and (x, y, z + 1)
+            for (int dx = -RADIUS_BLOCKS; dx <= RADIUS_BLOCKS; dx++) {
+                for (int dz = -RADIUS_BLOCKS; dz < RADIUS_BLOCKS; dz++) {
+                    if (!insideRadius(dx, dz, radiusSq) || !insideRadius(dx, dz + 1, radiusSq)) {
+                        continue;
+                    }
+
+                    int x = center.getX() + dx;
+                    int z = center.getZ() + dz;
+
+                    int y = minY;
+                    while (y <= maxY) {
+                        int inward = anchoredBorderDirectionNorthSouth(world, x, y, z);
+                        if (inward == 0) {
+                            y++;
+                            continue;
+                        }
+
+                        int startY = y;
+                        y++;
+
+                        while (y <= maxY && borderDirectionNorthSouth(world, x, y, z) == inward) {
+                            y++;
+                        }
+
+                        emitNorthSouthQuad(buffer, matrix, x, startY, y, z + 1.0, inward, alpha);
+                    }
+                }
+            }
+
+            BuiltBuffer builtBuffer = buffer.endNullable();
+            if (builtBuffer != null) {
+                BufferRenderer.drawWithGlobalProgram(builtBuffer);
+            }
+        } finally {
+            endWorldRainSheetState();
+            matrices.pop();
         }
     }
 
-    private static boolean isInsideRadius(Vec3d camPos, int radiusSq, int x, int y, int z) {
-        return camPos.squaredDistanceTo(x + 0.5, y + 0.5, z + 0.5) <= radiusSq;
+    private static boolean insideRadius(int dx, int dz, int radiusSq) {
+        return dx * dx + dz * dz <= radiusSq;
     }
 
-    private static boolean isDeathRainActive() {
-        if (GlobalRainClientState.hasSync()) {
-            return true;
+    /**
+     * Returns:
+     *  0  = no border
+     * -1  = covered side is the west cell  (face inward toward -X)
+     * +1  = covered side is the east cell  (face inward toward +X)
+     */
+    private static int borderDirectionEastWest(ClientWorld world, int x, int y, int z) {
+        if (!isAir(world, x, y, z) || !isAir(world, x + 1, y, z)) {
+            return 0;
         }
 
-        return MinecraftClient.getInstance().getServer() != null;
-    }
+        boolean skyWest = world.isSkyVisible(new BlockPos(x, y, z));
+        boolean skyEast = world.isSkyVisible(new BlockPos(x + 1, y, z));
 
-    private static boolean isOpaqueFullCube(World world, int x, int y, int z) {
-        if (world.isOutOfHeightLimit(y)) {
-            return false;
+        if (skyWest == skyEast) {
+            return 0;
         }
 
-        BlockPos pos = new BlockPos(x, y, z);
-        return world.getBlockState(pos).isOpaqueFullCube(world, pos);
+        return skyWest ? 1 : -1;
     }
 
-    private static boolean isAir(World world, int x, int y, int z) {
+    /**
+     * Returns:
+     *  0  = no border
+     * -1  = covered side is the north cell (face inward toward -Z)
+     * +1  = covered side is the south cell (face inward toward +Z)
+     */
+    private static int borderDirectionNorthSouth(ClientWorld world, int x, int y, int z) {
+        if (!isAir(world, x, y, z) || !isAir(world, x, y, z + 1)) {
+            return 0;
+        }
+
+        boolean skyNorth = world.isSkyVisible(new BlockPos(x, y, z));
+        boolean skySouth = world.isSkyVisible(new BlockPos(x, y, z + 1));
+
+        if (skyNorth == skySouth) {
+            return 0;
+        }
+
+        return skyNorth ? 1 : -1;
+    }
+
+    private static int anchoredBorderDirectionEastWest(ClientWorld world, int x, int y, int z) {
+        int inward = borderDirectionEastWest(world, x, y, z);
+        if (inward == 0) {
+            return 0;
+        }
+
+        boolean anchored = !isAir(world, x, y - 1, z) || !isAir(world, x + 1, y - 1, z);
+        return anchored ? inward : 0;
+    }
+
+    private static int anchoredBorderDirectionNorthSouth(ClientWorld world, int x, int y, int z) {
+        int inward = borderDirectionNorthSouth(world, x, y, z);
+        if (inward == 0) {
+            return 0;
+        }
+
+        boolean anchored = !isAir(world, x, y - 1, z) || !isAir(world, x, y - 1, z + 1);
+        return anchored ? inward : 0;
+    }
+
+    private static boolean isAir(ClientWorld world, int x, int y, int z) {
         if (world.isOutOfHeightLimit(y)) {
             return false;
         }
@@ -118,698 +213,116 @@ public final class DeathRainWeatherRenderer {
         return !world.getBlockState(pos).isOpaqueFullCube(world, pos);
     }
 
-    private static boolean isTopShadowCaster(World world, int x, int y, int z) {
-        if (!isOpaqueFullCube(world, x, y, z)) {
-            return false;
-        }
-
-        return isAir(world, x, y + 1, z) && world.isSkyVisible(new BlockPos(x, y + 1, z));
-    }
-
-    private static boolean isBottomShadowCaster(World world, int x, int y, int z) {
-        return isAir(world, x, y - 1, z);
-    }
-
-    private static boolean isBottomFaceExposed(World world, int x, int y, int z) {
-        return isOpaqueFullCube(world, x, y, z) && isAir(world, x, y - 1, z);
-    }
-
-    private static void emitTopPerimeterShadows(
-            World world,
-            Camera camera,
-            MatrixStack matrices,
-            int x,
-            int y,
-            int z,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        float sourceY = y + 1.0f;
-
-        emitEdgeIfOpen(world, camera, matrices, x - 1, y, z, ALONG_Z, x, sourceY, z, z + 1.0f, false, y, rainIntensity, rainDirection);
-        emitEdgeIfOpen(world, camera, matrices, x + 1, y, z, ALONG_Z, x + 1.0f, sourceY, z, z + 1.0f, false, y, rainIntensity, rainDirection);
-        emitEdgeIfOpen(world, camera, matrices, x, y, z - 1, ALONG_X, z, sourceY, x, x + 1.0f, false, y, rainIntensity, rainDirection);
-        emitEdgeIfOpen(world, camera, matrices, x, y, z + 1, ALONG_X, z + 1.0f, sourceY, x, x + 1.0f, false, y, rainIntensity, rainDirection);
-    }
-
-    private static void emitBottomPerimeterShadows(
-            World world,
-            Camera camera,
-            MatrixStack matrices,
-            int x,
-            int y,
-            int z,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        float sourceY = y;
-
-        if (LIGHT_VECTOR_X > EPSILON) {
-            emitEdgeIfOpen(world, camera, matrices, x - 1, y, z, ALONG_Z, x, sourceY, z, z + 1.0f, true, y, rainIntensity, rainDirection);
-        }
-        if (LIGHT_VECTOR_X < -EPSILON) {
-            emitEdgeIfOpen(world, camera, matrices, x + 1, y, z, ALONG_Z, x + 1.0f, sourceY, z, z + 1.0f, true, y, rainIntensity, rainDirection);
-        }
-        if (LIGHT_VECTOR_Z > EPSILON) {
-            emitEdgeIfOpen(world, camera, matrices, x, y, z - 1, ALONG_X, z, sourceY, x, x + 1.0f, true, y, rainIntensity, rainDirection);
-        }
-        if (LIGHT_VECTOR_Z < -EPSILON) {
-            emitEdgeIfOpen(world, camera, matrices, x, y, z + 1, ALONG_X, z + 1.0f, sourceY, x, x + 1.0f, true, y, rainIntensity, rainDirection);
-        }
-    }
-
-    private static void emitEdgeIfOpen(
-            World world,
-            Camera camera,
-            MatrixStack matrices,
-            int neighborX,
-            int neighborY,
-            int neighborZ,
-            boolean alongZ,
-            float fixedAxis,
-            float sourceY,
-            float edgeStart,
-            float edgeEnd,
-            boolean bottomPass,
-            int layerY,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        if (!isOpaqueFullCube(world, neighborX, neighborY, neighborZ)) {
-            castEdge(world, camera, matrices, alongZ, fixedAxis, sourceY, edgeStart, edgeEnd, bottomPass, layerY, rainIntensity, rainDirection);
-        }
-    }
-
-    private static void emitReceiverStitchShadow(
-            World world,
-            Camera camera,
-            MatrixStack matrices,
-            int x,
-            int y,
-            int z,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        if (Math.abs(LIGHT_VECTOR_X) <= EPSILON || Math.abs(LIGHT_VECTOR_Z) <= EPSILON) {
-            return;
-        }
-
-        CornerPatch first = null;
-        CornerPatch second = null;
-
-        if (LIGHT_VECTOR_X > EPSILON && LIGHT_VECTOR_Z > EPSILON) {
-            if (!isOpaqueFullCube(world, x - 1, y, z)) {
-                first = findCornerPatch(world, ALONG_Z, x, y, z, z + 1.0f, false);
-            }
-            if (!isOpaqueFullCube(world, x, y, z - 1)) {
-                second = findCornerPatch(world, ALONG_X, z, y, x, x + 1.0f, false);
-            }
-        } else if (LIGHT_VECTOR_X > EPSILON) {
-            if (!isOpaqueFullCube(world, x - 1, y, z)) {
-                first = findCornerPatch(world, ALONG_Z, x, y, z, z + 1.0f, true);
-            }
-            if (!isOpaqueFullCube(world, x, y, z + 1)) {
-                second = findCornerPatch(world, ALONG_X, z + 1.0f, y, x, x + 1.0f, false);
-            }
-        } else if (LIGHT_VECTOR_Z > EPSILON) {
-            if (!isOpaqueFullCube(world, x + 1, y, z)) {
-                first = findCornerPatch(world, ALONG_Z, x + 1.0f, y, z, z + 1.0f, false);
-            }
-            if (!isOpaqueFullCube(world, x, y, z - 1)) {
-                second = findCornerPatch(world, ALONG_X, z, y, x, x + 1.0f, true);
-            }
-        } else {
-            if (!isOpaqueFullCube(world, x + 1, y, z)) {
-                first = findCornerPatch(world, ALONG_Z, x + 1.0f, y, z, z + 1.0f, true);
-            }
-            if (!isOpaqueFullCube(world, x, y, z + 1)) {
-                second = findCornerPatch(world, ALONG_X, z + 1.0f, y, x, x + 1.0f, true);
-            }
-        }
-
-        emitCornerPatch(world, camera, matrices, first, rainIntensity, rainDirection);
-        emitCornerPatch(world, camera, matrices, second, rainIntensity, rainDirection);
-    }
-
-    private static CornerPatch findCornerPatch(
-            World world,
-            boolean alongZ,
-            float fixedAxis,
-            int layerY,
-            float edgeStart,
-            float edgeEnd,
-            boolean useMinEndpoint
-    ) {
-        float min = Math.min(edgeStart, edgeEnd);
-        float max = Math.max(edgeStart, edgeEnd);
-        float edgeLen = max - min;
-        if (edgeLen <= EPSILON) {
-            return null;
-        }
-
-        List<Interval> topVisible = computeVisibleIntervals(world, alongZ, fixedAxis, min, edgeLen, layerY);
-        List<Interval> bottomVisible = computeVisibleIntervals(world, alongZ, fixedAxis, min, edgeLen, layerY - 1);
-
-        for (Interval overlap : intersectIntervals(topVisible, bottomVisible)) {
-            float t0 = snap(overlap.min);
-            float t1 = snap(overlap.max);
-            if (t1 - t0 <= EPSILON) {
-                continue;
-            }
-
-            float sourceEdgeValue = min + edgeLen * (useMinEndpoint ? t0 : t1);
-            float bottomEdgeValue = sourceEdgeValue;
-
-            if (alongZ) {
-                bottomEdgeValue += useMinEndpoint
-                        ? computeBottomInset(world, layerY, fixedAxis, bottomEdgeValue, ALONG_Z, true)
-                        : -computeBottomInset(world, layerY, fixedAxis, bottomEdgeValue, ALONG_Z, false);
-            } else {
-                bottomEdgeValue += useMinEndpoint
-                        ? computeBottomInset(world, layerY, bottomEdgeValue, fixedAxis, ALONG_X, true)
-                        : -computeBottomInset(world, layerY, bottomEdgeValue, fixedAxis, ALONG_X, false);
-            }
-
-            Vector3f topSource;
-            Vector3f bottomSource;
-            Vector3f topReceiver;
-            Vector3f bottomReceiver;
-
-            if (alongZ) {
-                topSource = new Vector3f(fixedAxis, layerY + 1.0f, sourceEdgeValue);
-                bottomSource = new Vector3f(fixedAxis, layerY, bottomEdgeValue);
-                topReceiver = projectToReceiver(world, fixedAxis + LIGHT_VECTOR_X, layerY, sourceEdgeValue + LIGHT_VECTOR_Z);
-                bottomReceiver = projectToReceiver(world, fixedAxis + LIGHT_VECTOR_X, layerY - 1, bottomEdgeValue + LIGHT_VECTOR_Z);
-            } else {
-                topSource = new Vector3f(sourceEdgeValue, layerY + 1.0f, fixedAxis);
-                bottomSource = new Vector3f(bottomEdgeValue, layerY, fixedAxis);
-                topReceiver = projectToReceiver(world, sourceEdgeValue + LIGHT_VECTOR_X, layerY, fixedAxis + LIGHT_VECTOR_Z);
-                bottomReceiver = projectToReceiver(world, bottomEdgeValue + LIGHT_VECTOR_X, layerY - 1, fixedAxis + LIGHT_VECTOR_Z);
-            }
-
-            if (topReceiver != null
-                    && bottomReceiver != null
-                    && !isDiagonalBottomHolePair(world, layerY, topSource.x, topSource.z)) {
-                return new CornerPatch(topSource, bottomSource, topReceiver, bottomReceiver);
-            }
-        }
-
-        return null;
-    }
-
-    private static void castEdge(
-            World world,
-            Camera camera,
-            MatrixStack matrices,
-            boolean alongZ,
-            float fixedAxis,
-            float sourceY,
-            float edgeStart,
-            float edgeEnd,
-            boolean bottomPass,
-            int layerY,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        float min = Math.min(edgeStart, edgeEnd);
-        float max = Math.max(edgeStart, edgeEnd);
-        float edgeLen = max - min;
-        if (edgeLen <= EPSILON) {
-            return;
-        }
-
-        List<Interval> visible = computeVisibleIntervals(
-                world,
-                alongZ,
-                fixedAxis,
-                min,
-                edgeLen,
-                MathHelper.floor(sourceY - EPSILON)
-        );
-
-        for (Interval interval : visible) {
-            float t0 = snap(interval.min);
-            float t1 = snap(interval.max);
-            if (t1 - t0 <= EPSILON) {
-                continue;
-            }
-
-            float start = min + edgeLen * t0;
-            float end = min + edgeLen * t1;
-
-            if (bottomPass) {
-                if (alongZ) {
-                    start += computeBottomInset(world, layerY, fixedAxis, start, ALONG_Z, true);
-                    end -= computeBottomInset(world, layerY, fixedAxis, end, ALONG_Z, false);
-                } else {
-                    start += computeBottomInset(world, layerY, start, fixedAxis, ALONG_X, true);
-                    end -= computeBottomInset(world, layerY, end, fixedAxis, ALONG_X, false);
-                }
-
-                if (end - start <= EPSILON) {
-                    continue;
-                }
-            }
-
-            float exitY = sourceY - 1.0f;
-            Vector3f recv0;
-            Vector3f recv1;
-
-            if (alongZ) {
-                float exitX = fixedAxis + LIGHT_VECTOR_X;
-                recv0 = projectToReceiver(world, exitX, exitY, start + LIGHT_VECTOR_Z);
-                recv1 = projectToReceiver(world, exitX, exitY, end + LIGHT_VECTOR_Z);
-                if (recv0 == null || recv1 == null) {
-                    continue;
-                }
-
-                renderQuadImmediate(
-                        world,
-                        camera,
-                        matrices,
-                        new Vec3d(fixedAxis, sourceY, start),
-                        new Vec3d(fixedAxis, sourceY, end),
-                        new Vec3d(recv1.x, recv1.y, recv1.z),
-                        new Vec3d(recv0.x, recv0.y, recv0.z),
-                        rainIntensity,
-                        rainDirection
-                );
-            } else {
-                float exitZ = fixedAxis + LIGHT_VECTOR_Z;
-                recv0 = projectToReceiver(world, start + LIGHT_VECTOR_X, exitY, exitZ);
-                recv1 = projectToReceiver(world, end + LIGHT_VECTOR_X, exitY, exitZ);
-                if (recv0 == null || recv1 == null) {
-                    continue;
-                }
-
-                renderQuadImmediate(
-                        world,
-                        camera,
-                        matrices,
-                        new Vec3d(start, sourceY, fixedAxis),
-                        new Vec3d(end, sourceY, fixedAxis),
-                        new Vec3d(recv1.x, recv1.y, recv1.z),
-                        new Vec3d(recv0.x, recv0.y, recv0.z),
-                        rainIntensity,
-                        rainDirection
-                );
-            }
-        }
-    }
-
-    private static List<Interval> computeVisibleIntervals(
-            World world,
-            boolean alongZ,
-            float fixedAxis,
-            float edgeStart,
-            float edgeLen,
-            int clipLayerY
-    ) {
-        List<Interval> visible = new ArrayList<>();
-        visible.add(new Interval(0.0f, 1.0f));
-
-        float sweepMinX;
-        float sweepMaxX;
-        float sweepMinZ;
-        float sweepMaxZ;
-
-        if (alongZ) {
-            sweepMinX = Math.min(fixedAxis, fixedAxis + LIGHT_VECTOR_X);
-            sweepMaxX = Math.max(fixedAxis, fixedAxis + LIGHT_VECTOR_X);
-            sweepMinZ = Math.min(edgeStart, edgeStart + LIGHT_VECTOR_Z);
-            sweepMaxZ = Math.max(edgeStart + edgeLen, edgeStart + edgeLen + LIGHT_VECTOR_Z);
-        } else {
-            sweepMinX = Math.min(edgeStart, edgeStart + LIGHT_VECTOR_X);
-            sweepMaxX = Math.max(edgeStart + edgeLen, edgeStart + edgeLen + LIGHT_VECTOR_X);
-            sweepMinZ = Math.min(fixedAxis, fixedAxis + LIGHT_VECTOR_Z);
-            sweepMaxZ = Math.max(fixedAxis, fixedAxis + LIGHT_VECTOR_Z);
-        }
-
-        int minCellX = MathHelper.floor(sweepMinX) - 1;
-        int maxCellX = MathHelper.floor(sweepMaxX) + 1;
-        int minCellZ = MathHelper.floor(sweepMinZ) - 1;
-        int maxCellZ = MathHelper.floor(sweepMaxZ) + 1;
-
-        for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
-            for (int cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
-                Interval blocked = clipSweepAgainstBlock(world, fixedAxis, edgeStart, edgeLen, clipLayerY, cellX, cellZ, alongZ);
-                if (blocked != null) {
-                    subtract(visible, blocked);
-                    if (visible.isEmpty()) {
-                        return visible;
-                    }
-                }
-            }
-        }
-
-        return visible;
-    }
-
-    private static List<Interval> intersectIntervals(List<Interval> a, List<Interval> b) {
-        List<Interval> out = new ArrayList<>();
-
-        for (Interval ia : a) {
-            for (Interval ib : b) {
-                float min = Math.max(ia.min, ib.min);
-                float max = Math.min(ia.max, ib.max);
-                if (max - min > EPSILON) {
-                    out.add(new Interval(min, max));
-                }
-            }
-        }
-
-        return out;
-    }
-
-    private static float computeBottomInset(
-            World world,
-            int layerY,
-            float cornerX,
-            float cornerZ,
-            boolean alongZ,
-            boolean minSide
-    ) {
-        if (!isBlockedBottomCorner(world, layerY, cornerX, cornerZ)) {
-            return 0.0f;
-        }
-
-        float light = alongZ ? LIGHT_VECTOR_Z : LIGHT_VECTOR_X;
-        return minSide ? Math.max(0.0f, light) : Math.max(0.0f, -light);
-    }
-
-    private static boolean isBlockedBottomCorner(World world, int layerY, float cornerX, float cornerZ) {
-        if (!isNearInteger(cornerX) || !isNearInteger(cornerZ)) {
-            return false;
-        }
-
-        int gridX = Math.round(cornerX);
-        int gridZ = Math.round(cornerZ);
-
-        boolean nw = isBottomFaceExposed(world, gridX - 1, layerY, gridZ - 1);
-        boolean ne = isBottomFaceExposed(world, gridX, layerY, gridZ - 1);
-        boolean sw = isBottomFaceExposed(world, gridX - 1, layerY, gridZ);
-        boolean se = isBottomFaceExposed(world, gridX, layerY, gridZ);
-
-        int count = 0;
-        if (nw) count++;
-        if (ne) count++;
-        if (sw) count++;
-        if (se) count++;
-
-        boolean diagonalPair = isDiagonalBottomHolePair(world, layerY, cornerX, cornerZ);
-        if (count != 3 && !diagonalPair) {
-            return false;
-        }
-
-        float sampleX = cornerX + Math.signum(LIGHT_VECTOR_X) * BLOCK_EPSILON;
-        float sampleZ = cornerZ + Math.signum(LIGHT_VECTOR_Z) * BLOCK_EPSILON;
-        return isBottomFaceExposed(world, MathHelper.floor(sampleX), layerY, MathHelper.floor(sampleZ));
-    }
-
-    private static boolean isNearInteger(float value) {
-        return Math.abs(value - Math.round(value)) <= EPSILON;
-    }
-
-    private static boolean isDiagonalBottomHolePair(World world, int layerY, float cornerX, float cornerZ) {
-        if (!isNearInteger(cornerX) || !isNearInteger(cornerZ)) {
-            return false;
-        }
-
-        int gridX = Math.round(cornerX);
-        int gridZ = Math.round(cornerZ);
-
-        boolean nw = isBottomFaceExposed(world, gridX - 1, layerY, gridZ - 1);
-        boolean ne = isBottomFaceExposed(world, gridX, layerY, gridZ - 1);
-        boolean sw = isBottomFaceExposed(world, gridX - 1, layerY, gridZ);
-        boolean se = isBottomFaceExposed(world, gridX, layerY, gridZ);
-
-        return (nw && se && !ne && !sw) || (ne && sw && !nw && !se);
-    }
-
-    private static Interval clipSweepAgainstBlock(
-            World world,
-            float fixedAxis,
-            float edgeStart,
-            float edgeLen,
-            int layerY,
-            int blockX,
-            int blockZ,
-            boolean edgeRunsAlongZ
-    ) {
-        if (!isOpaqueFullCube(world, blockX, layerY, blockZ)) {
-            return null;
-        }
-
-        float blockMinX = blockX + BLOCK_EPSILON;
-        float blockMaxX = blockX + 1.0f - BLOCK_EPSILON;
-        float blockMinZ = blockZ + BLOCK_EPSILON;
-        float blockMaxZ = blockZ + 1.0f - BLOCK_EPSILON;
-
-        float uMin = EPSILON;
-        float uMax = 1.0f - EPSILON;
-
-        if (edgeRunsAlongZ) {
-            if (Math.abs(LIGHT_VECTOR_X) < 1.0e-6f) {
-                if (!(fixedAxis > blockMinX && fixedAxis < blockMaxX)) {
-                    return null;
-                }
-            } else {
-                float ux0 = (blockMinX - fixedAxis) / LIGHT_VECTOR_X;
-                float ux1 = (blockMaxX - fixedAxis) / LIGHT_VECTOR_X;
-                uMin = Math.max(uMin, Math.min(ux0, ux1));
-                uMax = Math.min(uMax, Math.max(ux0, ux1));
-                if (uMax <= uMin + EPSILON) {
-                    return null;
-                }
-            }
-
-            float shift0 = LIGHT_VECTOR_Z * uMin;
-            float shift1 = LIGHT_VECTOR_Z * uMax;
-            float minShift = Math.min(shift0, shift1);
-            float maxShift = Math.max(shift0, shift1);
-
-            float tMin = (blockMinZ - edgeStart - maxShift) / edgeLen;
-            float tMax = (blockMaxZ - edgeStart - minShift) / edgeLen;
-            tMin = Math.max(0.0f, tMin);
-            tMax = Math.min(1.0f, tMax);
-            return tMax <= tMin + EPSILON ? null : new Interval(tMin, tMax);
-        }
-
-        if (Math.abs(LIGHT_VECTOR_Z) < 1.0e-6f) {
-            if (!(fixedAxis > blockMinZ && fixedAxis < blockMaxZ)) {
-                return null;
-            }
-        } else {
-            float uz0 = (blockMinZ - fixedAxis) / LIGHT_VECTOR_Z;
-            float uz1 = (blockMaxZ - fixedAxis) / LIGHT_VECTOR_Z;
-            uMin = Math.max(uMin, Math.min(uz0, uz1));
-            uMax = Math.min(uMax, Math.max(uz0, uz1));
-            if (uMax <= uMin + EPSILON) {
-                return null;
-            }
-        }
-
-        float shift0 = LIGHT_VECTOR_X * uMin;
-        float shift1 = LIGHT_VECTOR_X * uMax;
-        float minShift = Math.min(shift0, shift1);
-        float maxShift = Math.max(shift0, shift1);
-
-        float tMin = (blockMinX - edgeStart - maxShift) / edgeLen;
-        float tMax = (blockMaxX - edgeStart - minShift) / edgeLen;
-        tMin = Math.max(0.0f, tMin);
-        tMax = Math.min(1.0f, tMax);
-        return tMax <= tMin + EPSILON ? null : new Interval(tMin, tMax);
-    }
-
-    private static void subtract(List<Interval> visible, Interval blocked) {
-        for (int i = 0; i < visible.size(); i++) {
-            Interval keep = visible.get(i);
-            if (blocked.max <= keep.min + EPSILON || blocked.min >= keep.max - EPSILON) {
-                continue;
-            }
-
-            visible.remove(i);
-            if (blocked.min > keep.min + EPSILON) {
-                visible.add(i++, new Interval(keep.min, blocked.min));
-            }
-            if (blocked.max < keep.max - EPSILON) {
-                visible.add(i, new Interval(blocked.max, keep.max));
-            }
-            i--;
-        }
-    }
-
-    private static float snap(float value) {
-        if (Math.abs(value) <= EPSILON) {
-            return 0.0f;
-        }
-        if (Math.abs(1.0f - value) <= EPSILON) {
-            return 1.0f;
-        }
-        return value;
-    }
-
-    private static Vector3f projectToReceiver(World world, float startX, float startY, float startZ) {
-        int sampleX = MathHelper.floor(startX + Math.signum(LIGHT_VECTOR_X) * BLOCK_EPSILON);
-        int sampleZ = MathHelper.floor(startZ + Math.signum(LIGHT_VECTOR_Z) * BLOCK_EPSILON);
-
-        for (int y = MathHelper.floor(startY) - 1; !world.isOutOfHeightLimit(y); y--) {
-            if (isOpaqueFullCube(world, sampleX, y, sampleZ)) {
-                float drop = startY - (y + 1.0f);
-                if (drop <= 0.0f) {
-                    return null;
-                }
-
-                return new Vector3f(
-                        startX + LIGHT_VECTOR_X * drop,
-                        startY - drop,
-                        startZ + LIGHT_VECTOR_Z * drop
-                );
-            }
-        }
-
-        return null;
-    }
-
-    private static void emitCornerPatch(
-            World world,
-            Camera camera,
-            MatrixStack matrices,
-            CornerPatch patch,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        if (patch == null) {
-            return;
-        }
-
-        renderQuadImmediate(
-                world,
-                camera,
-                matrices,
-                new Vec3d(patch.topSource.x, patch.topSource.y, patch.topSource.z),
-                new Vec3d(patch.bottomSource.x, patch.bottomSource.y, patch.bottomSource.z),
-                new Vec3d(patch.bottomReceiver.x, patch.bottomReceiver.y, patch.bottomReceiver.z),
-                new Vec3d(patch.topReceiver.x, patch.topReceiver.y, patch.topReceiver.z),
-                rainIntensity,
-                rainDirection
-        );
-    }
-
-    private static void renderQuadImmediate(
-            World world,
-            Camera camera,
-            MatrixStack matrices,
-            Vec3d a,
-            Vec3d b,
-            Vec3d c,
-            Vec3d d,
-            float rainIntensity,
-            float rainDirection
-    ) {
-        try {
-            float centerX = (float) ((a.x + b.x + c.x + d.x) * 0.25);
-            float centerY = (float) ((a.y + b.y + c.y + d.y) * 0.25);
-            float centerZ = (float) ((a.z + b.z + c.z + d.z) * 0.25);
-
-            bindDeathRainShader(
-                    world,
-                    camera,
-                    centerX,
-                    centerY,
-                    centerZ,
-                    1.0f,
-                    0.0f,
-                    0.0f,
-                    rainIntensity,
-                    rainDirection
-            );
-
-            beginWorldRainSheetState();
-
-            matrices.push();
-            Vec3d cam = camera.getPos();
-            matrices.translate(-cam.x, -cam.y, -cam.z);
-            Matrix4f matrix = matrices.peek().getPositionMatrix();
-
-            Tessellator tessellator = Tessellator.getInstance();
-            BufferBuilder buffer = tessellator.begin(
-                    VertexFormat.DrawMode.QUADS,
-                    VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
-            );
-
-            emitQuadVertices(
-                    buffer,
-                    matrix,
-                    a,
-                    b,
-                    c,
-                    d,
-                    LightmapTextureManager.MAX_LIGHT_COORDINATE,
-                    255,
-                    255,
-                    255,
-                    computeRenderAlpha(rainIntensity)
-            );
-
-            BufferRenderer.drawWithGlobalProgram(buffer.end());
-            matrices.pop();
-            endWorldRainSheetState();
-        } catch (Throwable t) {
-            System.err.println("[Karmagate/DeathRain] Exception while rendering rain border quad");
-            t.printStackTrace();
-            endWorldRainSheetState();
-        }
-    }
-
-    private static void emitQuadVertices(
+    private static void emitEastWestQuad(
             BufferBuilder buffer,
             Matrix4f matrix,
-            Vec3d a,
-            Vec3d b,
-            Vec3d c,
-            Vec3d d,
-            int light,
-            int red,
-            int green,
-            int blue,
+            double faceX,
+            double y0,
+            double y1,
+            double z,
+            int inward,
             int alpha
     ) {
-        Vec3d normal = b.subtract(a).crossProduct(d.subtract(a));
-        if (normal.lengthSquared() < 1.0e-6) {
-            normal = new Vec3d(0.0, 1.0, 0.0);
+        if (inward > 0) {
+            // Face inward toward +X
+            emitQuad(
+                    buffer,
+                    matrix,
+                    faceX, y0, z,
+                    faceX, y1, z,
+                    faceX, y1, z + 1.0,
+                    faceX, y0, z + 1.0,
+                    1.0f, 0.0f, 0.0f,
+                    alpha
+            );
         } else {
-            normal = normal.normalize();
+            // Face inward toward -X
+            emitQuad(
+                    buffer,
+                    matrix,
+                    faceX, y0, z + 1.0,
+                    faceX, y1, z + 1.0,
+                    faceX, y1, z,
+                    faceX, y0, z,
+                    -1.0f, 0.0f, 0.0f,
+                    alpha
+            );
         }
+    }
 
-        float nx = (float) normal.x;
-        float ny = (float) normal.y;
-        float nz = (float) normal.z;
+    private static void emitNorthSouthQuad(
+            BufferBuilder buffer,
+            Matrix4f matrix,
+            double x,
+            double y0,
+            double y1,
+            double faceZ,
+            int inward,
+            int alpha
+    ) {
+        if (inward > 0) {
+            // Face inward toward +Z
+            emitQuad(
+                    buffer,
+                    matrix,
+                    x, y0, faceZ,
+                    x + 1.0, y0, faceZ,
+                    x + 1.0, y1, faceZ,
+                    x, y1, faceZ,
+                    0.0f, 0.0f, 1.0f,
+                    alpha
+            );
+        } else {
+            // Face inward toward -Z
+            emitQuad(
+                    buffer,
+                    matrix,
+                    x + 1.0, y0, faceZ,
+                    x, y0, faceZ,
+                    x, y1, faceZ,
+                    x + 1.0, y1, faceZ,
+                    0.0f, 0.0f, -1.0f,
+                    alpha
+            );
+        }
+    }
 
-        buffer.vertex(matrix, (float) a.x, (float) a.y, (float) a.z)
-                .color(red, green, blue, alpha)
+    private static void emitQuad(
+            BufferBuilder buffer,
+            Matrix4f matrix,
+            double x0, double y0, double z0,
+            double x1, double y1, double z1,
+            double x2, double y2, double z2,
+            double x3, double y3, double z3,
+            float nx, float ny, float nz,
+            int alpha
+    ) {
+        int light = LightmapTextureManager.MAX_LIGHT_COORDINATE;
+
+        buffer.vertex(matrix, (float) x0, (float) y0, (float) z0)
+                .color(255, 255, 255, alpha)
                 .texture(0.0f, 0.0f)
                 .overlay(OverlayTexture.DEFAULT_UV)
                 .light(light)
                 .normal(nx, ny, nz);
 
-        buffer.vertex(matrix, (float) b.x, (float) b.y, (float) b.z)
-                .color(red, green, blue, alpha)
-                .texture(1.0f, 0.0f)
+        buffer.vertex(matrix, (float) x1, (float) y1, (float) z1)
+                .color(255, 255, 255, alpha)
+                .texture(0.0f, 1.0f)
                 .overlay(OverlayTexture.DEFAULT_UV)
                 .light(light)
                 .normal(nx, ny, nz);
 
-        buffer.vertex(matrix, (float) c.x, (float) c.y, (float) c.z)
-                .color(red, green, blue, alpha)
+        buffer.vertex(matrix, (float) x2, (float) y2, (float) z2)
+                .color(255, 255, 255, alpha)
                 .texture(1.0f, 1.0f)
                 .overlay(OverlayTexture.DEFAULT_UV)
                 .light(light)
                 .normal(nx, ny, nz);
 
-        buffer.vertex(matrix, (float) d.x, (float) d.y, (float) d.z)
-                .color(red, green, blue, alpha)
-                .texture(0.0f, 1.0f)
+        buffer.vertex(matrix, (float) x3, (float) y3, (float) z3)
+                .color(255, 255, 255, alpha)
+                .texture(1.0f, 0.0f)
                 .overlay(OverlayTexture.DEFAULT_UV)
                 .light(light)
                 .normal(nx, ny, nz);
@@ -818,7 +331,7 @@ public final class DeathRainWeatherRenderer {
     private static void beginWorldRainSheetState() {
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
-        RenderSystem.disableCull();
+        RenderSystem.enableCull();
         RenderSystem.enableDepthTest();
         RenderSystem.depthMask(true);
     }
@@ -830,14 +343,9 @@ public final class DeathRainWeatherRenderer {
     }
 
     private static void bindDeathRainShader(
-            World world,
+            ClientWorld world,
             Camera camera,
-            float worldX,
-            float worldY,
-            float worldZ,
-            float screenCoverage,
-            float screenCoverageAxis,
-            float screenCoverageFlip,
+            BlockPos tintPos,
             float rainIntensity01,
             float rainDirectionSigned
     ) {
@@ -857,9 +365,9 @@ public final class DeathRainWeatherRenderer {
                 0.0f,
                 scale,
                 pitchStretch,
-                screenCoverage,
-                screenCoverageAxis,
-                screenCoverageFlip,
+                1.0f,
+                0.0f,
+                0.0f,
                 RAIN_TEXTURE,
                 NOISE_TEXTURE,
                 LEVEL_TEXTURE,
@@ -871,18 +379,18 @@ public final class DeathRainWeatherRenderer {
                 false
         );
 
-        BlockPos tintPos = BlockPos.ofFloored(worldX, worldY, worldZ);
         int waterColor = BiomeColors.getWaterColor(world, tintPos);
-
         float red = ((waterColor >> 16) & 0xFF) / 255.0f;
         float green = ((waterColor >> 8) & 0xFF) / 255.0f;
         float blue = (waterColor & 0xFF) / 255.0f;
         RenderSystem.setShaderColor(red, green, blue, 1.0f);
     }
 
-    private static float computePitchStretch(Camera camera) {
-        float pitch = Math.abs(camera.getPitch());
-        return 1.0f + (pitch / 90.0f) * 2.0f;
+    private static boolean isDeathRainActive() {
+        if (GlobalRainClientState.hasSync()) {
+            return true;
+        }
+        return MinecraftClient.getInstance().getServer() != null;
     }
 
     private static float resolveGlobalRainIntensity() {
@@ -915,41 +423,16 @@ public final class DeathRainWeatherRenderer {
         return (int) (80.0f + 175.0f * clamp01(rainIntensity));
     }
 
+    private static float computePitchStretch(Camera camera) {
+        float pitch = Math.abs(camera.getPitch());
+        return 1.0f + (pitch / 90.0f) * 2.0f;
+    }
+
     private static float clamp01(float value) {
-        if (value < 0.0f) {
-            return 0.0f;
-        }
-        if (value > 1.0f) {
-            return 1.0f;
-        }
-        return value;
+        return MathHelper.clamp(value, 0.0f, 1.0f);
     }
 
     private static float lerp(float start, float end, float delta) {
         return start + (end - start) * delta;
-    }
-
-    private static final class Interval {
-        final float min;
-        final float max;
-
-        Interval(float min, float max) {
-            this.min = min;
-            this.max = max;
-        }
-    }
-
-    private static final class CornerPatch {
-        final Vector3f topSource;
-        final Vector3f bottomSource;
-        final Vector3f topReceiver;
-        final Vector3f bottomReceiver;
-
-        CornerPatch(Vector3f topSource, Vector3f bottomSource, Vector3f topReceiver, Vector3f bottomReceiver) {
-            this.topSource = topSource;
-            this.bottomSource = bottomSource;
-            this.topReceiver = topReceiver;
-            this.bottomReceiver = bottomReceiver;
-        }
     }
 }
