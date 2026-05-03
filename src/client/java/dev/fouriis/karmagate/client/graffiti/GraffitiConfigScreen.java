@@ -3,20 +3,15 @@ package dev.fouriis.karmagate.client.graffiti;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.network.DeleteGraffitiPayload;
 import dev.fouriis.karmagate.network.UpdateGraffitiPayload;
+import net.brickcraftdream.librainworldmc.client.gui.widgets.container.ScreenLayoutContainerWidget;
 import net.brickcraftdream.librainworldmc.client.gui.widgets.core.WidgetOrientation;
-import net.brickcraftdream.librainworldmc.client.gui.widgets.labeled.LabeledButtonWidget;
-import net.brickcraftdream.librainworldmc.client.gui.widgets.labeled.LabeledConfirmButtonWidget;
-import net.brickcraftdream.librainworldmc.client.gui.widgets.labeled.LabeledFormWidget;
-import net.brickcraftdream.librainworldmc.client.gui.widgets.labeled.LabeledSliderWidget;
-import net.brickcraftdream.librainworldmc.client.gui.widgets.labeled.display.LabeledDividerWidget;
-import net.brickcraftdream.librainworldmc.client.gui.widgets.labeled.display.LabeledSubcategoryDividerWidget;
+import net.brickcraftdream.librainworldmc.client.gui.widgets.labeled.*;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.text.Text;
 
-import java.util.ArrayList;
 import java.util.List;
 
 public class GraffitiConfigScreen extends Screen {
@@ -28,10 +23,7 @@ public class GraffitiConfigScreen extends Screen {
     private final float[] initialOpacity = new float[4];
     private final float[] initialMelt = new float[4];
 
-    private LabeledConfirmButtonWidget deleteButton;
-    private LabeledFormWidget form;
-    private final List<LabeledSliderWidget> sliders = new ArrayList<>();
-    private LabeledSliderWidget activeDragSlider = null;
+    private ScreenLayoutContainerWidget layoutContainer;
 
     public GraffitiConfigScreen(GraffitiEntity graffiti) {
         super(Text.literal("Graffiti Config"));
@@ -47,128 +39,179 @@ public class GraffitiConfigScreen extends Screen {
     @Override
     protected void init() {
         super.init();
-        sliders.clear();
-        activeDragSlider = null;
 
         int formWidth = Math.min(360, this.width - 40);
-        int formHeight = this.height - 60;
+        int formHeight = 304;
         int formX = (this.width - formWidth) / 2;
-        int formY = 30;
-        int dividerWidth = formWidth - 8;
+        int formY = this.height / 2 - formHeight / 2;
 
-        form = new LabeledFormWidget(formX, formY, formWidth, formHeight, Text.empty());
+        layoutContainer = ScreenLayoutContainerWidget.builder(formX, formY, formWidth, formHeight)
+                .root()
+                .splitVertical()
+                .areaHolderOnly()
 
-        form.addRow(new LabeledButtonWidget(0, 0, formWidth, 20,
-            Text.literal("Sprite"), Text.literal(currentTexture),
-            btn -> MinecraftClient.getInstance().setScreen(new GraffitiPickerScreen(tex -> {
-                applyTexture(tex);
-                MinecraftClient.getInstance().setScreen(new GraffitiConfigScreen(graffiti));
-            })),
-            List.of(), null));
+                .addArea("sprite", 42)
+                .addWidget(new LabeledButtonWidget(0, 0, formWidth, 20,
+                                Text.literal("Sprite"), Text.literal(currentTexture),
+                                btn -> MinecraftClient.getInstance().setScreen(new GraffitiPickerScreen(tex -> {
+                                    applyTexture(tex);
+                                    MinecraftClient.getInstance().setScreen(new GraffitiConfigScreen(graffiti));
+                                })),
+                                List.of(), null),
+                        (area, widget) -> {
+                            widget.setX(area.x());
+                            widget.setY(area.y() + 12);
+                            widget.setWidth(area.width());
+                        })
+                .autoMinSizeFromWidgets()
+                .end()
 
-        form.addRow(new LabeledDividerWidget(dividerWidth));
+                .addArea("opacity", 84)
+                .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
+                                Text.literal("Opacity – " + CORNER_LABELS[3]),
+                                0.0, 1.0, graffiti.getCornerOpacity(3),
+                                WidgetOrientation.HORIZONTAL, List.of(),
+                                (w, val) -> setCornerOpacity(3, val)),
+                        (area, widget) -> {
+                            widget.setX(area.x());
+                            widget.setY(area.y() + 12);
+                            widget.setWidth(area.width() / 2 - 2);
+                        })
+                .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
+                                Text.literal("Opacity – " + CORNER_LABELS[2]),
+                                0.0, 1.0, graffiti.getCornerOpacity(2),
+                                WidgetOrientation.HORIZONTAL, List.of(),
+                                (w, val) -> setCornerOpacity(2, val)),
+                        (area, widget) -> {
+                            widget.setX(area.x() + area.width() / 2 + 2);
+                            widget.setY(area.y() + 12);
+                            widget.setWidth(area.width() / 2 - 2);
+                        })
+                .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
+                                Text.literal("Opacity – " + CORNER_LABELS[0]),
+                                0.0, 1.0, graffiti.getCornerOpacity(0),
+                                WidgetOrientation.HORIZONTAL, List.of(),
+                                (w, val) -> setCornerOpacity(0, val)),
+                        (area, widget) -> {
+                            widget.setX(area.x());
+                            widget.setY(area.y() + 42 + 8);
+                            widget.setWidth(area.width() / 2 - 2);
+                        })
+                .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
+                                Text.literal("Opacity – " + CORNER_LABELS[1]),
+                                0.0, 1.0, graffiti.getCornerOpacity(1),
+                                WidgetOrientation.HORIZONTAL, List.of(),
+                                (w, val) -> setCornerOpacity(1, val)),
+                        (area, widget) -> {
+                            widget.setX(area.x() + area.width() / 2 + 2);
+                            widget.setY(area.y() + 42 + 8);
+                            widget.setWidth(area.width() / 2 - 2);
+                        })
+                .autoMinSizeFromWidgets()
+                .end()
 
-        for (int i = 0; i < 4; i++) {
-            final int corner = i;
-            LabeledSliderWidget s = new LabeledSliderWidget(0, 0, formWidth, 20,
-                Text.literal("Opacity – " + CORNER_LABELS[i]),
-                0.0, 1.0, graffiti.getCornerOpacity(i),
-                WidgetOrientation.HORIZONTAL, List.of(),
-                (w, val) -> setCornerOpacity(corner, val));
-            sliders.add(s);
-            form.addRow(s);
-        }
+                .addArea("melt", 84)
+                .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
+                                Text.literal("Melt – " + CORNER_LABELS[3]),
+                                0.0, 1.0, graffiti.getCornerMelt(3),
+                                WidgetOrientation.HORIZONTAL, List.of(),
+                                (w, val) -> setCornerMelt(3, val)),
+                        (area, widget) -> {
+                            widget.setX(area.x());
+                            widget.setY(area.y() + 12);
+                            widget.setWidth(area.width() / 2 - 2);
+                        })
+                .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
+                                Text.literal("Melt – " + CORNER_LABELS[2]),
+                                0.0, 1.0, graffiti.getCornerMelt(2),
+                                WidgetOrientation.HORIZONTAL, List.of(),
+                                (w, val) -> setCornerMelt(2, val)),
+                        (area, widget) -> {
+                            widget.setX(area.x() + area.width() / 2 + 2);
+                            widget.setY(area.y() + 12);
+                            widget.setWidth(area.width() / 2 - 2);
+                        })
+                .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
+                                Text.literal("Melt – " + CORNER_LABELS[0]),
+                                0.0, 1.0, graffiti.getCornerMelt(0),
+                                WidgetOrientation.HORIZONTAL, List.of(),
+                                (w, val) -> setCornerMelt(0, val)),
+                        (area, widget) -> {
+                            widget.setX(area.x());
+                            widget.setY(area.y() + 42 + 8);
+                            widget.setWidth(area.width() / 2 - 2);
+                        })
+                .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
+                                Text.literal("Melt – " + CORNER_LABELS[1]),
+                                0.0, 1.0, graffiti.getCornerMelt(1),
+                                WidgetOrientation.HORIZONTAL, List.of(),
+                                (w, val) -> setCornerMelt(1, val)),
+                        (area, widget) -> {
+                            widget.setX(area.x() + area.width() / 2 + 2);
+                            widget.setY(area.y() + 42 + 8);
+                            widget.setWidth(area.width() / 2 - 2);
+                        })
+                .autoMinSizeFromWidgets()
+                .end()
 
-        form.addRow(new LabeledDividerWidget(dividerWidth));
+                .addArea("actions", 24)
+                .addWidget(new LabeledButtonWidget(0, 0, formWidth, 20,
+                                Text.empty(), Text.literal("Done"),
+                                btn -> { sendUpdate(); this.close(); },
+                                List.of(), null),
+                        (area, widget) -> {
+                            widget.setX(area.x());
+                            widget.setY(area.y());
+                            widget.setWidth(area.width() / 3 - 3);
+                        })
+                .addWidget(new LabeledConfirmButtonWidget(0, 0, formWidth, 20,
+                                Text.empty(),
+                                Text.literal("Delete Graffiti"),
+                                Text.literal("Confirm Delete"),
+                                60,
+                                () -> {
+                                    ClientPlayNetworking.send(new DeleteGraffitiPayload(graffiti.getId()));
+                                    this.close();
+                                },
+                                List.of(),
+                                null),
+                        (area, widget) -> {
+                            widget.setX(area.x() + area.width() / 3 + 1);
+                            widget.setY(area.y());
+                            widget.setWidth(area.width() / 3 - 3);
+                        })
+                .addWidget(new LabeledButtonWidget(0, 0, formWidth, 20,
+                                Text.empty(), Text.literal("Cancel"),
+                                btn -> { restoreInitial(); this.close(); },
+                                List.of(), null),
+                        (area, widget) -> {
+                            widget.setX(area.x() + 2 * area.width() / 3 + 3);
+                            widget.setY(area.y());
+                            widget.setWidth(area.width() / 3 - 3);
+                        })
+                .autoMinSizeFromWidgets()
+                .end()
 
-        for (int i = 0; i < 4; i++) {
-            final int corner = i;
-            LabeledSliderWidget s = new LabeledSliderWidget(0, 0, formWidth, 20,
-                Text.literal("Melt – " + CORNER_LABELS[i]),
-                0.0, 1.0, graffiti.getCornerMelt(i),
-                WidgetOrientation.HORIZONTAL, List.of(),
-                (w, val) -> setCornerMelt(corner, val));
-            sliders.add(s);
-            form.addRow(s);
-        }
+                .endRoot()
+                .build();
 
-        form.addRow(new LabeledDividerWidget(dividerWidth));
-
-        form.addRow(new LabeledButtonWidget(0, 0, formWidth, 20,
-            Text.empty(), Text.literal("Done"),
-            btn -> { sendUpdate(); this.close(); },
-            List.of(), null));
-
-        form.addRow(new LabeledButtonWidget(0, 0, formWidth, 20,
-            Text.empty(), Text.literal("Cancel"),
-            btn -> { restoreInitial(); this.close(); },
-            List.of(), null));
-
-        deleteButton = new LabeledConfirmButtonWidget(0, 0, formWidth, 20,
-            Text.empty(),
-            Text.literal("Delete Graffiti"),
-            Text.literal("Confirm Delete"),
-            60,
-            () -> {
-                ClientPlayNetworking.send(new DeleteGraffitiPayload(graffiti.getId()));
-                this.close();
-            },
-            List.of(),
-            null);
-        form.addRow(deleteButton);
-
-        form.positionRows();
-        this.addDrawableChild(form);
-    }
-
-    @Override
-    public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        activeDragSlider = null;
-        for (LabeledSliderWidget s : sliders) {
-            if (s.isMouseOver(mouseX, mouseY)) {
-                s.mouseClicked(mouseX, mouseY, button);
-                activeDragSlider = s;
-                return super.mouseClicked(mouseX, mouseY, button);
-            }
-        }
-        return super.mouseClicked(mouseX, mouseY, button);
-    }
-
-    @Override
-    public boolean mouseDragged(double mouseX, double mouseY, int button, double deltaX, double deltaY) {
-        if (activeDragSlider != null) {
-            activeDragSlider.mouseDragged(mouseX, mouseY, button, deltaX, deltaY);
-            return true;
-        }
-        return super.mouseDragged(mouseX, mouseY, button, deltaX, deltaY);
-    }
-
-    @Override
-    public boolean mouseReleased(double mouseX, double mouseY, int button) {
-        if (activeDragSlider != null) {
-            activeDragSlider.mouseReleased(mouseX, mouseY, button);
-            activeDragSlider = null;
-            return true;
-        }
-        return super.mouseReleased(mouseX, mouseY, button);
+        this.addDrawableChild(layoutContainer);
+        this.addSelectableChild(layoutContainer);
     }
 
     @Override
     public void tick() {
         if (!graffiti.isAlive()) { this.close(); return; }
-        if (deleteButton != null) deleteButton.tick();
     }
 
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-        context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, 10, 0xFFFFFF);
+        context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, this.height / 2 - 168, 0xFFFFFF);
         super.render(context, mouseX, mouseY, delta);
     }
 
     @Override
-    public void renderBackground(DrawContext context, int mouseX, int mouseY, float delta) {
-        context.fill(form.getX() - 4, form.getY() - 4, form.getX() + form.getWidth() + 4, form.getHeight() + 34, 0xBB101010);
-    }
+    public void renderBackground(DrawContext context, int mouseX, int mouseY, float delta) {}
 
     @Override
     public boolean shouldPause() { return false; }

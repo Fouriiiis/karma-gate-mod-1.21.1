@@ -124,11 +124,12 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
 
             // If your library binder has the newer scale-aware overload, use that one instead:
             // CoreShaderRenderer.bindShader$WaterFall(spriteRect, WATERFALL_SURFACE_SCALE, LEVEL_TEXTURE, NOISE_TEXTURE, MINECRAFT_WATER_FLOW, null, null, false);
+            //public static void bindShader$WaterFall(float surfaceScale, Identifier sampler1_LevelTex, Identifier sampler2_MainTex, Identifier sampler4_PalTex, Identifier sampler9_GameplayRippleMask, Identifier sampler10_GameplayRipplePalTex, boolean RIPPLE) {
             CoreShaderRenderer.bindShader$WaterFall(
-                    spriteRect,
-                    10, LEVEL_TEXTURE,
-                    NOISE_TEXTURE,
-                    MINECRAFT_WATER_FLOW,
+                    WATERFALL_SURFACE_SCALE,
+                    LEVEL_TEXTURE,
+                    Identifier.of("librainworldmc", "textures/rainworld/palettes/noise.png"),
+                    Identifier.ofVanilla("textures/misc/underwater.png"),
                     null,
                     null,
                     false
