@@ -49,7 +49,11 @@ public final class DeathRainWeatherRenderer {
         int minY = center.getY() - HALF_HEIGHT_BLOCKS;
         int maxY = center.getY() + HALF_HEIGHT_BLOCKS;
 
-        RenderUtils.ShaderBinder shaderBinder = createDeathRainShaderBinder(rainIntensity, rainDirection);
+        // Use separate shader binders for east-west and north-south faces.
+        // Flip the sign for east-west faces so the shader streaks align
+        // with the intended world-space fall direction on those quads.
+        RenderUtils.ShaderBinder shaderBinderEW = createDeathRainShaderBinder(rainIntensity, -rainDirection);
+        RenderUtils.ShaderBinder shaderBinderNS = createDeathRainShaderBinder(rainIntensity, rainDirection);
 
         for (int dx = -RADIUS_BLOCKS; dx < RADIUS_BLOCKS; dx++) {
             for (int dz = -RADIUS_BLOCKS; dz <= RADIUS_BLOCKS; dz++) {
@@ -75,7 +79,7 @@ public final class DeathRainWeatherRenderer {
                         y++;
                     }
 
-                    emitEastWestQuad(shaderBinder, x + 1.0, startY, y, z, inward, red, green, blue, alpha);
+                    emitEastWestQuad(shaderBinderEW, x + 1.0, startY, y, z, inward, red, green, blue, alpha);
                 }
             }
         }
@@ -104,7 +108,7 @@ public final class DeathRainWeatherRenderer {
                         y++;
                     }
 
-                    emitNorthSouthQuad(shaderBinder, x, startY, y, z + 1.0, inward, red, green, blue, alpha);
+                    emitNorthSouthQuad(shaderBinderNS, x, startY, y, z + 1.0, inward, red, green, blue, alpha);
                 }
             }
         }
@@ -198,24 +202,26 @@ public final class DeathRainWeatherRenderer {
             float alpha
     ) {
         if (inward > 0) {
+            // Arrange vertices so texture U runs along +Z and V runs along +Y
             emitQuad(
                     shaderBinder,
                     new Vec3d(faceX, y0, z),
-                    new Vec3d(faceX, y1, z),
-                    new Vec3d(faceX, y1, z + 1.0),
                     new Vec3d(faceX, y0, z + 1.0),
+                    new Vec3d(faceX, y1, z + 1.0),
+                    new Vec3d(faceX, y1, z),
                     red,
                     green,
                     blue,
                     alpha
             );
         } else {
+            // Mirror for the opposite inward direction
             emitQuad(
                     shaderBinder,
                     new Vec3d(faceX, y0, z + 1.0),
-                    new Vec3d(faceX, y1, z + 1.0),
-                    new Vec3d(faceX, y1, z),
                     new Vec3d(faceX, y0, z),
+                    new Vec3d(faceX, y1, z),
+                    new Vec3d(faceX, y1, z + 1.0),
                     red,
                     green,
                     blue,

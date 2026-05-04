@@ -422,22 +422,10 @@ public final class GlobalRain {
     }
 
     private void updateRainDirection() {
-        // 0.025 chance at 40 TPS ~= 0.049 chance at 20 TPS
-        if (ThreadLocalRandom.current().nextFloat() < 0.049f) {
-            rainDirectionGetTo = lerp(-1.0f, 1.0f, ThreadLocalRandom.current().nextFloat());
-        }
-
-        lastRainDirection = rainDirection;
-
-        // 0.01 lerp at 40 TPS ~= 0.0199 at 20 TPS
-        rainDirection = lerp(rainDirection, rainDirectionGetTo, 0.0199f);
-
-        // 0.0125 additive at 40 TPS ~= 0.025 at 20 TPS
-        if (rainDirection < rainDirectionGetTo) {
-            rainDirection = Math.min(rainDirection + 0.025f, rainDirectionGetTo);
-        } else if (rainDirection > rainDirectionGetTo) {
-            rainDirection = Math.max(rainDirection - 0.025f, rainDirectionGetTo);
-        }
+        // Locked to perfectly vertical for now (no horizontal drift).
+        lastRainDirection = 0.0f;
+        rainDirectionGetTo = 0.0f;
+        rainDirection = 0.0f;
     }
 
     private static int modeOrdinal(DeathRainMode mode) {

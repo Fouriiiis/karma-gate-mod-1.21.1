@@ -60,7 +60,7 @@ dependencies {
 
 	modImplementation "maven.modrinth:librainworldmc:1.2.1"
 	//use a lib mod in the libs folder build\libs\librainworldmc-1.1.1.jar
-	modImplementation files("libs/librainworldmc-1.1.6.jar")
+	//modImplementation files("libs/librainworldmc-1.1.6.jar")
 
 	// jcodec: pure-Java MP4/H.264 decoder for graffiti video playback (no native libs required)
 	include implementation('org.jcodec:jcodec:0.2.5')
