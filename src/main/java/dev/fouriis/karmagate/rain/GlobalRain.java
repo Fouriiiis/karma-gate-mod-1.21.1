@@ -1,6 +1,5 @@
 package dev.fouriis.karmagate.rain;
 
-import dev.fouriis.karmagate.KarmaGateMod;
 import dev.fouriis.karmagate.network.ModNetworking;
 import net.minecraft.server.MinecraftServer;
 
@@ -8,187 +7,219 @@ import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
-public class GlobalRain {
+/**
+ * Server-side global rain state, modeled after Rain World's GlobalRain.
+ *
+ * Responsibilities:
+ * - passive room/profile-based rain
+ * - heavy/bullet rain flux pulsing
+ * - wind direction
+ * - post-cycle death-rain state machine
+ * - flood-related values
+ *
+ * This class only computes and syncs rain state. It does NOT use vanilla weather.
+ */
+public final class GlobalRain {
     private static final Map<MinecraftServer, GlobalRain> INSTANCES = new WeakHashMap<>();
+
+    public static GlobalRain get(MinecraftServer server) {
+        return INSTANCES.computeIfAbsent(server, ignored -> new GlobalRain());
+    }
 
     public enum DeathRainMode {
         NONE,
         CALM_BEFORE_STORM,
-        GRADE_A_BUILDUP,
-        GRADE_A_PLATEU,
-        GRADE_B_BUILDUP,
-        GRADE_B_PLATEU,
-        FINAL_BUILDUP,
+        GRADE_A_BUILD_UP,
+        GRADE_A_PLATEAU,
+        GRADE_B_BUILD_UP,
+        GRADE_B_PLATEAU,
+        FINAL_BUILD_UP,
         MAYHEM,
-        ALTERNATE_BUILDUP,
+        ALTERNATE_BUILD_UP,
         PULSES
     }
 
+    public static final class RainProfile {
+        public static final RainProfile NONE = new RainProfile(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+
+        public final float lightRain;
+        public final float heavyRain;
+        public final float heavyRainFlux;
+        public final float bulletRain;
+        public final float bulletRainFlux;
+
+        public RainProfile(float lightRain,
+                           float heavyRain,
+                           float heavyRainFlux,
+                           float bulletRain,
+                           float bulletRainFlux) {
+            this.lightRain = lightRain;
+            this.heavyRain = heavyRain;
+            this.heavyRainFlux = heavyRainFlux;
+            this.bulletRain = bulletRain;
+            this.bulletRainFlux = bulletRainFlux;
+        }
+    }
+
     private final class DeathRain {
-        private DeathRainMode deathRainMode = DeathRainMode.NONE;
+        private DeathRainMode mode = DeathRainMode.NONE;
         private float timeInThisMode;
         private float progression;
         private float calmBeforeStormSunlight;
 
         private DeathRain() {
-            nextDeathRainMode();
+            nextMode();
         }
 
-        private void forceMode(DeathRainMode mode) {
-            deathRainMode = mode;
-            progression = 0.0f;
-            configureCurrentMode();
-        }
-
-        private void update(float rainApproaching) {
-            progression += 1.0f / timeInThisMode * (arenaStyleDeathRain ? 3.2f : 1.0f);
-
+        private void update(RainCycle cycle) {
+            progression += 1.0f / Math.max(1.0f, timeInThisMode);
             boolean advance = false;
+
             if (progression > 1.0f) {
                 progression = 1.0f;
                 advance = true;
             }
 
-            if (deathRainMode == DeathRainMode.CALM_BEFORE_STORM) {
-                rumbleSound = Math.max(rumbleSound - 0.025f, 0.0f);
+            if (mode == DeathRainMode.CALM_BEFORE_STORM) {
+                rumbleSound = Math.max(rumbleSound - 0.05f, 0.0f);
             } else {
+                // Original was Lerp(..., 0.2) at 40 TPS. Equivalent alpha at 20 TPS is ~0.36.
                 rumbleSound = lerp(
                         rumbleSound,
-                        1.0f - inverseLerp(0.0f, 0.6f, rainApproaching),
-                        0.2f
+                        1.0f - inverseLerp(0.0f, 0.6f, cycle.getRainApproaching()),
+                        0.36f
                 );
             }
 
-            if (deathRainMode == DeathRainMode.CALM_BEFORE_STORM) {
+            if (mode == DeathRainMode.CALM_BEFORE_STORM) {
                 intensity = (float) Math.pow(inverseLerp(0.15f, 0.0f, progression), 1.5f) * 0.24f;
                 shaderLight = -1.0f
-                        + 0.3f * (float) Math.sin(inverseLerp(0.03f, 0.8f, progression) * Math.PI) * calmBeforeStormSunlight;
+                        + 0.3f
+                        * (float) Math.sin(inverseLerp(0.03f, 0.8f, progression) * Math.PI)
+                        * calmBeforeStormSunlight;
                 bulletRainDensity = (float) Math.pow(inverseLerp(0.3f, 1.0f, progression), 8.0f);
-            } else if (deathRainMode == DeathRainMode.GRADE_A_BUILDUP) {
+            } else if (mode == DeathRainMode.GRADE_A_BUILD_UP) {
                 intensity = progression * 0.6f;
                 microScreenShake = progression * 1.5f;
                 bulletRainDensity = 1.0f - progression;
-            } else if (deathRainMode != DeathRainMode.GRADE_A_PLATEU) {
-                if (deathRainMode == DeathRainMode.GRADE_B_BUILDUP) {
-                    intensity = lerp(0.6f, 0.71f, progression);
-                    microScreenShake = lerp(1.5f, 2.1f, progression);
-                    screenShake = progression * 1.2f;
-                } else if (deathRainMode != DeathRainMode.GRADE_B_PLATEU) {
-                    if (deathRainMode == DeathRainMode.FINAL_BUILDUP) {
-                        intensity = lerp(0.71f, 1.0f, progression);
-                        microScreenShake = lerp(2.1f, 4.0f, (float) Math.pow(progression, 1.2f));
-                        screenShake = lerp(1.2f, 3.0f, progression);
-                    } else if (deathRainMode == DeathRainMode.ALTERNATE_BUILDUP) {
-                        intensity = lerp(0.24f, 0.6f, progression);
-                        microScreenShake = 1.0f + progression * 0.5f;
-                    } else if (deathRainMode == DeathRainMode.PULSES) {
-                        float num3;
-                        if (progression <= 0.9f) {
-                            float num = (1.0f - progression) * 50.0f;
-                            float num2 = 0.4f + (float) Math.sin(progression / (num / 3.0f));
-                            num3 = progression * timeInThisMode / timeInThisMode
-                                    + (float) Math.sin(progression * timeInThisMode / num)
-                                    / (timeInThisMode / (progression * timeInThisMode));
+            } else if (mode == DeathRainMode.GRADE_B_BUILD_UP) {
+                intensity = lerp(0.6f, 0.71f, progression);
+                microScreenShake = lerp(1.5f, 2.1f, progression);
+                screenShake = progression * 1.2f;
+            } else if (mode == DeathRainMode.FINAL_BUILD_UP) {
+                intensity = lerp(0.71f, 1.0f, progression);
+                microScreenShake = lerp(2.1f, 4.0f, (float) Math.pow(progression, 1.2f));
+                screenShake = lerp(1.2f, 3.0f, progression);
+            } else if (mode == DeathRainMode.ALTERNATE_BUILD_UP) {
+                intensity = lerp(0.24f, 0.6f, progression);
+                microScreenShake = 1.0f + progression * 0.5f;
+            } else if (mode == DeathRainMode.PULSES) {
+                float pulseValue;
 
-                            if (progression > 0.6f && Math.abs(num3 - num2) < 0.1f) {
-                                num3 *= num2;
-                            }
+                if (progression <= 0.9f) {
+                    float pulsePeriod = (1.0f - progression) * 50.0f;
+                    float pulseShape = 0.4f + (float) Math.sin(progression / (pulsePeriod / 3.0f));
 
-                            bulletRainDensity = lerp(0.1f, 1.0f, num2 - 0.4f);
-                            num3 = clamp(num3, progression * 0.6f, 1.0f);
-                        } else {
-                            bulletRainDensity = 0.0f;
-                            num3 = 1.0f;
-                        }
+                    pulseValue = progression
+                            + (float) Math.sin((progression * timeInThisMode) / pulsePeriod)
+                            / (timeInThisMode / Math.max(0.0001f, progression * timeInThisMode));
 
-                        float t = 0.25f * inverseLerp(0.0f, 0.1f, progression);
-                        intensity = lerp(intensity, lerp(0.0f, 0.75f, num3), t);
-                        microScreenShake = (1.0f + progression * 0.65f) * (num3 + 0.25f);
-                        screenShake = lerp(screenShake, microScreenShake, 0.3f);
+                    if (progression > 0.6f && Math.abs(pulseValue - pulseShape) < 0.1f) {
+                        pulseValue *= pulseShape;
                     }
+
+                    bulletRainDensity = lerp(0.1f, 1.0f, pulseShape - 0.4f);
+                    pulseValue = clamp(pulseValue, progression * 0.6f, 1.0f);
+                } else {
+                    bulletRainDensity = 0.0f;
+                    pulseValue = 1.0f;
                 }
+
+                float t = 0.25f * inverseLerp(0.0f, 0.1f, progression);
+                intensity = lerp(intensity, lerp(0.0f, 0.75f, pulseValue), t);
+                microScreenShake = (1.0f + progression * 0.65f) * (pulseValue + 0.25f);
+                screenShake = lerp(screenShake, microScreenShake, 0.51f);
             }
 
             if (advance) {
-                nextDeathRainMode();
+                nextMode();
             }
         }
 
-        private void nextDeathRainMode() {
-            if (deathRainMode == DeathRainMode.MAYHEM) {
+        private void nextMode() {
+            if (mode == DeathRainMode.MAYHEM) {
                 return;
             }
 
-            if (deathRainMode == DeathRainMode.NONE
-                    && (ThreadLocalRandom.current().nextFloat() < 0.7f || arenaStyleDeathRain)) {
+            if (mode == DeathRainMode.NONE && ThreadLocalRandom.current().nextFloat() < 0.7f) {
                 if (ThreadLocalRandom.current().nextFloat() < 0.7f) {
-                    deathRainMode = DeathRainMode.ALTERNATE_BUILDUP;
+                    mode = DeathRainMode.ALTERNATE_BUILD_UP;
                 } else {
-                    deathRainMode = DeathRainMode.PULSES;
+                    mode = DeathRainMode.PULSES;
                 }
-            } else if (deathRainMode == DeathRainMode.ALTERNATE_BUILDUP) {
-                deathRainMode = DeathRainMode.GRADE_A_PLATEU;
-            } else if (deathRainMode == DeathRainMode.PULSES) {
-                deathRainMode = DeathRainMode.FINAL_BUILDUP;
+            } else if (mode == DeathRainMode.ALTERNATE_BUILD_UP) {
+                mode = DeathRainMode.GRADE_A_PLATEAU;
+            } else if (mode == DeathRainMode.PULSES) {
+                mode = DeathRainMode.FINAL_BUILD_UP;
             } else {
-                deathRainMode = nextSequentialMode(deathRainMode);
+                mode = nextSequentialMode(mode);
             }
 
             progression = 0.0f;
             configureCurrentMode();
         }
 
+        private DeathRainMode nextSequentialMode(DeathRainMode current) {
+            return switch (current) {
+                case NONE -> DeathRainMode.CALM_BEFORE_STORM;
+                case CALM_BEFORE_STORM -> DeathRainMode.GRADE_A_BUILD_UP;
+                case GRADE_A_BUILD_UP -> DeathRainMode.GRADE_A_PLATEAU;
+                case GRADE_A_PLATEAU -> DeathRainMode.GRADE_B_BUILD_UP;
+                case GRADE_B_BUILD_UP -> DeathRainMode.GRADE_B_PLATEAU;
+                case GRADE_B_PLATEAU -> DeathRainMode.FINAL_BUILD_UP;
+                case FINAL_BUILD_UP -> DeathRainMode.MAYHEM;
+                default -> DeathRainMode.MAYHEM;
+            };
+        }
+
         private void configureCurrentMode() {
-            switch (deathRainMode) {
+            switch (mode) {
                 case CALM_BEFORE_STORM -> {
-                    timeInThisMode = randomRange(400.0f, 800.0f);
-                    calmBeforeStormSunlight = (ThreadLocalRandom.current().nextFloat() < 0.5f)
+                    timeInThisMode = randomRange(RainCycle.rwTicksToMc(400), RainCycle.rwTicksToMc(800));
+                    calmBeforeStormSunlight = ThreadLocalRandom.current().nextFloat() < 0.5f
                             ? 0.0f
                             : ThreadLocalRandom.current().nextFloat();
                 }
-                case GRADE_A_BUILDUP -> {
-                    timeInThisMode = 6.0f;
+                case GRADE_A_BUILD_UP -> {
+                    timeInThisMode = RainCycle.rwTicksToMc(6);
                     shaderLight = -1.0f;
                 }
-                case GRADE_A_PLATEU -> timeInThisMode = randomRange(400.0f, 600.0f);
-                case GRADE_B_BUILDUP -> {
+                case GRADE_A_PLATEAU -> timeInThisMode = randomRange(RainCycle.rwTicksToMc(400), RainCycle.rwTicksToMc(600));
+                case GRADE_B_BUILD_UP -> {
                     if (ThreadLocalRandom.current().nextFloat() < 0.5f) {
-                        timeInThisMode = 100.0f;
+                        timeInThisMode = RainCycle.rwTicksToMc(100);
                     } else {
-                        timeInThisMode = randomRange(50.0f, 300.0f);
+                        timeInThisMode = randomRange(RainCycle.rwTicksToMc(50), RainCycle.rwTicksToMc(300));
                     }
                 }
-                case GRADE_B_PLATEU -> {
+                case GRADE_B_PLATEAU -> {
                     if (ThreadLocalRandom.current().nextFloat() < 0.5f) {
-                        timeInThisMode = 100.0f;
+                        timeInThisMode = RainCycle.rwTicksToMc(100);
                     } else {
-                        timeInThisMode = randomRange(50.0f, 300.0f);
+                        timeInThisMode = randomRange(RainCycle.rwTicksToMc(50), RainCycle.rwTicksToMc(300));
                     }
                 }
-                case FINAL_BUILDUP -> {
+                case FINAL_BUILD_UP -> {
                     if (ThreadLocalRandom.current().nextFloat() < 0.5f) {
-                        timeInThisMode = randomRange(300.0f, 500.0f);
+                        timeInThisMode = randomRange(RainCycle.rwTicksToMc(300), RainCycle.rwTicksToMc(500));
                     } else {
-                        timeInThisMode = randomRange(100.0f, 800.0f);
+                        timeInThisMode = randomRange(RainCycle.rwTicksToMc(100), RainCycle.rwTicksToMc(800));
                     }
                 }
-                case ALTERNATE_BUILDUP -> timeInThisMode = randomRange(400.0f, 1200.0f);
-                case PULSES -> timeInThisMode = randomRange(1000.0f, 2600.0f);
-                case MAYHEM, NONE -> timeInThisMode = Float.MAX_VALUE;
+                case ALTERNATE_BUILD_UP -> timeInThisMode = randomRange(RainCycle.rwTicksToMc(400), RainCycle.rwTicksToMc(1200));
+                case PULSES -> timeInThisMode = randomRange(RainCycle.rwTicksToMc(1000), RainCycle.rwTicksToMc(2600));
+                case NONE, MAYHEM -> timeInThisMode = Float.MAX_VALUE;
             }
-        }
-
-        private DeathRainMode nextSequentialMode(DeathRainMode mode) {
-            return switch (mode) {
-                case NONE -> DeathRainMode.CALM_BEFORE_STORM;
-                case CALM_BEFORE_STORM -> DeathRainMode.GRADE_A_BUILDUP;
-                case GRADE_A_BUILDUP -> DeathRainMode.GRADE_A_PLATEU;
-                case GRADE_A_PLATEU -> DeathRainMode.GRADE_B_BUILDUP;
-                case GRADE_B_BUILDUP -> DeathRainMode.GRADE_B_PLATEU;
-                case GRADE_B_PLATEU -> DeathRainMode.FINAL_BUILDUP;
-                case FINAL_BUILDUP -> DeathRainMode.MAYHEM;
-                default -> DeathRainMode.MAYHEM;
-            };
         }
     }
 
@@ -203,9 +234,10 @@ public class GlobalRain {
     private float rumbleSound;
     private float bulletRainDensity;
 
+    private DeathRain deathRain;
+
     private float flood;
     private float floodSpeed;
-
     private int bulletTimer;
     private int heavyTimer;
     private float floodLerpSpeed = 0.2f;
@@ -215,86 +247,63 @@ public class GlobalRain {
     private float preCycleRainPulseScale;
     private boolean forceSlowFlood;
 
-    private boolean forcedRain;
-    private boolean arenaStyleDeathRain;
-
-    private int debugLogTicker;
-
-    /**
-     * Stored in original Rain World 40-TPS ticks.
-     * This can go negative like the source game.
-     */
-    private int timeUntilRainTicks40 = 2400;
-    private boolean cyclePaused;
-
-    private DeathRain deathRain;
+    private float drainWorldDrainSpeed = 0.45f;
+    private float drainWorldFlood;
+    private int drainWorldFastDrainCounter;
 
     /**
-     * Optional room/profile inputs, analogous to Rain World's room effects.
+     * Global rain profile analogous to Rain World's room settings.
+     * Something else in your mod can update this based on biome, structure, dimension, etc.
      */
-    private boolean hasCustomRainProfile;
-    private float customLightRain;
-    private float customHeavyRain;
-    private float customHeavyRainFlux;
-    private float customBulletRain;
-    private float customBulletRainFlux;
-
-    /**
-     * Optional override for RainApproaching-like behavior.
-     */
-    private boolean hasCustomRainApproaching;
-    private float customRainApproaching;
+    private RainProfile currentProfile = RainProfile.NONE;
 
     private GlobalRain() {
     }
 
-    public static GlobalRain get(MinecraftServer server) {
-        return INSTANCES.computeIfAbsent(server, ignored -> new GlobalRain());
+    public void tick(MinecraftServer server) {
+        tick(server, RainCycle.get(server));
     }
 
-    public void tick(MinecraftServer server) {
+    public void tick(MinecraftServer server, RainCycle cycle) {
         try {
             updateRainDirection();
             waterFluxTicker++;
             floodLerpSpeed = 0.2f;
-            debugLogTicker++;
-
-            if (!cyclePaused) {
-                timeUntilRainTicks40 -= 2;
-            }
-
-            float rainApproaching = resolveRainApproaching();
 
             if (deathRain != null) {
-                deathRain.update(rainApproaching);
+                deathRain.update(cycle);
 
-                boolean flag = deathRain.deathRainMode.ordinal() > DeathRainMode.GRADE_A_BUILDUP.ordinal();
+                boolean fastFlood = modeOrdinal(deathRain.mode) > modeOrdinal(DeathRainMode.GRADE_A_BUILD_UP);
 
-                if (!forceSlowFlood && flag) {
-                    floodSpeed = Math.min(0.8f, floodSpeed + 0.0025f);
-                } else if (arenaStyleDeathRain
-                        && deathRain.deathRainMode.ordinal() >= DeathRainMode.GRADE_A_BUILDUP.ordinal()) {
-                    floodSpeed = Math.min(1.8f, floodSpeed + (1.0f / 150.0f));
+                if (!forceSlowFlood && fastFlood) {
+                    floodSpeed = Math.min(0.8f, floodSpeed + 0.005f);
+                } else if (modeOrdinal(deathRain.mode) >= modeOrdinal(DeathRainMode.GRADE_A_BUILD_UP)) {
+                    floodSpeed = Math.min(1.8f, floodSpeed + (1.0f / 75.0f));
                 }
 
                 flood += floodSpeed;
-                logEvery10Ticks(true);
                 return;
             }
 
-            intensity = inverseLerp(600.0f, 200.0f, timeUntilRainTicks40) * 0.24f;
+            // Baseline cycle rain pressure before post-cycle rain starts.
+            intensity = inverseLerp(RainCycle.rwTicksToMc(600), RainCycle.rwTicksToMc(200), cycle.getTimeUntilRain()) * 0.24f;
+            shaderLight = -1.0f;
+            screenShake = 0.0f;
+            microScreenShake = 0.0f;
+            rumbleSound = 0.0f;
             bulletRainDensity = 0.0f;
 
-            float lightRain = resolveLightRain();
-            float heavyRain = resolveHeavyRain();
-            float heavyRainFlux = resolveHeavyRainFlux();
-            float bulletRain = resolveBulletRain();
-            float bulletRainFlux = resolveBulletRainFlux();
+            // Passive/profile rain.
+            float lightRain = currentProfile.lightRain;
+            float heavyRain = currentProfile.heavyRain;
+            float heavyRainFlux = currentProfile.heavyRainFlux;
+            float bulletRain = currentProfile.bulletRain;
+            float bulletRainFlux = currentProfile.bulletRainFlux;
 
             if (preCycleRainPulseScale != 0.0f) {
-                float prevLight = lightRain;
-                float prevHeavyFlux = heavyRainFlux;
-                float prevBullet = bulletRain;
+                float oldLightRain = lightRain;
+                float oldHeavyFlux = heavyRainFlux;
+                float oldBulletRain = bulletRain;
 
                 lightRain = (1.0f + clamp(preCycleRainPulseIntensity, 0.0f, 1.0f)) * preCycleRainPulseScale;
                 heavyRainFlux = clamp(lightRain - 0.9f, 0.0f, 0.8f);
@@ -304,21 +313,21 @@ public class GlobalRain {
                     bulletRain = 0.0f;
                 }
 
-                if (lightRain < prevLight) {
-                    lightRain = prevLight;
+                if (lightRain < oldLightRain) {
+                    lightRain = oldLightRain;
                 }
-                if (heavyRainFlux < prevHeavyFlux) {
-                    heavyRainFlux = prevHeavyFlux;
+                if (heavyRainFlux < oldHeavyFlux) {
+                    heavyRainFlux = oldHeavyFlux;
                 }
-                if (lightRain < prevBullet) {
-                    lightRain = prevBullet;
+                if (lightRain < oldBulletRain) {
+                    lightRain = oldBulletRain;
                 }
             }
 
             float effectiveHeavyRain = heavyRain;
             if (heavyRainFlux > 0.0f) {
-                float plateauTicks = 1200.0f * heavyRainFlux;
-                float rampTicks = 60.0f;
+                float plateauTicks = RainCycle.rwTicksToMc(1200) * heavyRainFlux;
+                float rampTicks = RainCycle.rwTicksToMc(60);
                 int period = Math.max(1, Math.round(rampTicks * 2.0f + plateauTicks * 2.0f));
 
                 heavyTimer = (heavyTimer + 1) % period;
@@ -336,19 +345,14 @@ public class GlobalRain {
                 intensity = (1.0f + effectiveHeavyRain * 4.0f) * 0.24f;
                 rumbleSound = effectiveHeavyRain * 0.2f;
                 screenShake = effectiveHeavyRain;
-            } else if (lightRain > 0.0f || forcedRain) {
-                intensity = Math.max(intensity, lightRain * 0.24f);
-            } else {
-                shaderLight = -1.0f;
-                screenShake = 0.0f;
-                microScreenShake = 0.0f;
-                rumbleSound = 0.0f;
+            } else if (lightRain > 0.0f) {
+                intensity = lightRain * 0.24f;
             }
 
             float effectiveBulletRain = bulletRain;
             if (bulletRainFlux > 0.0f) {
-                float plateauTicks = 1200.0f * bulletRainFlux;
-                float rampTicks = 60.0f;
+                float plateauTicks = RainCycle.rwTicksToMc(1200) * bulletRainFlux;
+                float rampTicks = RainCycle.rwTicksToMc(60);
                 int period = Math.max(1, Math.round(rampTicks * 2.0f + plateauTicks * 2.0f));
 
                 bulletTimer = (bulletTimer + 1) % period;
@@ -366,7 +370,10 @@ public class GlobalRain {
                 bulletRainDensity = effectiveBulletRain;
             }
 
-            logEvery10Ticks(lightRain > 0.0f || heavyRain > 0.0f || forcedRain);
+            if (drainWorldFlood > 0.0f) {
+                flood = 1.0f + drainWorldFlood;
+                floodLerpSpeed = 1.0f;
+            }
         } finally {
             ModNetworking.syncGlobalRainToAll(
                     server,
@@ -380,55 +387,14 @@ public class GlobalRain {
         }
     }
 
-    public void startDeathRain() {
-        startDeathRain(false);
-    }
-
-    public void startDeathRain(boolean arenaStyle) {
-        this.forcedRain = true;
-        this.arenaStyleDeathRain = arenaStyle;
-
-        if (this.deathRain == null) {
-            this.deathRain = new DeathRain();
+    public void initDeathRain() {
+        if (deathRain == null) {
+            deathRain = new DeathRain();
         }
-
-        this.intensity = Math.max(this.intensity, 0.24f);
-    }
-
-    public void startDeathRain(DeathRainMode initialMode, boolean arenaStyle) {
-        this.forcedRain = true;
-        this.arenaStyleDeathRain = arenaStyle;
-
-        if (this.deathRain == null) {
-            this.deathRain = new DeathRain();
-        }
-
-        if (initialMode != null && initialMode != DeathRainMode.NONE && initialMode != DeathRainMode.MAYHEM) {
-            this.deathRain.forceMode(initialMode);
-        }
-
-        this.intensity = Math.max(this.intensity, 0.24f);
-    }
-
-    public void triggerRain() {
-        startDeathRain(false);
-    }
-
-    public void forcePassiveRainOnly() {
-        this.forcedRain = true;
-        this.intensity = Math.max(this.intensity, 0.24f);
-    }
-
-    public void stopForcedRain() {
-        this.forcedRain = false;
-        this.arenaStyleDeathRain = false;
     }
 
     public void resetRain() {
         deathRain = null;
-        forcedRain = false;
-        arenaStyleDeathRain = false;
-        forceSlowFlood = false;
 
         intensity = 0.0f;
         shaderLight = -1.0f;
@@ -439,137 +405,95 @@ public class GlobalRain {
 
         flood = 0.0f;
         floodSpeed = 0.0f;
-
         bulletTimer = 0;
         heavyTimer = 0;
         waterFluxTicker = 0;
 
         preCycleRainPulseIntensity = 0.0f;
         preCycleRainPulseScale = 0.0f;
-        debugLogTicker = 0;
+        forceSlowFlood = false;
+
+        drainWorldFlood = 0.0f;
+        drainWorldFastDrainCounter = 0;
 
         lastRainDirection = 0.0f;
         rainDirection = 0.0f;
         rainDirectionGetTo = 0.0f;
     }
 
-    public float getOutsidePushAround() {
-        return (float) Math.pow(inverseLerp(0.35f, 0.7f, intensity), 0.8f);
-    }
-
-    public float getInsidePushAround() {
-        return (float) Math.pow(inverseLerp(0.63f, 0.98f, intensity), 3.5f);
-    }
-
-    public boolean hasAnyPushAround() {
-        return getOutsidePushAround() > 0.0f || getInsidePushAround() > 0.0f;
-    }
-
     private void updateRainDirection() {
-        if (ThreadLocalRandom.current().nextFloat() < 0.025f) {
+        // 0.025 chance at 40 TPS ~= 0.049 chance at 20 TPS
+        if (ThreadLocalRandom.current().nextFloat() < 0.049f) {
             rainDirectionGetTo = lerp(-1.0f, 1.0f, ThreadLocalRandom.current().nextFloat());
         }
 
         lastRainDirection = rainDirection;
-        rainDirection = lerp(rainDirection, rainDirectionGetTo, 0.01f);
 
+        // 0.01 lerp at 40 TPS ~= 0.0199 at 20 TPS
+        rainDirection = lerp(rainDirection, rainDirectionGetTo, 0.0199f);
+
+        // 0.0125 additive at 40 TPS ~= 0.025 at 20 TPS
         if (rainDirection < rainDirectionGetTo) {
-            rainDirection = Math.min(rainDirection + 0.0125f, rainDirectionGetTo);
+            rainDirection = Math.min(rainDirection + 0.025f, rainDirectionGetTo);
         } else if (rainDirection > rainDirectionGetTo) {
-            rainDirection = Math.max(rainDirection - 0.0125f, rainDirectionGetTo);
+            rainDirection = Math.max(rainDirection - 0.025f, rainDirectionGetTo);
         }
     }
 
-    private float resolveLightRain() {
-        return hasCustomRainProfile ? customLightRain : 0.0f;
-    }
-
-    private float resolveHeavyRain() {
-        return hasCustomRainProfile ? customHeavyRain : 0.0f;
-    }
-
-    private float resolveHeavyRainFlux() {
-        return hasCustomRainProfile ? customHeavyRainFlux : 0.0f;
-    }
-
-    private float resolveBulletRain() {
-        return hasCustomRainProfile ? customBulletRain : 0.0f;
-    }
-
-    private float resolveBulletRainFlux() {
-        return hasCustomRainProfile ? customBulletRainFlux : 0.0f;
-    }
-
-    private float resolveRainApproaching() {
-        if (hasCustomRainApproaching) {
-            return customRainApproaching;
-        }
-
-        // Match RW behavior expectation: as we get closer to/into rain, approaching trends to 0.
-        // This keeps death-rain rumble target high instead of decaying to denormals.
-        return inverseLerp(0.0f, 1200.0f, timeUntilRainTicks40);
-    }
-
-    private void logEvery10Ticks(boolean activeRain) {
-        if (debugLogTicker < 10) {
-            return;
-        }
-        debugLogTicker = 0;
-
-        KarmaGateMod.LOGGER.info(
-                "[GlobalRain] activeRain={} forcedRain={} deathRain={} mode={} " +
-                        "timeUntilRain40={} timeUntilRain20={} rainApproaching={} " +
-                        "intensity={} shaderLight={} screenShake={} microScreenShake={} rumbleSound={} " +
-                        "bulletRainDensity={} flood={} floodSpeed={} rainDir={} lastRainDir={}",
-                activeRain,
-                forcedRain,
-                deathRain != null,
-                getDeathRainMode(),
-                timeUntilRainTicks40,
-                getTimeUntilRainTicks20(),
-                resolveRainApproaching(),
-                intensity,
-                shaderLight,
-                screenShake,
-                microScreenShake,
-                rumbleSound,
-                bulletRainDensity,
-                flood,
-                floodSpeed,
-                rainDirection,
-                lastRainDirection
-        );
+    private static int modeOrdinal(DeathRainMode mode) {
+        return mode.ordinal();
     }
 
     private static float randomRange(float min, float max) {
         return min + ThreadLocalRandom.current().nextFloat() * (max - min);
     }
 
+    private static float clamp(float value, float min, float max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static float clamp01(float value) {
+        return clamp(value, 0.0f, 1.0f);
+    }
+
     private static float inverseLerp(float a, float b, float value) {
         if (a == b) {
             return 0.0f;
         }
-        return clamp((value - a) / (b - a), 0.0f, 1.0f);
-    }
-
-    private static float clamp(float value, float min, float max) {
-        return Math.max(min, Math.min(max, value));
+        return clamp01((value - a) / (b - a));
     }
 
     private static float lerp(float start, float end, float delta) {
         return start + (end - start) * delta;
     }
 
-    public DeathRainMode getDeathRainMode() {
-        return deathRain == null ? DeathRainMode.NONE : deathRain.deathRainMode;
+    public void setRainProfile(RainProfile profile) {
+        this.currentProfile = profile == null ? RainProfile.NONE : profile;
     }
 
-    public float getLastRainDirection() {
-        return lastRainDirection;
+    public RainProfile getRainProfile() {
+        return currentProfile;
     }
 
-    public float getRainDirection() {
-        return rainDirection;
+    public void setPreCycleRainPulseIntensity(float value) {
+        this.preCycleRainPulseIntensity = value;
+    }
+
+    public void setPreCycleRainPulseScale(float value) {
+        this.preCycleRainPulseScale = value;
+    }
+
+    public void setPreCycleRainPulseScaleDecay() {
+        if (Math.abs(preCycleRainPulseScale) > 0.003f) {
+            // 0.999 per RW tick ~= 0.998001 per MC tick
+            preCycleRainPulseScale *= 0.998001f;
+        } else {
+            preCycleRainPulseScale = 0.0f;
+        }
+    }
+
+    public void setForceSlowFlood(boolean forceSlowFlood) {
+        this.forceSlowFlood = forceSlowFlood;
     }
 
     public float getIntensity() {
@@ -612,109 +536,35 @@ public class GlobalRain {
         return waterFluxTicker;
     }
 
-    public int getBulletTimer() {
-        return bulletTimer;
+    public float getLastRainDirection() {
+        return lastRainDirection;
     }
 
-    public int getHeavyTimer() {
-        return heavyTimer;
+    public float getRainDirection() {
+        return rainDirection;
     }
 
-    public boolean isForcedRain() {
-        return forcedRain;
+    public float getDrainWorldDrainSpeed() {
+        return drainWorldDrainSpeed;
     }
 
-    public boolean isArenaStyleDeathRain() {
-        return arenaStyleDeathRain;
+    public void setDrainWorldDrainSpeed(float drainWorldDrainSpeed) {
+        this.drainWorldDrainSpeed = drainWorldDrainSpeed;
     }
 
-    public boolean isCyclePaused() {
-        return cyclePaused;
+    public float getDrainWorldFlood() {
+        return drainWorldFlood;
     }
 
-    public void setCyclePaused(boolean cyclePaused) {
-        this.cyclePaused = cyclePaused;
+    public void setDrainWorldFlood(float drainWorldFlood) {
+        this.drainWorldFlood = drainWorldFlood;
     }
 
-    public int getTimeUntilRainTicks40() {
-        return timeUntilRainTicks40;
+    public int getDrainWorldFastDrainCounter() {
+        return drainWorldFastDrainCounter;
     }
 
-    public int getTimeUntilRainTicks20() {
-        return Math.round(timeUntilRainTicks40 / 2.0f);
-    }
-
-    public void setTimeUntilRainTicks40(int timeUntilRainTicks40) {
-        this.timeUntilRainTicks40 = timeUntilRainTicks40;
-    }
-
-    public void setTimeUntilRainTicks20(int timeUntilRainTicks20) {
-        this.timeUntilRainTicks40 = timeUntilRainTicks20 * 2;
-    }
-
-    public void addTimeUntilRainTicks40(int delta40) {
-        this.timeUntilRainTicks40 += delta40;
-    }
-
-    public void addTimeUntilRainTicks20(int delta20) {
-        this.timeUntilRainTicks40 += delta20 * 2;
-    }
-
-    public void setPreCycleRainPulse(float intensity, float scale) {
-        this.preCycleRainPulseIntensity = intensity;
-        this.preCycleRainPulseScale = scale;
-    }
-
-    public void clearPreCycleRainPulse() {
-        this.preCycleRainPulseIntensity = 0.0f;
-        this.preCycleRainPulseScale = 0.0f;
-    }
-
-    public void setForceSlowFlood(boolean forceSlowFlood) {
-        this.forceSlowFlood = forceSlowFlood;
-    }
-
-    public boolean isForceSlowFlood() {
-        return forceSlowFlood;
-    }
-
-    public void setCustomRainProfile(float lightRain,
-                                     float heavyRain,
-                                     float heavyRainFlux,
-                                     float bulletRain,
-                                     float bulletRainFlux) {
-        this.hasCustomRainProfile = true;
-        this.customLightRain = lightRain;
-        this.customHeavyRain = heavyRain;
-        this.customHeavyRainFlux = heavyRainFlux;
-        this.customBulletRain = bulletRain;
-        this.customBulletRainFlux = bulletRainFlux;
-    }
-
-    public void clearCustomRainProfile() {
-        this.hasCustomRainProfile = false;
-        this.customLightRain = 0.0f;
-        this.customHeavyRain = 0.0f;
-        this.customHeavyRainFlux = 0.0f;
-        this.customBulletRain = 0.0f;
-        this.customBulletRainFlux = 0.0f;
-    }
-
-    public boolean hasCustomRainProfile() {
-        return hasCustomRainProfile;
-    }
-
-    public void setCustomRainApproaching(float rainApproaching) {
-        this.hasCustomRainApproaching = true;
-        this.customRainApproaching = rainApproaching;
-    }
-
-    public void clearCustomRainApproaching() {
-        this.hasCustomRainApproaching = false;
-        this.customRainApproaching = 0.0f;
-    }
-
-    public boolean hasCustomRainApproaching() {
-        return hasCustomRainApproaching;
+    public void setDrainWorldFastDrainCounter(int drainWorldFastDrainCounter) {
+        this.drainWorldFastDrainCounter = Math.max(0, drainWorldFastDrainCounter);
     }
 }
