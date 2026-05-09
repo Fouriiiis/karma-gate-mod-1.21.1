@@ -15,6 +15,7 @@ import dev.fouriis.karmagate.client.wormgrass.WormGrassRenderCache;
 import dev.fouriis.karmagate.client.wormgrass.WormGrassWorldRenderer;
 import dev.fouriis.karmagate.client.cubefold.CubeFoldEffect;
 import dev.fouriis.karmagate.client.graffiti.GraffitiEntityRenderer;
+import dev.fouriis.karmagate.client.room.RoomMapScreen;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
 import dev.fouriis.karmagate.entity.centipede.CentiwingEntityRenderer;
 import dev.fouriis.karmagate.entity.centipede.CentipedeBodyRenderer;
@@ -37,6 +38,7 @@ import dev.fouriis.karmagate.entity.karmagate.WaterStreamBlockEntity;
 import dev.fouriis.karmagate.entity.spider.SpiderEntityRenderer;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugRenderer;
 import dev.fouriis.karmagate.hologram.HologramProjectorRenderer;
+import dev.fouriis.karmagate.client.room.RoomOverlayRenderer;
 import dev.fouriis.karmagate.item.KarmaGateItemGeoRenderer;
 import dev.fouriis.karmagate.item.tool.CoralNeuronClientDefinition;
 import dev.fouriis.karmagate.item.tool.ProjectionZoneClientDefinition;
@@ -61,6 +63,9 @@ import net.fabricmc.fabric.api.client.rendering.v1.DimensionRenderingRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.util.InputUtil;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.DoorBlock;
@@ -73,11 +78,14 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 import software.bernie.geckolib.renderer.GeoItemRenderer;
+import org.lwjgl.glfw.GLFW;
 
 import java.util.HashMap;
 import java.util.Map;
 
 public class KarmaGateModClient implements ClientModInitializer {
+	private static KeyBinding ROOM_MAP_KEY;
+
 	@Override
 	public void onInitializeClient() {
 		// This entrypoint is suitable for setting up client-specific logic, such as rendering.
@@ -86,6 +94,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		// Register client networking
 		ClientNetworking.register();
+		RoomOverlayRenderer.register();
 
 		// Register distant structure billboards
 		//dev.fouriis.karmagate.client.DistantStructuresRenderer.init();
@@ -309,6 +318,23 @@ public class KarmaGateModClient implements ClientModInitializer {
 			NeuronSwarmerManager.getInstance().tick();
 			// Update coral neuron endpoint circles
 			CoralNeuronCircleManager.getInstance().tick();
+		});
+
+		ROOM_MAP_KEY = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+			"key.karma-gate-mod.room_map",
+			InputUtil.Type.KEYSYM,
+			GLFW.GLFW_KEY_M,
+			"key.categories.misc"
+		));
+
+		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			while (ROOM_MAP_KEY.wasPressed()) {
+				if (client.currentScreen instanceof RoomMapScreen) {
+					client.setScreen(null);
+				} else {
+					client.setScreen(new RoomMapScreen());
+				}
+			}
 		});
 
 		// Clear cached loop references on disconnect or new join to avoid stale sound state after rejoin

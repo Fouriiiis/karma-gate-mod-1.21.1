@@ -1,9 +1,13 @@
 package dev.fouriis.karmagate.client.network;
 
 import dev.fouriis.karmagate.client.gridproject.ProjectionZone;
+import dev.fouriis.karmagate.client.room.RoomClientState;
+import dev.fouriis.karmagate.client.room.RoomSelectionClientState;
 import dev.fouriis.karmagate.client.weather.GlobalRainClientState;
 import dev.fouriis.karmagate.network.GlobalRainSyncPayload;
 import dev.fouriis.karmagate.network.ProjectionZoneSyncPayload;
+import dev.fouriis.karmagate.network.RoomSelectionSyncPayload;
+import dev.fouriis.karmagate.network.RoomSyncPayload;
 import dev.fouriis.karmagate.network.UpdateBarrierPlatformPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.util.math.BlockPos;
@@ -29,6 +33,20 @@ public class ClientNetworking {
                     applyZoneSync(payload);
                 });
             }
+        );
+
+        ClientPlayNetworking.registerGlobalReceiver(
+            RoomSyncPayload.ID,
+            (payload, context) -> context.client().execute(() ->
+                RoomClientState.applySync(payload)
+            )
+        );
+
+        ClientPlayNetworking.registerGlobalReceiver(
+            RoomSelectionSyncPayload.ID,
+            (payload, context) -> context.client().execute(() ->
+                RoomSelectionClientState.applySync(payload)
+            )
         );
 
         ClientPlayNetworking.registerGlobalReceiver(

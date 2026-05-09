@@ -3,6 +3,7 @@ package dev.fouriis.karmagate;
 import dev.fouriis.karmagate.block.ModBlocks;
 import dev.fouriis.karmagate.command.CoralNeuronCommands;
 import dev.fouriis.karmagate.command.ProjectionZoneCommands;
+import dev.fouriis.karmagate.command.RoomCommands;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
 import dev.fouriis.karmagate.entity.centipede.CentipedeBodyEntity;
@@ -24,10 +25,13 @@ import dev.fouriis.karmagate.network.ModNetworking;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.ModSounds;
 import dev.fouriis.karmagate.rain.RainCycle;
+import dev.fouriis.karmagate.room.RoomSelection;
+import dev.fouriis.karmagate.room.RoomSelectionManager;
 import net.brickcraftdream.librainworldmc.tool.api.SelectionToolRegistry;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
@@ -40,6 +44,8 @@ import net.minecraft.util.Identifier;
 import net.minecraft.block.DoorBlock;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
+import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.text.Text;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -216,6 +222,7 @@ public class KarmaGateMod implements ModInitializer {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
             ProjectionZoneCommands.register(dispatcher);
             CoralNeuronCommands.register(dispatcher);
+                        RoomCommands.register(dispatcher);
                         
         });
 
@@ -224,6 +231,23 @@ public class KarmaGateMod implements ModInitializer {
         // Wormgrass server-side grab / bury tick
         ServerTickEvents.END_WORLD_TICK.register(world ->
                 dev.fouriis.karmagate.block.WormGrassManager.tick(world));
+
+                // Room tool: left-click sets corner A
+                AttackBlockCallback.EVENT.register((player, world, hand, pos, direction) -> {
+                        if (world.isClient) {
+                                return ActionResult.PASS;
+                        }
+                        if (!player.getStackInHand(hand).isOf(ModItems.ROOM_TOOL)) {
+                                return ActionResult.PASS;
+                        }
+                        if (!(player instanceof ServerPlayerEntity serverPlayer)) {
+                                return ActionResult.PASS;
+                        }
+                        RoomSelection selection = RoomSelectionManager.setCorner1(serverPlayer, pos);
+                        ModNetworking.syncRoomSelectionToPlayer(serverPlayer, selection);
+                        serverPlayer.sendMessage(Text.literal("Room corner A set to " + pos.getX() + ", " + pos.getY() + ", " + pos.getZ()), true);
+                        return ActionResult.SUCCESS;
+                });
 
         // Server-side door interaction cancellation
         UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
