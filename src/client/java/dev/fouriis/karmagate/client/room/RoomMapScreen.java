@@ -69,6 +69,25 @@ public class RoomMapScreen extends Screen {
     private static final float SOLID_FILL_B = 0.28f;
     private static final float SOLID_FILL_A = 0.45f;
 
+    private static final float INACTIVE_MAP_R = 0.34f;
+    private static final float INACTIVE_MAP_G = 0.45f;
+    private static final float INACTIVE_MAP_B = 0.48f;
+
+    private static final float INACTIVE_DIM_R = 0.04f;
+    private static final float INACTIVE_DIM_G = 0.07f;
+    private static final float INACTIVE_DIM_B = 0.08f;
+
+    private static final float INACTIVE_SOLID_FILL_R = 0.08f;
+    private static final float INACTIVE_SOLID_FILL_G = 0.11f;
+    private static final float INACTIVE_SOLID_FILL_B = 0.12f;
+    private static final float INACTIVE_SOLID_FILL_A = 0.24f;
+
+    // The invisible selection slab used to decide which rooms are active.
+    // It follows the map yaw, keeps world-locked vertical pitch, is 6 blocks deep,
+    // and extends 1000 blocks from the view center along its width and height.
+    private static final double ACTIVE_SLAB_DEPTH_BLOCKS = 6.0;
+    private static final double ACTIVE_SLAB_HALF_EXTENT_BLOCKS = 1000.0;
+
     private static final double ROOM_MASK_STEP = 1.0;
 
     // The C# map reveals a small patch around the player immediately, then floods outward.
@@ -212,15 +231,34 @@ public class RoomMapScreen extends Screen {
         // but with a rotated GUI-space 3D transform it can become grainy or nearly
         // invisible at certain angles. The projection still uses yaw/pitch, but each
         // line is rasterized as a stable 2D quad after projection.
-        drawBackdropCutout(matrix, delta);
-        BufferBuilder solids = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        drawSolidBlockFill(solids, matrix, delta);
-        BufferRenderer.drawWithGlobalProgram(solids.end());
-        BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        drawRevealWave(buffer, matrix, delta);
-        drawRoomGeometry(buffer, matrix, delta);
-        drawPlayerMarker(buffer, matrix, delta);
-        BufferRenderer.drawWithGlobalProgram(buffer.end());
+        RoomActivity activity = computeRoomActivity();
+
+        drawBackdropCutout(matrix, delta, activity);
+
+        // Inactive geometry is drawn first, but with an active-room depth clip.
+        // This hides inactive fills/lines wherever an active room stencil exists,
+        // without drawing a black color occluder into the framebuffer.
+        beginActiveRoomDepthClip(matrix, delta, activity);
+
+        BufferBuilder inactiveSolids = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+        drawSolidBlockFill(inactiveSolids, matrix, delta, activity, false);
+        BufferRenderer.drawWithGlobalProgram(inactiveSolids.end());
+
+        BufferBuilder inactiveLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+        drawRevealWave(inactiveLines, matrix, delta);
+        drawRoomGeometry(inactiveLines, matrix, delta, activity, false);
+        BufferRenderer.drawWithGlobalProgram(inactiveLines.end());
+
+        endActiveRoomDepthClip();
+
+        BufferBuilder activeSolids = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+        drawSolidBlockFill(activeSolids, matrix, delta, activity, true);
+        BufferRenderer.drawWithGlobalProgram(activeSolids.end());
+
+        BufferBuilder activeLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+        drawRoomGeometry(activeLines, matrix, delta, activity, true);
+        drawPlayerMarker(activeLines, matrix, delta);
+        BufferRenderer.drawWithGlobalProgram(activeLines.end());
 
         matrices.pop();
 
@@ -282,7 +320,7 @@ public class RoomMapScreen extends Screen {
     }
 
 
-    private void drawRoomGeometry(VertexConsumer buffer, Matrix4f matrix, float delta) {
+    private void drawRoomGeometry(VertexConsumer buffer, Matrix4f matrix, float delta, RoomActivity activity, boolean activePass) {
         double visibleRadius = lerpDouble(lastRevealRadius, revealRadius, delta);
         float fadeTicks = Math.max(
             LINE_FADE_MIN_TICKS,
@@ -290,10 +328,13 @@ public class RoomMapScreen extends Screen {
         );
 
         for (MapLine line : roomLines) {
+            if (isLineActive(line, activity) != activePass) {
+                continue;
+            }
             if (!lineHasFacingFace(line)) {
                 continue;
             }
-            drawPartiallyRevealedLine(buffer, matrix, line, visibleRadius, delta, fadeTicks);
+            drawPartiallyRevealedLine(buffer, matrix, line, visibleRadius, delta, fadeTicks, activePass);
         }
     }
 
@@ -302,7 +343,8 @@ public class RoomMapScreen extends Screen {
                                            MapLine line,
                                            double visibleRadius,
                                            float delta,
-                                           float fadeTicks) {
+                                           float fadeTicks,
+                                           boolean active) {
         double ax = line.x1World();
         double ay = line.y1World();
         double az = line.z1World();
@@ -337,14 +379,14 @@ public class RoomMapScreen extends Screen {
         double prevX = lerpDouble(ax, bx, prevT);
         double prevY = lerpDouble(ay, by, prevT);
         double prevZ = lerpDouble(az, bz, prevT);
-        PointReveal prevReveal = pointReveal(prevX, prevY, prevZ, visibleRadius, delta, fadeTicks);
+        PointReveal prevReveal = adjustedPointReveal(pointReveal(prevX, prevY, prevZ, visibleRadius, delta, fadeTicks), active);
 
         for (int i = 1; i <= pieces; i++) {
             double nextT = lerpDouble(t0, t1, (double) i / pieces);
             double nextX = lerpDouble(ax, bx, nextT);
             double nextY = lerpDouble(ay, by, nextT);
             double nextZ = lerpDouble(az, bz, nextT);
-            PointReveal nextReveal = pointReveal(nextX, nextY, nextZ, visibleRadius, delta, fadeTicks);
+            PointReveal nextReveal = adjustedPointReveal(pointReveal(nextX, nextY, nextZ, visibleRadius, delta, fadeTicks), active);
 
             if (prevReveal.alpha > 0.001f || nextReveal.alpha > 0.001f) {
                 drawRawLineGradient(
@@ -357,16 +399,20 @@ public class RoomMapScreen extends Screen {
                 );
 
                 // A subtle delayed shadow makes the reveal front read like the C# map's soft fade pixels.
-                float shadowA0 = prevReveal.front * 0.055f;
-                float shadowA1 = nextReveal.front * 0.055f;
+                float shadowScale = active ? 0.055f : 0.030f;
+                float shadowA0 = prevReveal.front * shadowScale;
+                float shadowA1 = nextReveal.front * shadowScale;
                 if (shadowA0 > 0.001f || shadowA1 > 0.001f) {
+                    float shadowR = active ? DIM_R : INACTIVE_DIM_R;
+                    float shadowG = active ? DIM_G : INACTIVE_DIM_G;
+                    float shadowB = active ? DIM_B : INACTIVE_DIM_B;
                     drawRawLineGradient(
                         buffer,
                         matrix,
                         prevX, prevY, prevZ,
                         nextX, nextY, nextZ,
-                        DIM_R, DIM_G, DIM_B, shadowA0,
-                        DIM_R, DIM_G, DIM_B, shadowA1
+                        shadowR, shadowG, shadowB, shadowA0,
+                        shadowR, shadowG, shadowB, shadowA1
                     );
                 }
             }
@@ -404,6 +450,18 @@ public class RoomMapScreen extends Screen {
         float b = lerp(MAP_B, WHITE_B, fresh);
         float a = visibility * (0.22f + 0.73f * fade + 0.18f * fresh);
         return new PointReveal(r, g, b, a, front);
+    }
+
+    private PointReveal adjustedPointReveal(PointReveal reveal, boolean active) {
+        if (active || reveal.alpha <= 0.0f) {
+            return reveal;
+        }
+
+        float gray = reveal.r * 0.2126f + reveal.g * 0.7152f + reveal.b * 0.0722f;
+        float r = lerp(gray, INACTIVE_MAP_R, 0.62f);
+        float g = lerp(gray, INACTIVE_MAP_G, 0.62f);
+        float b = lerp(gray, INACTIVE_MAP_B, 0.62f);
+        return new PointReveal(r, g, b, reveal.alpha * 0.48f, reveal.front * 0.65f);
     }
 
     private void drawPlayerMarker(VertexConsumer buffer, Matrix4f matrix, float delta) {
@@ -1261,7 +1319,154 @@ public class RoomMapScreen extends Screen {
         return new ProjectedPoint(sx, sy);
     }
 
-    private void drawBackdropCutout(Matrix4f matrix, float delta) {
+    private RoomActivity computeRoomActivity() {
+        boolean[] activeRooms = new boolean[roomBounds.size()];
+        for (int i = 0; i < roomBounds.size(); i++) {
+            activeRooms[i] = roomIntersectsActiveSlab(roomBounds.get(i));
+        }
+        return new RoomActivity(activeRooms);
+    }
+
+    private boolean roomIntersectsActiveSlab(RoomBounds room) {
+        // projectPoint() centers a world coordinate when:
+        // world - focus + pan == 0, so the current map view center is focus - pan.
+        double centerX = focusX - panX;
+        double centerY = focusY - panY;
+        double centerZ = focusZ - panZ;
+
+        double yawRad = Math.toRadians(yaw);
+        double yawCos = Math.cos(yawRad);
+        double yawSin = Math.sin(yawRad);
+
+        // Same yaw basis as the map projection, but with world-locked vertical pitch.
+        double rightX = yawCos;
+        double rightY = 0.0;
+        double rightZ = yawSin;
+        double depthX = -yawSin;
+        double depthY = 0.0;
+        double depthZ = yawCos;
+        double upX = 0.0;
+        double upY = 1.0;
+        double upZ = 0.0;
+
+        double roomCenterX = (room.x0 + room.x1) * INV_SHAPE_UNIT * 0.5;
+        double roomCenterY = (room.y0 + room.y1) * INV_SHAPE_UNIT * 0.5;
+        double roomCenterZ = (room.z0 + room.z1) * INV_SHAPE_UNIT * 0.5;
+        double extentX = Math.max(0.0, (room.x1 - room.x0) * INV_SHAPE_UNIT * 0.5);
+        double extentY = Math.max(0.0, (room.y1 - room.y0) * INV_SHAPE_UNIT * 0.5);
+        double extentZ = Math.max(0.0, (room.z1 - room.z0) * INV_SHAPE_UNIT * 0.5);
+
+        double dx = roomCenterX - centerX;
+        double dy = roomCenterY - centerY;
+        double dz = roomCenterZ - centerZ;
+
+        double roomDepthCenter = dx * depthX + dy * depthY + dz * depthZ;
+        double roomRightCenter = dx * rightX + dy * rightY + dz * rightZ;
+        double roomUpCenter = dx * upX + dy * upY + dz * upZ;
+
+        double roomDepthExtent = Math.abs(depthX) * extentX + Math.abs(depthY) * extentY + Math.abs(depthZ) * extentZ;
+        double roomRightExtent = Math.abs(rightX) * extentX + Math.abs(rightY) * extentY + Math.abs(rightZ) * extentZ;
+        double roomUpExtent = Math.abs(upX) * extentX + Math.abs(upY) * extentY + Math.abs(upZ) * extentZ;
+
+        double halfDepth = ACTIVE_SLAB_DEPTH_BLOCKS * 0.5;
+        double halfExtent = ACTIVE_SLAB_HALF_EXTENT_BLOCKS;
+
+        return Math.abs(roomDepthCenter) <= halfDepth + roomDepthExtent
+            && Math.abs(roomRightCenter) <= halfExtent + roomRightExtent
+            && Math.abs(roomUpCenter) <= halfExtent + roomUpExtent;
+    }
+
+    private boolean isFaceActive(MapFace face, RoomActivity activity) {
+        for (int i = 0; i < roomBounds.size(); i++) {
+            if (activity.activeRooms[i] && faceIntersectsRoom(face, roomBounds.get(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isLineActive(MapLine line, RoomActivity activity) {
+        for (int i = 0; i < roomBounds.size(); i++) {
+            if (activity.activeRooms[i] && lineIntersectsRoom(line, roomBounds.get(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean faceIntersectsRoom(MapFace face, RoomBounds room) {
+        double minX;
+        double minY;
+        double minZ;
+        double maxX;
+        double maxY;
+        double maxZ;
+
+        switch (face.axis) {
+            case X -> {
+                minX = face.planeWorld();
+                maxX = minX;
+                minY = Math.min(face.a0World(), face.a1World());
+                maxY = Math.max(face.a0World(), face.a1World());
+                minZ = Math.min(face.b0World(), face.b1World());
+                maxZ = Math.max(face.b0World(), face.b1World());
+            }
+            case Y -> {
+                minX = Math.min(face.a0World(), face.a1World());
+                maxX = Math.max(face.a0World(), face.a1World());
+                minY = face.planeWorld();
+                maxY = minY;
+                minZ = Math.min(face.b0World(), face.b1World());
+                maxZ = Math.max(face.b0World(), face.b1World());
+            }
+            case Z -> {
+                minX = Math.min(face.a0World(), face.a1World());
+                maxX = Math.max(face.a0World(), face.a1World());
+                minY = Math.min(face.b0World(), face.b1World());
+                maxY = Math.max(face.b0World(), face.b1World());
+                minZ = face.planeWorld();
+                maxZ = minZ;
+            }
+            default -> {
+                return false;
+            }
+        }
+
+        return boxesOverlapInclusive(
+            minX, minY, minZ,
+            maxX, maxY, maxZ,
+            room.x0World(), room.y0World(), room.z0World(),
+            room.x1World(), room.y1World(), room.z1World()
+        );
+    }
+
+    private boolean lineIntersectsRoom(MapLine line, RoomBounds room) {
+        double minX = Math.min(line.x1World(), line.x2World());
+        double minY = Math.min(line.y1World(), line.y2World());
+        double minZ = Math.min(line.z1World(), line.z2World());
+        double maxX = Math.max(line.x1World(), line.x2World());
+        double maxY = Math.max(line.y1World(), line.y2World());
+        double maxZ = Math.max(line.z1World(), line.z2World());
+
+        return boxesOverlapInclusive(
+            minX, minY, minZ,
+            maxX, maxY, maxZ,
+            room.x0World(), room.y0World(), room.z0World(),
+            room.x1World(), room.y1World(), room.z1World()
+        );
+    }
+
+    private static boolean boxesOverlapInclusive(double ax0, double ay0, double az0,
+                                                 double ax1, double ay1, double az1,
+                                                 double bx0, double by0, double bz0,
+                                                 double bx1, double by1, double bz1) {
+        double epsilon = 1.0e-5;
+        return ax0 <= bx1 + epsilon && ax1 + epsilon >= bx0
+            && ay0 <= by1 + epsilon && ay1 + epsilon >= by0
+            && az0 <= bz1 + epsilon && az1 + epsilon >= bz0;
+    }
+
+    private void drawBackdropCutout(Matrix4f matrix, float delta, RoomActivity activity) {
         if (roomBounds.isEmpty()) {
             drawBackdropOnly(matrix);
             return;
@@ -1280,12 +1485,14 @@ public class RoomMapScreen extends Screen {
         RenderSystem.colorMask(false, false, false, false);
 
         BufferBuilder mask = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        drawRoomStencilMask(mask, matrix, visibleRadius, delta, fadeTicks);
+        drawRoomStencilMask(mask, matrix, visibleRadius, delta, fadeTicks, activity, false);
+        drawRoomStencilMask(mask, matrix, visibleRadius, delta, fadeTicks, activity, true);
         BufferRenderer.drawWithGlobalProgram(mask.end());
 
         GL11.glDepthFunc(GL11.GL_ALWAYS);
         BufferBuilder solids = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        drawSolidBlockDepthReset(solids, matrix, delta);
+        drawSolidBlockDepthReset(solids, matrix, delta, activity, false);
+        drawSolidBlockDepthReset(solids, matrix, delta, activity, true);
         BufferRenderer.drawWithGlobalProgram(solids.end());
         GL11.glDepthFunc(GL11.GL_LESS);
 
@@ -1308,14 +1515,50 @@ public class RoomMapScreen extends Screen {
         BufferRenderer.drawWithGlobalProgram(backdrop.end());
     }
 
+    private void beginActiveRoomDepthClip(Matrix4f matrix, float delta, RoomActivity activity) {
+        double visibleRadius = lerpDouble(lastRevealRadius, revealRadius, delta);
+        float fadeTicks = Math.max(
+            LINE_FADE_MIN_TICKS,
+            roomLines.size() * LINE_FADE_PER_SIZE_FACTOR
+        );
+
+        // Use the active room mask only as a depth clip. This prevents inactive
+        // geometry from drawing through active room cutouts, but it does not paint
+        // the active stencil black into the color buffer.
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthMask(true);
+        RenderSystem.clear(GL11.GL_DEPTH_BUFFER_BIT, false);
+        GL11.glDepthFunc(GL11.GL_LESS);
+        RenderSystem.colorMask(false, false, false, false);
+
+        BufferBuilder mask = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+        drawRoomStencilMask(mask, matrix, visibleRadius, delta, fadeTicks, activity, true);
+        BufferRenderer.drawWithGlobalProgram(mask.end());
+
+        RenderSystem.colorMask(true, true, true, true);
+        RenderSystem.depthMask(false);
+        GL11.glDepthFunc(GL11.GL_LESS);
+    }
+
+    private void endActiveRoomDepthClip() {
+        RenderSystem.depthMask(true);
+        RenderSystem.disableDepthTest();
+    }
+
     private void drawRoomStencilMask(VertexConsumer buffer, Matrix4f matrix,
-                                     double visibleRadius, float delta, float fadeTicks) {
+                                     double visibleRadius, float delta, float fadeTicks,
+                                     RoomActivity activity, boolean activePass) {
         buffer.vertex(matrix, -10000.0f, -10000.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
         buffer.vertex(matrix, -10000.0f, -10001.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
         buffer.vertex(matrix, -10001.0f, -10001.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
         buffer.vertex(matrix, -10001.0f, -10000.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
 
-        for (RoomBounds room : roomBounds) {
+        for (int i = 0; i < roomBounds.size(); i++) {
+            if (activity.activeRooms[i] != activePass) {
+                continue;
+            }
+
+            RoomBounds room = roomBounds.get(i);
             double x0 = room.x0 * INV_SHAPE_UNIT;
             double y0 = room.y0 * INV_SHAPE_UNIT;
             double z0 = room.z0 * INV_SHAPE_UNIT;
@@ -1409,13 +1652,17 @@ public class RoomMapScreen extends Screen {
         }
     }
 
-    private void drawSolidBlockDepthReset(VertexConsumer buffer, Matrix4f matrix, float delta) {
+    private void drawSolidBlockDepthReset(VertexConsumer buffer, Matrix4f matrix, float delta, RoomActivity activity, boolean activePass) {
         buffer.vertex(matrix, -10000.0f, -10000.0f, 1.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
         buffer.vertex(matrix, -10000.0f, -10001.0f, 1.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
         buffer.vertex(matrix, -10001.0f, -10001.0f, 1.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
         buffer.vertex(matrix, -10001.0f, -10000.0f, 1.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
 
         for (MapFace face : roomFaces) {
+            if (isFaceActive(face, activity) != activePass) {
+                continue;
+            }
+
             float reveal = MathHelper.lerp(delta, face.lastReveal, face.reveal);
             if (reveal <= 0.01f) {
                 continue;
@@ -1465,19 +1712,26 @@ public class RoomMapScreen extends Screen {
         }
     }
 
-    private void drawSolidBlockFill(VertexConsumer buffer, Matrix4f matrix, float delta) {
+    private void drawSolidBlockFill(VertexConsumer buffer, Matrix4f matrix, float delta, RoomActivity activity, boolean activePass) {
         buffer.vertex(matrix, -10000.0f, -10000.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
         buffer.vertex(matrix, -10000.0f, -10001.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
         buffer.vertex(matrix, -10001.0f, -10001.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
         buffer.vertex(matrix, -10001.0f, -10000.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
 
         for (MapFace face : roomFaces) {
+            if (isFaceActive(face, activity) != activePass) {
+                continue;
+            }
+
             float reveal = MathHelper.lerp(delta, face.lastReveal, face.reveal);
             if (reveal <= 0.01f) {
                 continue;
             }
 
-            float alpha = SOLID_FILL_A * reveal;
+            float fillR = activePass ? SOLID_FILL_R : INACTIVE_SOLID_FILL_R;
+            float fillG = activePass ? SOLID_FILL_G : INACTIVE_SOLID_FILL_G;
+            float fillB = activePass ? SOLID_FILL_B : INACTIVE_SOLID_FILL_B;
+            float alpha = (activePass ? SOLID_FILL_A : INACTIVE_SOLID_FILL_A) * reveal;
 
             switch (face.axis) {
                 case X -> {
@@ -1491,7 +1745,7 @@ public class RoomMapScreen extends Screen {
                         x, y1, z0,
                         x, y1, z1,
                         x, y0, z1,
-                        SOLID_FILL_R, SOLID_FILL_G, SOLID_FILL_B, alpha);
+                        fillR, fillG, fillB, alpha);
                 }
                 case Y -> {
                     double y = face.planeWorld();
@@ -1504,7 +1758,7 @@ public class RoomMapScreen extends Screen {
                         x1, y, z0,
                         x1, y, z1,
                         x0, y, z1,
-                        SOLID_FILL_R, SOLID_FILL_G, SOLID_FILL_B, alpha);
+                        fillR, fillG, fillB, alpha);
                 }
                 case Z -> {
                     double z = face.planeWorld();
@@ -1517,7 +1771,7 @@ public class RoomMapScreen extends Screen {
                         x1, y0, z,
                         x1, y1, z,
                         x0, y1, z,
-                        SOLID_FILL_R, SOLID_FILL_G, SOLID_FILL_B, alpha);
+                        fillR, fillG, fillB, alpha);
                 }
             }
         }
@@ -1921,6 +2175,32 @@ public class RoomMapScreen extends Screen {
     }
 
     private record RoomBounds(int x0, int y0, int z0, int x1, int y1, int z1) {
+        private double x0World() {
+            return x0 * INV_SHAPE_UNIT;
+        }
+
+        private double y0World() {
+            return y0 * INV_SHAPE_UNIT;
+        }
+
+        private double z0World() {
+            return z0 * INV_SHAPE_UNIT;
+        }
+
+        private double x1World() {
+            return x1 * INV_SHAPE_UNIT;
+        }
+
+        private double y1World() {
+            return y1 * INV_SHAPE_UNIT;
+        }
+
+        private double z1World() {
+            return z1 * INV_SHAPE_UNIT;
+        }
+    }
+
+    private record RoomActivity(boolean[] activeRooms) {
     }
 
     private record IntRange(int start, int end) {
