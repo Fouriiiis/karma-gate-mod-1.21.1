@@ -1,23 +1,22 @@
 package dev.fouriis.karmagate.client.room;
 
 import com.mojang.blaze3d.systems.RenderSystem;
+import net.brickcraftdream.librainworldmc.client.render.capture.FramebufferCaptureHelper;
+import net.brickcraftdream.librainworldmc.client.render.capture.FramebufferRenderer;
+import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
+import net.brickcraftdream.librainworldmc.client.util.TextureUtils;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gl.Framebuffer;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
-import net.minecraft.client.render.BufferBuilder;
-import net.minecraft.client.render.BufferRenderer;
-import net.minecraft.client.render.GameRenderer;
-import net.minecraft.client.render.Tessellator;
-import net.minecraft.client.render.VertexFormat;
-import net.minecraft.client.render.VertexFormats;
-import net.minecraft.client.render.RenderLayer;
-import net.minecraft.client.render.VertexConsumer;
-import net.minecraft.client.render.VertexConsumerProvider;
+import net.minecraft.client.render.*;
+import net.minecraft.client.texture.NativeImage;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.text.Text;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.RotationAxis;
@@ -30,6 +29,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import static net.brickcraftdream.librainworldmc.Librainworldmc.MOD_ID;
+import static net.minecraft.client.MinecraftClient.IS_SYSTEM_MAC;
 
 /**
  * C# Rain World-style map screen, translated to a 3D Minecraft room view.
@@ -212,10 +214,7 @@ public class RoomMapScreen extends Screen {
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         // Stencil-cutout backdrop outside the room volume.
 
-        if (!hasRooms) {
-            context.drawCenteredTextWithShadow(textRenderer, Text.literal("No rooms"), this.width / 2, this.height / 2 - 4, 0xFFFFFFFF);
-            return;
-        }
+        FramebufferRenderer fbRenderer = new FramebufferRenderer("room_map");
 
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
@@ -223,43 +222,88 @@ public class RoomMapScreen extends Screen {
         RenderSystem.disableCull();
         RenderSystem.setShader(GameRenderer::getPositionColorProgram);
 
+        fbRenderer.render(drawContext -> {
+            if (!hasRooms) {
+                drawContext.drawCenteredTextWithShadow(textRenderer, Text.literal("No rooms"), this.width / 2, this.height / 2 - 4, 0xFFFFFFFF);
+                return;
+            }
+
+            MatrixStack matrices = drawContext.getMatrices();
+            matrices.push();
+            Matrix4f matrix = matrices.peek().getPositionMatrix();
+
+            // Use our own screen-space quad lines. RenderLayer.getLines() is convenient,
+            // but with a rotated GUI-space 3D transform it can become grainy or nearly
+            // invisible at certain angles. The projection still uses yaw/pitch, but each
+            // line is rasterized as a stable 2D quad after projection.
+            RoomActivity activity = computeRoomActivity();
+
+            drawBackdropCutout(matrix, delta, activity);
+
+            // Inactive geometry is drawn first, but with an active-room depth clip.
+            // This hides inactive fills/lines wherever an active room stencil exists,
+            // without drawing a black color occluder into the framebuffer.
+            beginActiveRoomDepthClip(matrix, delta, activity);
+
+            BufferBuilder inactiveSolids = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+            drawSolidBlockFill(inactiveSolids, matrix, delta, activity, false);
+            BuiltBuffer inactiveSolidBuffer = inactiveSolids.endNullable();
+            if(inactiveSolidBuffer != null) {
+                BufferRenderer.drawWithGlobalProgram(inactiveSolidBuffer);
+            }
+
+            BufferBuilder inactiveLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+            drawRevealWave(inactiveLines, matrix, delta);
+            drawRoomGeometry(inactiveLines, matrix, delta, activity, false);
+            BuiltBuffer inactiveLineBuffer = inactiveLines.endNullable();
+            if(inactiveLineBuffer != null) {
+                BufferRenderer.drawWithGlobalProgram(inactiveLineBuffer);
+            }
+
+            endActiveRoomDepthClip();
+
+            BufferBuilder activeSolids = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+            drawSolidBlockFill(activeSolids, matrix, delta, activity, true);
+            BuiltBuffer activeSolidBuffer = activeSolids.endNullable();
+            if(activeSolidBuffer != null) {
+                BufferRenderer.drawWithGlobalProgram(activeSolidBuffer);
+            }
+
+            BufferBuilder activeLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+            drawRoomGeometry(activeLines, matrix, delta, activity, true);
+            drawPlayerMarker(activeLines, matrix, delta);
+            BuiltBuffer activeLineBuffer = activeLines.endNullable();
+            if(activeLineBuffer != null) {
+                BufferRenderer.drawWithGlobalProgram(activeLineBuffer);
+            }
+
+            matrices.pop();
+        });
+
+        //you know what's funny? This will always be false cause people on macs can't use the main shader so it wouldn't make sense for them to play
+        fbRenderer.finish(IS_SYSTEM_MAC);
+
+        //Framebuffer fb = MinecraftClient.getInstance().getFramebuffer();
+        //NativeImage color = FramebufferCaptureHelper.captureColorAttachment(fb, false, true, false);
+        //if(color != null) {
+        //    TextureUtils.registerNativeTexture(Identifier.of("karma-gate-mod", "mapgrabtex"), color);
+        //}
+
         MatrixStack matrices = context.getMatrices();
         matrices.push();
         Matrix4f matrix = matrices.peek().getPositionMatrix();
 
-        // Use our own screen-space quad lines. RenderLayer.getLines() is convenient,
-        // but with a rotated GUI-space 3D transform it can become grainy or nearly
-        // invisible at certain angles. The projection still uses yaw/pitch, but each
-        // line is rasterized as a stable 2D quad after projection.
-        RoomActivity activity = computeRoomActivity();
+        BufferBuilder overlayBuffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+        overlayBuffer.vertex(matrix, 0, 0, 0).color(0xffffffaa);
+        overlayBuffer.vertex(matrix, 0, this.height, 0).color(0xffffffff);
+        overlayBuffer.vertex(matrix, this.width, this.height, 0).color(0xffffffff);
+        overlayBuffer.vertex(matrix, this.width, 0, 0).color(0xffffffff);
+        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
 
-        drawBackdropCutout(matrix, delta, activity);
+        //↓ comment this out if you want to remove the screen warping ↓
+        CoreShaderRenderer.bindShader$SceneFisheye(Identifier.of("librainworldmc", "framebuffer/room_map"));
 
-        // Inactive geometry is drawn first, but with an active-room depth clip.
-        // This hides inactive fills/lines wherever an active room stencil exists,
-        // without drawing a black color occluder into the framebuffer.
-        beginActiveRoomDepthClip(matrix, delta, activity);
-
-        BufferBuilder inactiveSolids = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        drawSolidBlockFill(inactiveSolids, matrix, delta, activity, false);
-        BufferRenderer.drawWithGlobalProgram(inactiveSolids.end());
-
-        BufferBuilder inactiveLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        drawRevealWave(inactiveLines, matrix, delta);
-        drawRoomGeometry(inactiveLines, matrix, delta, activity, false);
-        BufferRenderer.drawWithGlobalProgram(inactiveLines.end());
-
-        endActiveRoomDepthClip();
-
-        BufferBuilder activeSolids = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        drawSolidBlockFill(activeSolids, matrix, delta, activity, true);
-        BufferRenderer.drawWithGlobalProgram(activeSolids.end());
-
-        BufferBuilder activeLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        drawRoomGeometry(activeLines, matrix, delta, activity, true);
-        drawPlayerMarker(activeLines, matrix, delta);
-        BufferRenderer.drawWithGlobalProgram(activeLines.end());
-
+        BufferRenderer.drawWithGlobalProgram(overlayBuffer.end());
         matrices.pop();
 
         RenderSystem.enableCull();

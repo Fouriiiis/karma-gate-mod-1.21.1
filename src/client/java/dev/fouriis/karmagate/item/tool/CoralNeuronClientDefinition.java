@@ -1,6 +1,6 @@
 package dev.fouriis.karmagate.item.tool;
 
-import net.brickcraftdream.librainworldmc.client.api.AreaSettingsScreenProvider;
+import net.brickcraftdream.librainworldmc.client.tool.api.AreaSettingsScreenProvider;
 import net.brickcraftdream.librainworldmc.tool.area.ToolArea;
 import net.minecraft.client.gui.screen.Screen;
 

@@ -32,6 +32,10 @@ repositories {
 			includeGroup "maven.modrinth"
 		}
 	}
+	maven {
+		name = "Ladysnake Mods"
+		url = 'https://maven.ladysnake.org/releases'
+	}
 }
 
 loom {
@@ -58,9 +62,14 @@ dependencies {
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 	modImplementation "software.bernie.geckolib:geckolib-fabric-${minecraft_version}:${geckolib_version}"
 
-	modImplementation "maven.modrinth:librainworldmc:1.2.1"
+	modImplementation "maven.modrinth:librainworldmc:1.2.3"
 	//use a lib mod in the libs folder build\libs\librainworldmc-1.1.1.jar
 	//modImplementation files("libs/librainworldmc-1.1.6.jar")
+	modImplementation files("libs/rw-mechanics-testing-1.21.1-1.7.7.jar")
+
+	//↓ dependencies of mechanics mod ↓
+	modImplementation "org.ladysnake.cardinal-components-api:cardinal-components-base:6.1.2"
+	modImplementation "org.ladysnake.cardinal-components-api:cardinal-components-entity:6.1.2"
 
 	// jcodec: pure-Java MP4/H.264 decoder for graffiti video playback (no native libs required)
 	include implementation('org.jcodec:jcodec:0.2.5')

@@ -7,7 +7,7 @@ import net.brickcraftdream.librainworldmc.client.gui.widgets.labeled.LabeledChec
 import net.brickcraftdream.librainworldmc.client.gui.widgets.labeled.LabeledIntFieldWidget;
 import net.brickcraftdream.librainworldmc.client.gui.widgets.labeled.LabeledTextFieldWidget;
 import net.brickcraftdream.librainworldmc.client.gui.widgets.labeled.LabeledFormWidget;
-import net.brickcraftdream.librainworldmc.client.network.ClientNetworkActions;
+import net.brickcraftdream.librainworldmc.client.tool.ClientNetworkActions;
 import net.brickcraftdream.librainworldmc.tool.area.BoxPrimitive;
 import net.brickcraftdream.librainworldmc.tool.area.ToolArea;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
