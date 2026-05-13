@@ -1,6 +1,7 @@
 package dev.fouriis.karmagate.network;
 
 import dev.fouriis.karmagate.KarmaGateMod;
+import dev.fouriis.karmagate.room.DangerType;
 import dev.fouriis.karmagate.room.RoomData;
 import net.minecraft.network.RegistryByteBuf;
 import net.minecraft.network.codec.PacketCodec;
@@ -39,7 +40,8 @@ public record RoomSyncPayload(List<RoomEntry> rooms) implements CustomPayload {
             entries.add(new RoomEntry(
                 room.name(),
                 room.corner1().getX(), room.corner1().getY(), room.corner1().getZ(),
-                room.corner2().getX(), room.corner2().getY(), room.corner2().getZ()
+                room.corner2().getX(), room.corner2().getY(), room.corner2().getZ(),
+                room.dangerType()
             ));
         }
         return new RoomSyncPayload(entries);
@@ -48,7 +50,16 @@ public record RoomSyncPayload(List<RoomEntry> rooms) implements CustomPayload {
     /**
      * A single room entry for network transmission.
      */
-    public record RoomEntry(String name, int x1, int y1, int z1, int x2, int y2, int z2) {
+    public record RoomEntry(
+        String name,
+        int x1,
+        int y1,
+        int z1,
+        int x2,
+        int y2,
+        int z2,
+        DangerType dangerType
+    ) {
 
         public static final PacketCodec<RegistryByteBuf, RoomEntry> CODEC = new PacketCodec<>() {
             @Override
@@ -60,7 +71,8 @@ public record RoomSyncPayload(List<RoomEntry> rooms) implements CustomPayload {
                 int x2 = buf.readInt();
                 int y2 = buf.readInt();
                 int z2 = buf.readInt();
-                return new RoomEntry(name, x1, y1, z1, x2, y2, z2);
+                DangerType dangerType = DangerType.fromSerialized(PacketCodecs.STRING.decode(buf));
+                return new RoomEntry(name, x1, y1, z1, x2, y2, z2, dangerType);
             }
 
             @Override
@@ -72,6 +84,8 @@ public record RoomSyncPayload(List<RoomEntry> rooms) implements CustomPayload {
                 buf.writeInt(entry.x2());
                 buf.writeInt(entry.y2());
                 buf.writeInt(entry.z2());
+                DangerType dangerType = entry.dangerType() == null ? DangerType.None : entry.dangerType();
+                PacketCodecs.STRING.encode(buf, dangerType.name());
             }
         };
 

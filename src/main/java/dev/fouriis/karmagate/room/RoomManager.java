@@ -1,12 +1,14 @@
 package dev.fouriis.karmagate.room;
 
 import dev.fouriis.karmagate.KarmaGateMod;
+import net.minecraft.entity.Entity;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtElement;
 import net.minecraft.nbt.NbtList;
 import net.minecraft.registry.RegistryWrapper;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.PersistentState;
 import net.minecraft.world.PersistentStateManager;
 import net.minecraft.world.World;
@@ -60,6 +62,25 @@ public class RoomManager extends PersistentState {
     }
 
     /**
+     * Gets the room containing the given block position, if any.
+     */
+    public Optional<RoomData> getRoomAt(BlockPos pos) {
+        for (RoomData room : rooms.values()) {
+            if (room.contains(pos)) {
+                return Optional.of(room);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Gets the room containing the given entity, if any.
+     */
+    public Optional<RoomData> getRoomForEntity(Entity entity) {
+        return getRoomAt(entity.getBlockPos());
+    }
+
+    /**
      * Gets all room names.
      */
     public Collection<String> getRoomNames() {
@@ -92,6 +113,7 @@ public class RoomManager extends PersistentState {
             roomNbt.putInt("x2", room.corner2().getX());
             roomNbt.putInt("y2", room.corner2().getY());
             roomNbt.putInt("z2", room.corner2().getZ());
+            roomNbt.putString("dangerType", room.dangerType().name());
             roomList.add(roomNbt);
         }
         nbt.put("rooms", roomList);
@@ -110,7 +132,8 @@ public class RoomManager extends PersistentState {
             int x2 = roomNbt.getInt("x2");
             int y2 = roomNbt.getInt("y2");
             int z2 = roomNbt.getInt("z2");
-            manager.rooms.put(name, RoomData.of(name, x1, y1, z1, x2, y2, z2));
+            DangerType dangerType = DangerType.fromSerialized(roomNbt.getString("dangerType"));
+            manager.rooms.put(name, RoomData.of(name, x1, y1, z1, x2, y2, z2, dangerType));
         }
         return manager;
     }
