@@ -106,7 +106,7 @@ public final class RainCycle {
     private int resetDelayTicksRemaining;
 
     private RainCycle() {
-        setCycleMinutes(1.0f);
+        setCycleMinutes(10.0f);
         this.startUpTicks = rwTicksToMc(2400);
         this.precycleChance = 0.0f;
         recomputeSunDownStartTime();
