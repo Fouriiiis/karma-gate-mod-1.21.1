@@ -79,7 +79,7 @@ public class RoomCommands {
             corner2.getX(), corner2.getY(), corner2.getZ()
         );
 
-        boolean isNew = manager.addRoom(room);
+        boolean isNew = manager.addRoom(source.getServer(), room);
         ModNetworking.syncRoomsToAll(source.getServer());
 
         if (isNew) {
@@ -114,7 +114,7 @@ public class RoomCommands {
         String name = StringArgumentType.getString(context, "name");
 
         RoomManager manager = RoomManager.get(source.getServer());
-        Optional<RoomData> removed = manager.removeRoom(name);
+        Optional<RoomData> removed = manager.removeRoom(source.getServer(), name);
 
         if (removed.isPresent()) {
             ModNetworking.syncRoomsToAll(source.getServer());

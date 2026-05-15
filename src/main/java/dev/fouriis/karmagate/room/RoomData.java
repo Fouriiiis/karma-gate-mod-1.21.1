@@ -5,7 +5,7 @@ import net.minecraft.util.math.BlockPos;
 /**
  * Server-side data container for a named room.
  */
-public record RoomData(String name, BlockPos corner1, BlockPos corner2, DangerType dangerType) {
+public record RoomData(String name, BlockPos corner1, BlockPos corner2, DangerType dangerType, RoomGeometry geometry) {
 
     public static RoomData of(String name, int x1, int y1, int z1, int x2, int y2, int z2) {
         return of(name, x1, y1, z1, x2, y2, z2, DangerType.None);
@@ -21,13 +21,32 @@ public record RoomData(String name, BlockPos corner1, BlockPos corner2, DangerTy
         int z2,
         DangerType dangerType
     ) {
+        return of(name, x1, y1, z1, x2, y2, z2, dangerType, RoomGeometry.empty());
+    }
+
+    public static RoomData of(
+        String name,
+        int x1,
+        int y1,
+        int z1,
+        int x2,
+        int y2,
+        int z2,
+        DangerType dangerType,
+        RoomGeometry geometry
+    ) {
         DangerType resolvedDangerType = dangerType == null ? DangerType.None : dangerType;
         return new RoomData(
             name,
             new BlockPos(x1, y1, z1),
             new BlockPos(x2, y2, z2),
-            resolvedDangerType
+            resolvedDangerType,
+            geometry == null ? RoomGeometry.empty() : geometry
         );
+    }
+
+    public RoomData withGeometry(RoomGeometry roomGeometry) {
+        return new RoomData(name, corner1, corner2, dangerType, roomGeometry == null ? RoomGeometry.empty() : roomGeometry);
     }
 
     public BlockPos getMin() {

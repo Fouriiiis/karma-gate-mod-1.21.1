@@ -2,6 +2,7 @@ package dev.fouriis.karmagate.client.room;
 
 import dev.fouriis.karmagate.network.RoomSyncPayload;
 import dev.fouriis.karmagate.room.DangerType;
+import dev.fouriis.karmagate.room.RoomGeometry;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 
@@ -14,7 +15,7 @@ import java.util.List;
  */
 public final class RoomClientState {
 
-    public record RoomEntry(String name, BlockPos min, BlockPos max, Box bounds, DangerType dangerType) {}
+    public record RoomEntry(String name, BlockPos min, BlockPos max, Box bounds, DangerType dangerType, RoomGeometry geometry) {}
 
     private static final List<RoomEntry> ROOMS = new ArrayList<>();
 
@@ -51,7 +52,7 @@ public final class RoomClientState {
                 min.getX(), min.getY(), min.getZ(),
                 max.getX() + 1, max.getY() + 1, max.getZ() + 1
             );
-            addRoom(new RoomEntry(entry.name(), min, max, bounds, entry.dangerType()));
+            addRoom(new RoomEntry(entry.name(), min, max, bounds, entry.dangerType(), RoomGeometry.fromCompressedBytes(entry.geometryBytes())));
         }
     }
 }

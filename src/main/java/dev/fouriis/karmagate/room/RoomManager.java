@@ -26,6 +26,7 @@ public class RoomManager extends PersistentState {
     private static final String DATA_NAME = KarmaGateMod.MOD_ID + "_rooms";
 
     private final Map<String, RoomData> rooms = new HashMap<>();
+    private boolean geometryLoaded = false;
 
     public RoomManager() {
         super();
@@ -42,6 +43,14 @@ public class RoomManager extends PersistentState {
         return isNew;
     }
 
+    public boolean addRoom(MinecraftServer server, RoomData room) {
+        RoomData storedRoom = RoomGeometryStorage.saveRoom(server, room);
+        boolean isNew = !rooms.containsKey(storedRoom.name());
+        rooms.put(storedRoom.name(), storedRoom);
+        markDirty();
+        return isNew;
+    }
+
     /**
      * Removes a room by name.
      * @return the removed room, or empty if not found
@@ -52,6 +61,12 @@ public class RoomManager extends PersistentState {
             markDirty();
         }
         return Optional.ofNullable(removed);
+    }
+
+    public Optional<RoomData> removeRoom(MinecraftServer server, String name) {
+        Optional<RoomData> removed = removeRoom(name);
+        removed.ifPresent(room -> RoomGeometryStorage.deleteRoom(server, room.name()));
+        return removed;
     }
 
     /**
@@ -154,7 +169,9 @@ public class RoomManager extends PersistentState {
             throw new IllegalStateException("Overworld not available");
         }
         PersistentStateManager stateManager = overworld.getPersistentStateManager();
-        return stateManager.getOrCreate(TYPE, DATA_NAME);
+        RoomManager manager = stateManager.getOrCreate(TYPE, DATA_NAME);
+        manager.ensureGeometryLoaded(server);
+        return manager;
     }
 
     /**
@@ -162,5 +179,20 @@ public class RoomManager extends PersistentState {
      */
     public static RoomManager get(ServerWorld world) {
         return get(world.getServer());
+    }
+
+    private void ensureGeometryLoaded(MinecraftServer server) {
+        if (geometryLoaded) {
+            return;
+        }
+
+        Map<String, RoomData> updatedRooms = new HashMap<>();
+        for (RoomData room : rooms.values()) {
+            updatedRooms.put(room.name(), RoomGeometryStorage.loadOrCreateRoom(server, room));
+        }
+
+        rooms.clear();
+        rooms.putAll(updatedRooms);
+        geometryLoaded = true;
     }
 }

@@ -3,6 +3,7 @@ package dev.fouriis.karmagate.network;
 import dev.fouriis.karmagate.KarmaGateMod;
 import dev.fouriis.karmagate.room.DangerType;
 import dev.fouriis.karmagate.room.RoomData;
+import dev.fouriis.karmagate.room.RoomGeometry;
 import net.minecraft.network.RegistryByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.codec.PacketCodecs;
@@ -41,7 +42,8 @@ public record RoomSyncPayload(List<RoomEntry> rooms) implements CustomPayload {
                 room.name(),
                 room.corner1().getX(), room.corner1().getY(), room.corner1().getZ(),
                 room.corner2().getX(), room.corner2().getY(), room.corner2().getZ(),
-                room.dangerType()
+                room.dangerType(),
+                room.geometry() == null ? new byte[0] : room.geometry().toCompressedBytes()
             ));
         }
         return new RoomSyncPayload(entries);
@@ -58,7 +60,8 @@ public record RoomSyncPayload(List<RoomEntry> rooms) implements CustomPayload {
         int x2,
         int y2,
         int z2,
-        DangerType dangerType
+        DangerType dangerType,
+        byte[] geometryBytes
     ) {
 
         public static final PacketCodec<RegistryByteBuf, RoomEntry> CODEC = new PacketCodec<>() {
@@ -72,7 +75,10 @@ public record RoomSyncPayload(List<RoomEntry> rooms) implements CustomPayload {
                 int y2 = buf.readInt();
                 int z2 = buf.readInt();
                 DangerType dangerType = DangerType.fromSerialized(PacketCodecs.STRING.decode(buf));
-                return new RoomEntry(name, x1, y1, z1, x2, y2, z2, dangerType);
+                int geometryLength = buf.readVarInt();
+                byte[] geometryBytes = new byte[geometryLength];
+                buf.readBytes(geometryBytes);
+                return new RoomEntry(name, x1, y1, z1, x2, y2, z2, dangerType, geometryBytes);
             }
 
             @Override
@@ -86,6 +92,9 @@ public record RoomSyncPayload(List<RoomEntry> rooms) implements CustomPayload {
                 buf.writeInt(entry.z2());
                 DangerType dangerType = entry.dangerType() == null ? DangerType.None : entry.dangerType();
                 PacketCodecs.STRING.encode(buf, dangerType.name());
+                byte[] geometryBytes = entry.geometryBytes() == null ? new byte[0] : entry.geometryBytes();
+                buf.writeVarInt(geometryBytes.length);
+                buf.writeBytes(geometryBytes);
             }
         };
 

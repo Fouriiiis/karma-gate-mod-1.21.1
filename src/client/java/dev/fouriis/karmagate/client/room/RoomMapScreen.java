@@ -5,6 +5,7 @@ import net.brickcraftdream.librainworldmc.client.render.capture.FramebufferCaptu
 import net.brickcraftdream.librainworldmc.client.render.capture.FramebufferRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.util.TextureUtils;
+import dev.fouriis.karmagate.room.RoomGeometry;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.Framebuffer;
@@ -140,6 +141,55 @@ public class RoomMapScreen extends Screen {
     private static final double PIPE_DASH_SPEED = 0.125;
     private static final float PIPE_LINK_ALPHA = 0.75f;
 
+    // Full-effects defaults. The previous FPS-only build disabled these; this build
+    // keeps the screen warp/backdrop/depth treatment and gets its speed from reducing
+    // the amount of geometry rendered each frame.
+    private static final boolean ENABLE_SCREEN_WARP = true;
+    private static final boolean ENABLE_ROOM_BACKDROP_CUTOUT = true;
+    private static final boolean ENABLE_ACTIVE_ROOM_DEPTH_CLIP = true;
+    private static final boolean ENABLE_INACTIVE_GEOMETRY = true;
+    private static final boolean ENABLE_ACTIVE_SOLID_FILLS = true;
+    private static final boolean ENABLE_INACTIVE_SOLID_FILLS = true;
+
+    // Use the room bounds as the mask volume, instead of only the optimized solid
+    // surface mesh. This restores the original backdrop/depth cutout behavior for
+    // the whole registered room area, even after the geometry optimizer removes
+    // interior/empty-space faces.
+    private static final boolean ENABLE_ROOM_VOLUME_STENCIL = true;
+
+    // Draw a subtle shell for the registered empty room volume so carved-out/open
+    // areas are still readable after unnecessary internal geometry is removed.
+    private static final boolean ENABLE_ROOM_VOLUME_EMPTY_FILL = true;
+
+    private static final float ROOM_VOLUME_FILL_R = 0.03f;
+    private static final float ROOM_VOLUME_FILL_G = 0.36f;
+    private static final float ROOM_VOLUME_FILL_B = 0.42f;
+    private static final float ROOM_VOLUME_FILL_A = 0.18f;
+
+    private static final float INACTIVE_ROOM_VOLUME_FILL_R = 0.03f;
+    private static final float INACTIVE_ROOM_VOLUME_FILL_G = 0.14f;
+    private static final float INACTIVE_ROOM_VOLUME_FILL_B = 0.16f;
+    private static final float INACTIVE_ROOM_VOLUME_FILL_A = 0.10f;
+
+    // Keep the expensive visual effects, but aggressively shrink the source mesh.
+    // This turns many tiny adjacent face/line fragments into larger rectangles and
+    // long outline segments before the render loop ever sees them.
+    private static final boolean ENABLE_TOPOLOGY_MESH_OPTIMIZATION = true;
+    private static final boolean REBUILD_LINES_FROM_OPTIMIZED_FACES = true;
+    private static final boolean CULL_UNATTACHED_LINES = true;
+
+    // Remove single-plane interior hole/seam outlines. True solid creases have two
+    // perpendicular face planes touching the line; pure flat empty-space boundaries do not.
+    private static final boolean CULL_FLAT_INTERIOR_BOUNDARY_LINES = true;
+
+    private static final float SCREEN_CULL_MARGIN = 48.0f;
+
+    private static final float INACTIVE_PIPE_GRAY = MAP_R * 0.2126f + MAP_G * 0.7152f + MAP_B * 0.0722f;
+    private static final float INACTIVE_PIPE_R_FAST = INACTIVE_PIPE_GRAY + (INACTIVE_MAP_R - INACTIVE_PIPE_GRAY) * 0.62f;
+    private static final float INACTIVE_PIPE_G_FAST = INACTIVE_PIPE_GRAY + (INACTIVE_MAP_G - INACTIVE_PIPE_GRAY) * 0.62f;
+    private static final float INACTIVE_PIPE_B_FAST = INACTIVE_PIPE_GRAY + (INACTIVE_MAP_B - INACTIVE_PIPE_GRAY) * 0.62f;
+    private static final float INACTIVE_PIPE_A_FAST = 0.48f;
+
     private final List<MapFace> roomFaces = new ArrayList<>();
     private final List<MapLine> roomLines = new ArrayList<>();
     private final List<PipeLink> pipeLinks = new ArrayList<>();
@@ -183,6 +233,17 @@ public class RoomMapScreen extends Screen {
     private final List<String> roomKeys = new ArrayList<>();
     private final Map<String, RoomClientState.RoomEntry> roomByKey = new HashMap<>();
 
+    // Reused render objects/caches. The old render path allocated a framebuffer renderer,
+    // projected records, pipe distance graphs and trig state every frame. That is extremely
+    // visible while dragging the map angle. Keep the heavy state hot and update only numbers.
+    private FramebufferRenderer roomMapFramebuffer;
+    private final RenderFrameCache renderCache = new RenderFrameCache();
+    private final RoomActivity roomActivityCache = new RoomActivity();
+    private boolean[] activeRoomCache = new boolean[0];
+    private int[] cachedRoomDistances = new int[0];
+    private int cachedRoomDistancesStartRoom = Integer.MIN_VALUE;
+    private int cachedRoomDistancesRoomCount = -1;
+
     private float pulse = 0.0f;
     private float lastPulse = 0.0f;
 
@@ -223,24 +284,32 @@ public class RoomMapScreen extends Screen {
         pulse += 0.07f;
 
         revealTicks++;
-        updateDiscoveredAreaFromPlayer();
-        if (!revealFrontier.isEmpty()) {
-            revealRoutine();
-        }
-        if (!revealFadeCells.isEmpty()) {
-            fadeRoutine();
-        }
-        updatePipeReveals();
-        updateAggregateRevealValues();
 
         handleKeyboardPan(client);
     }
 
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-        // Stencil-cutout backdrop outside the room volume.
+        if (ENABLE_SCREEN_WARP) {
+            renderWithScreenWarp(context, delta);
+        } else {
+            RenderSystem.enableBlend();
+            RenderSystem.defaultBlendFunc();
+            RenderSystem.disableDepthTest();
+            RenderSystem.disableCull();
+            RenderSystem.setShader(GameRenderer::getPositionColorProgram);
+            renderMapScene(context, delta);
+        }
 
-        FramebufferRenderer fbRenderer = new FramebufferRenderer("room_map");
+        RenderSystem.enableCull();
+        RenderSystem.enableDepthTest();
+        RenderSystem.disableBlend();
+
+        drawHudHints(context);
+    }
+
+    private void renderWithScreenWarp(DrawContext context, float delta) {
+        FramebufferRenderer fbRenderer = roomMapFramebuffer();
 
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
@@ -248,74 +317,8 @@ public class RoomMapScreen extends Screen {
         RenderSystem.disableCull();
         RenderSystem.setShader(GameRenderer::getPositionColorProgram);
 
-        fbRenderer.render(drawContext -> {
-            if (!hasRooms) {
-                drawContext.drawCenteredTextWithShadow(textRenderer, Text.literal("No rooms"), this.width / 2, this.height / 2 - 4, 0xFFFFFFFF);
-                return;
-            }
-
-            MatrixStack matrices = drawContext.getMatrices();
-            matrices.push();
-            Matrix4f matrix = matrices.peek().getPositionMatrix();
-
-            // Use our own screen-space quad lines. RenderLayer.getLines() is convenient,
-            // but with a rotated GUI-space 3D transform it can become grainy or nearly
-            // invisible at certain angles. The projection still uses yaw/pitch, but each
-            // line is rasterized as a stable 2D quad after projection.
-            RoomActivity activity = computeRoomActivity();
-
-            drawBackdropCutout(matrix, delta, activity);
-
-            // Inactive geometry is drawn first, but with an active-room depth clip.
-            // This hides inactive fills/lines wherever an active room stencil exists,
-            // without drawing a black color occluder into the framebuffer.
-            beginActiveRoomDepthClip(matrix, delta, activity);
-
-            BufferBuilder inactiveSolids = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-            drawSolidBlockFill(inactiveSolids, matrix, delta, activity, false);
-            BuiltBuffer inactiveSolidBuffer = inactiveSolids.endNullable();
-            if(inactiveSolidBuffer != null) {
-                BufferRenderer.drawWithGlobalProgram(inactiveSolidBuffer);
-            }
-
-            BufferBuilder inactiveLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-            drawRevealWave(inactiveLines, matrix, delta);
-            drawRoomGeometry(inactiveLines, matrix, delta, activity, false);
-            drawPipeLinks(inactiveLines, matrix, delta, activity, false);
-            BuiltBuffer inactiveLineBuffer = inactiveLines.endNullable();
-            if(inactiveLineBuffer != null) {
-                BufferRenderer.drawWithGlobalProgram(inactiveLineBuffer);
-            }
-
-            endActiveRoomDepthClip();
-
-            BufferBuilder activeSolids = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-            drawSolidBlockFill(activeSolids, matrix, delta, activity, true);
-            BuiltBuffer activeSolidBuffer = activeSolids.endNullable();
-            if(activeSolidBuffer != null) {
-                BufferRenderer.drawWithGlobalProgram(activeSolidBuffer);
-            }
-
-            BufferBuilder activeLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-            drawRoomGeometry(activeLines, matrix, delta, activity, true);
-            drawPipeLinks(activeLines, matrix, delta, activity, true);
-            drawPlayerMarker(activeLines, matrix, delta);
-            BuiltBuffer activeLineBuffer = activeLines.endNullable();
-            if(activeLineBuffer != null) {
-                BufferRenderer.drawWithGlobalProgram(activeLineBuffer);
-            }
-
-            matrices.pop();
-        });
-
-        //you know what's funny? This will always be false cause people on macs can't use the main shader so it wouldn't make sense for them to play
+        fbRenderer.render(drawContext -> renderMapScene(drawContext, delta));
         fbRenderer.finish(IS_SYSTEM_MAC);
-
-        //Framebuffer fb = MinecraftClient.getInstance().getFramebuffer();
-        //NativeImage color = FramebufferCaptureHelper.captureColorAttachment(fb, false, true, false);
-        //if(color != null) {
-        //    TextureUtils.registerNativeTexture(Identifier.of("karma-gate-mod", "mapgrabtex"), color);
-        //}
 
         MatrixStack matrices = context.getMatrices();
         matrices.push();
@@ -327,18 +330,114 @@ public class RoomMapScreen extends Screen {
         overlayBuffer.vertex(matrix, this.width, this.height, 0).color(0xffffffff);
         overlayBuffer.vertex(matrix, this.width, 0, 0).color(0xffffffff);
         RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
-
-        //↓ comment this out if you want to remove the screen warping ↓
         CoreShaderRenderer.bindShader$SceneFisheye(Identifier.of("librainworldmc", "framebuffer/room_map"));
-
         BufferRenderer.drawWithGlobalProgram(overlayBuffer.end());
         matrices.pop();
+    }
 
-        RenderSystem.enableCull();
-        RenderSystem.enableDepthTest();
-        RenderSystem.disableBlend();
+    private void renderMapScene(DrawContext drawContext, float delta) {
+        if (!hasRooms) {
+            drawContext.drawCenteredTextWithShadow(textRenderer, Text.literal("No rooms"), this.width / 2, this.height / 2 - 4, 0xFFFFFFFF);
+            return;
+        }
 
-        drawHudHints(context);
+        MatrixStack matrices = drawContext.getMatrices();
+        matrices.push();
+        Matrix4f matrix = matrices.peek().getPositionMatrix();
+
+        updateRenderFrameCache();
+        RoomActivity activity = computeRoomActivity();
+        refreshProjectionCache();
+        int[] pipeDistances = computeCurrentRoomDistances();
+
+        boolean drawSimpleBackdropInGeometryBuffer = !ENABLE_ROOM_BACKDROP_CUTOUT && !ENABLE_ACTIVE_ROOM_DEPTH_CLIP;
+        if (ENABLE_ROOM_BACKDROP_CUTOUT) {
+            drawBackdropCutout(matrix, delta, activity);
+        } else if (!drawSimpleBackdropInGeometryBuffer) {
+            drawBackdropOnly(matrix);
+        }
+
+        if (ENABLE_INACTIVE_GEOMETRY) {
+            if (ENABLE_ACTIVE_ROOM_DEPTH_CLIP) {
+                beginActiveRoomDepthClip(matrix, delta, activity);
+            }
+
+            BufferBuilder inactiveBuffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+            if (drawSimpleBackdropInGeometryBuffer) {
+                drawScreenQuad(inactiveBuffer, matrix, 0.0f, 0.0f, this.width, this.height,
+                    BACKDROP_R, BACKDROP_G, BACKDROP_B, BACKDROP_A);
+                drawSimpleBackdropInGeometryBuffer = false;
+            }
+            if (ENABLE_ROOM_VOLUME_EMPTY_FILL) {
+                drawRoomVolumeEmptyFill(inactiveBuffer, matrix, activity, false);
+            }
+            if (ENABLE_INACTIVE_SOLID_FILLS) {
+                drawSolidBlockFill(inactiveBuffer, matrix, delta, activity, false);
+            }
+            drawRevealWave(inactiveBuffer, matrix, delta);
+            drawRoomGeometry(inactiveBuffer, matrix, delta, activity, false);
+            drawPipeLinks(inactiveBuffer, matrix, delta, activity, false, pipeDistances);
+            BuiltBuffer inactiveBuiltBuffer = inactiveBuffer.endNullable();
+            if (inactiveBuiltBuffer != null) {
+                BufferRenderer.drawWithGlobalProgram(inactiveBuiltBuffer);
+            }
+
+            if (ENABLE_ACTIVE_ROOM_DEPTH_CLIP) {
+                endActiveRoomDepthClip();
+            }
+        }
+
+        BufferBuilder activeBuffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+        if (drawSimpleBackdropInGeometryBuffer) {
+            drawScreenQuad(activeBuffer, matrix, 0.0f, 0.0f, this.width, this.height,
+                BACKDROP_R, BACKDROP_G, BACKDROP_B, BACKDROP_A);
+        }
+        if (ENABLE_ROOM_VOLUME_EMPTY_FILL) {
+            drawRoomVolumeEmptyFill(activeBuffer, matrix, activity, true);
+        }
+        if (ENABLE_ACTIVE_SOLID_FILLS) {
+            drawSolidBlockFill(activeBuffer, matrix, delta, activity, true);
+        }
+        drawRoomGeometry(activeBuffer, matrix, delta, activity, true);
+        drawPipeLinks(activeBuffer, matrix, delta, activity, true, pipeDistances);
+        drawPlayerMarker(activeBuffer, matrix, delta);
+        BuiltBuffer activeBuiltBuffer = activeBuffer.endNullable();
+        if (activeBuiltBuffer != null) {
+            BufferRenderer.drawWithGlobalProgram(activeBuiltBuffer);
+        }
+
+        matrices.pop();
+    }
+
+    private FramebufferRenderer roomMapFramebuffer() {
+        if (roomMapFramebuffer == null) {
+            roomMapFramebuffer = new FramebufferRenderer("room_map");
+        }
+        return roomMapFramebuffer;
+    }
+
+    private void updateRenderFrameCache() {
+        double yawRad = Math.toRadians(yaw);
+        double pitchRad = Math.toRadians(pitch);
+
+        renderCache.yawCos = Math.cos(yawRad);
+        renderCache.yawSin = Math.sin(yawRad);
+        renderCache.pitchCos = Math.cos(pitchRad);
+        renderCache.pitchSin = Math.sin(pitchRad);
+        renderCache.screenScale = scale * zoom;
+        renderCache.centerX = focusX - panX;
+        renderCache.centerY = focusY - panY;
+        renderCache.centerZ = focusZ - panZ;
+        renderCache.screenCenterX = this.width * 0.5;
+        renderCache.screenCenterY = this.height * 0.55;
+
+        // Existing camera-facing test reduced to three axis formulas.
+        renderCache.faceXP = (-renderCache.yawSin) * renderCache.pitchCos;
+        renderCache.faceXN = -renderCache.faceXP;
+        renderCache.faceYP = renderCache.pitchSin;
+        renderCache.faceYN = -renderCache.pitchSin;
+        renderCache.faceZP = renderCache.yawCos * renderCache.pitchCos;
+        renderCache.faceZN = -renderCache.faceZP;
     }
 
     private void applyMapTransform(MatrixStack matrices) {
@@ -393,102 +492,27 @@ public class RoomMapScreen extends Screen {
 
 
     private void drawRoomGeometry(VertexConsumer buffer, Matrix4f matrix, float delta, RoomActivity activity, boolean activePass) {
+        float lineR = activePass ? MAP_R : INACTIVE_MAP_R;
+        float lineG = activePass ? MAP_G : INACTIVE_MAP_G;
+        float lineB = activePass ? MAP_B : INACTIVE_MAP_B;
+        float lineA = activePass ? 0.96f : 0.72f;
+
         for (MapLine line : roomLines) {
-            if (isLineActive(line, activity) != activePass) {
+            if (!line.visibleOnScreen || !line.hasFacingFace || isLineActive(line, activity) != activePass) {
                 continue;
             }
-            if (!lineHasFacingFace(line)) {
-                continue;
-            }
-            drawPartiallyRevealedLine(buffer, matrix, line, delta, activePass);
+
+            drawScreenLine(buffer, matrix,
+                line.projectedX1, line.projectedY1,
+                line.projectedX2, line.projectedY2,
+                lineR, lineG, lineB, lineA);
         }
     }
 
-    private void drawPartiallyRevealedLine(VertexConsumer buffer,
-                                           Matrix4f matrix,
-                                           MapLine line,
-                                           float delta,
-                                           boolean active) {
-        double ax = line.x1World();
-        double ay = line.y1World();
-        double az = line.z1World();
-        double bx = line.x2World();
-        double by = line.y2World();
-        double bz = line.z2World();
-
-        double fullLength = Math.sqrt(
-            (bx - ax) * (bx - ax) +
-            (by - ay) * (by - ay) +
-            (bz - az) * (bz - az)
-        );
-        if (fullLength <= 1.0e-6) {
-            return;
-        }
-
-        int pieces = Math.max(1, Math.min(12, (int) Math.ceil(fullLength / 2.0)));
-
-        double prevT = 0.0;
-        double prevX = ax;
-        double prevY = ay;
-        double prevZ = az;
-        PointReveal prevReveal = adjustedPointReveal(pointRevealInRoom(line.roomKey(), prevX, prevY, prevZ), active);
-
-        for (int i = 1; i <= pieces; i++) {
-            double nextT = (double) i / pieces;
-            double nextX = lerpDouble(ax, bx, nextT);
-            double nextY = lerpDouble(ay, by, nextT);
-            double nextZ = lerpDouble(az, bz, nextT);
-            PointReveal nextReveal = adjustedPointReveal(pointRevealInRoom(line.roomKey(), nextX, nextY, nextZ), active);
-
-            if (prevReveal.alpha > 0.001f || nextReveal.alpha > 0.001f) {
-                drawRawLineGradient(
-                    buffer,
-                    matrix,
-                    prevX, prevY, prevZ,
-                    nextX, nextY, nextZ,
-                    prevReveal.r, prevReveal.g, prevReveal.b, prevReveal.alpha,
-                    nextReveal.r, nextReveal.g, nextReveal.b, nextReveal.alpha
-                );
-
-                // A subtle delayed shadow makes the reveal front read like the C# map's soft fade pixels.
-                float shadowScale = active ? 0.055f : 0.030f;
-                float shadowA0 = prevReveal.front * shadowScale;
-                float shadowA1 = nextReveal.front * shadowScale;
-                if (shadowA0 > 0.001f || shadowA1 > 0.001f) {
-                    float shadowR = active ? DIM_R : INACTIVE_DIM_R;
-                    float shadowG = active ? DIM_G : INACTIVE_DIM_G;
-                    float shadowB = active ? DIM_B : INACTIVE_DIM_B;
-                    drawRawLineGradient(
-                        buffer,
-                        matrix,
-                        prevX, prevY, prevZ,
-                        nextX, nextY, nextZ,
-                        shadowR, shadowG, shadowB, shadowA0,
-                        shadowR, shadowG, shadowB, shadowA1
-                    );
-                }
-            }
-
-            prevT = nextT;
-            prevX = nextX;
-            prevY = nextY;
-            prevZ = nextZ;
-            prevReveal = nextReveal;
-        }
-    }
-
-    private void drawPipeLinks(VertexConsumer buffer, Matrix4f matrix, float delta, RoomActivity activity, boolean activePass) {
+    private void drawPipeLinks(VertexConsumer buffer, Matrix4f matrix, float delta, RoomActivity activity, boolean activePass, int[] distances) {
         if (pipeLinks.isEmpty()) {
             return;
         }
-
-        MinecraftClient client = MinecraftClient.getInstance();
-        List<RoomClientState.RoomEntry> rooms = RoomClientState.getRooms();
-        int playerRoomIndex = -1;
-        if (client.player != null) {
-            playerRoomIndex = findRoomIndex(rooms, client.player.getBlockPos());
-        }
-        int[] distances = computeRoomDistances(rooms.size(), playerRoomIndex);
 
         float time = revealTicks + delta;
 
@@ -524,24 +548,6 @@ public class RoomMapScreen extends Screen {
                 endDir = swapDir;
             }
 
-            double sx = start.getX() + 0.5;
-            double sy = start.getY() + 0.5;
-            double sz = start.getZ() + 0.5;
-            double ex = end.getX() + 0.5;
-            double ey = end.getY() + 0.5;
-            double ez = end.getZ() + 0.5;
-
-            double dx = ex - sx;
-            double dy = ey - sy;
-            double dz = ez - sz;
-            double length = Math.sqrt(dx * dx + dy * dy + dz * dz);
-            if (length <= 1.0e-6) {
-                continue;
-            }
-
-            double[] startVec = resolveDirectionVector(startDir, dx, dy, dz, length, true);
-            double[] endVec = resolveDirectionVector(endDir, dx, dy, dz, length, false);
-
             boolean drawingStartIsOriginalStart = start.equals(link.start());
             float aReveal = drawingStartIsOriginalStart
                 ? MathHelper.lerp(delta, link.lastRevealA, link.revealA)
@@ -550,11 +556,8 @@ public class RoomMapScreen extends Screen {
                 ? MathHelper.lerp(delta, link.lastRevealB, link.revealB)
                 : MathHelper.lerp(delta, link.lastRevealA, link.revealA);
 
-            drawDashedBezier(buffer, matrix, sx, sy, sz, ex, ey, ez,
-                startVec[0], startVec[1], startVec[2],
-                endVec[0], endVec[1], endVec[2],
-                startActive, endActive,
-                aReveal, bReveal, time);
+            PipeCurve curve = drawingStartIsOriginalStart ? link.forwardCurve : link.reverseCurve;
+            drawDashedPipeCurve(buffer, matrix, curve, startActive, endActive, aReveal, bReveal, time);
         }
     }
 
@@ -754,6 +757,72 @@ public class RoomMapScreen extends Screen {
         }
     }
 
+    private void rebuildPipeCurves() {
+        for (PipeLink link : pipeLinks) {
+            link.forwardCurve = buildPipeCurve(link.start(), link.end(), link.startDirection(), link.endDirection());
+            link.reverseCurve = buildPipeCurve(link.end(), link.start(), link.endDirection(), link.startDirection());
+        }
+    }
+
+    private PipeCurve buildPipeCurve(BlockPos start, BlockPos end, Direction startDir, Direction endDir) {
+        double x1 = start.getX() + 0.5;
+        double y1 = start.getY() + 0.5;
+        double z1 = start.getZ() + 0.5;
+        double x2 = end.getX() + 0.5;
+        double y2 = end.getY() + 0.5;
+        double z2 = end.getZ() + 0.5;
+
+        double dx = x2 - x1;
+        double dy = y2 - y1;
+        double dz = z2 - z1;
+        double length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (length <= 1.0e-6) {
+            return null;
+        }
+
+        double[] startVec = resolveDirectionVector(startDir, dx, dy, dz, length, true);
+        double[] endVec = resolveDirectionVector(endDir, dx, dy, dz, length, false);
+
+        double handle = Math.min(6.0, Math.max(1.25, length * 0.35));
+        double c1x = x1 + startVec[0] * handle;
+        double c1y = y1 + startVec[1] * handle;
+        double c1z = z1 + startVec[2] * handle;
+        double c2x = x2 - endVec[0] * handle;
+        double c2y = y2 - endVec[1] * handle;
+        double c2z = z2 - endVec[2] * handle;
+
+        int sampleCount = clampInt((int) Math.ceil(length * 2.0), 12, 40);
+        PipeCurve curve = new PipeCurve(sampleCount);
+
+        double lastX = x1;
+        double lastY = y1;
+        double lastZ = z1;
+        curve.xs[0] = lastX;
+        curve.ys[0] = lastY;
+        curve.zs[0] = lastZ;
+        curve.lengths[0] = 0.0;
+
+        for (int i = 1; i <= sampleCount; i++) {
+            double t = (double) i / sampleCount;
+            double ix = cubicBezier(x1, c1x, c2x, x2, t);
+            double iy = cubicBezier(y1, c1y, c2y, y2, t);
+            double iz = cubicBezier(z1, c1z, c2z, z2, t);
+            curve.xs[i] = ix;
+            curve.ys[i] = iy;
+            curve.zs[i] = iz;
+            double segDx = ix - lastX;
+            double segDy = iy - lastY;
+            double segDz = iz - lastZ;
+            curve.lengths[i] = curve.lengths[i - 1] + Math.sqrt(segDx * segDx + segDy * segDy + segDz * segDz);
+            lastX = ix;
+            lastY = iy;
+            lastZ = iz;
+        }
+
+        curve.totalLength = curve.lengths[sampleCount];
+        return curve.totalLength <= 1.0e-6 ? null : curve;
+    }
+
     private void revealRoutine() {
         int count = revealFrontier.size();
         int baseRevealCount = (int) lerpDouble(
@@ -906,38 +975,122 @@ public class RoomMapScreen extends Screen {
 
     private void updateAggregateRevealValues() {
         for (MapFace face : roomFaces) {
-            face.lastReveal = face.reveal;
-            face.reveal = MathHelper.clamp(sampleRevealInRoom(face.roomKey(), face.centerX(), face.centerY(), face.centerZ()), 0.0f, 1.0f);
+            face.lastReveal = 1.0f;
+            face.reveal = 1.0f;
         }
         for (MapLine line : roomLines) {
-            line.lastReveal = line.reveal;
-            double mx = (line.x1World() + line.x2World()) * 0.5;
-            double my = (line.y1World() + line.y2World()) * 0.5;
-            double mz = (line.z1World() + line.z2World()) * 0.5;
-            line.reveal = MathHelper.clamp(sampleRevealInRoom(line.roomKey(), mx, my, mz), 0.0f, 1.0f);
+            line.lastReveal = 1.0f;
+            line.reveal = 1.0f;
         }
     }
 
     private void updatePipeReveals() {
-        float denom = Math.max(1.0f, (float) lerpDouble(30.0, revealFrontier.size(), 0.5));
-        int delayStep = Math.max(1, Math.round(REVEAL_FRONTIER_SPEED));
-
         for (PipeLink link : pipeLinks) {
-            link.lastRevealA = link.revealA;
-            link.lastRevealB = link.revealB;
+            link.lastRevealA = 1.0f;
+            link.lastRevealB = 1.0f;
+            link.revealA = 1.0f;
+            link.revealB = 1.0f;
+            link.startRevealA = 0;
+            link.startRevealB = 0;
+            link.direction = 0.0f;
+        }
+    }
 
-            if (link.startRevealA > 0) {
-                link.startRevealA = Math.max(0, link.startRevealA - delayStep);
-            } else if (link.startRevealA == 0 && link.revealA < 1.0f) {
-                link.revealA = Math.min(1.0f, link.revealA + REVEAL_FADE_SPEED / denom);
-            }
+    private void refreshProjectionCache() {
+        for (MapFace face : roomFaces) {
+            face.facingCamera = isFaceFacingCameraFast(face);
 
-            if (link.startRevealB > 0) {
-                link.startRevealB = Math.max(0, link.startRevealB - delayStep);
-            } else if (link.startRevealB == 0 && link.revealB < 1.0f) {
-                link.revealB = Math.min(1.0f, link.revealB + REVEAL_FADE_SPEED / denom);
+            projectToScratch(face.wx1, face.wy1, face.wz1);
+            face.projectedX1 = renderCache.projectedX;
+            face.projectedY1 = renderCache.projectedY;
+            projectToScratch(face.wx2, face.wy2, face.wz2);
+            face.projectedX2 = renderCache.projectedX;
+            face.projectedY2 = renderCache.projectedY;
+            projectToScratch(face.wx3, face.wy3, face.wz3);
+            face.projectedX3 = renderCache.projectedX;
+            face.projectedY3 = renderCache.projectedY;
+            projectToScratch(face.wx4, face.wy4, face.wz4);
+            face.projectedX4 = renderCache.projectedX;
+            face.projectedY4 = renderCache.projectedY;
+            face.visibleOnScreen = projectedQuadOnScreen(
+                face.projectedX1, face.projectedY1,
+                face.projectedX2, face.projectedY2,
+                face.projectedX3, face.projectedY3,
+                face.projectedX4, face.projectedY4);
+        }
+        for (MapLine line : roomLines) {
+            projectToScratch(line.wx1, line.wy1, line.wz1);
+            line.projectedX1 = renderCache.projectedX;
+            line.projectedY1 = renderCache.projectedY;
+            projectToScratch(line.wx2, line.wy2, line.wz2);
+            line.projectedX2 = renderCache.projectedX;
+            line.projectedY2 = renderCache.projectedY;
+            line.visibleOnScreen = projectedSegmentOnScreen(line.projectedX1, line.projectedY1, line.projectedX2, line.projectedY2);
+            line.hasFacingFace = false;
+            for (MapFace face : line.adjacentFaces) {
+                if (face.facingCamera) {
+                    line.hasFacingFace = true;
+                    break;
+                }
             }
         }
+    }
+
+    private boolean isFaceFacingCameraFast(MapFace face) {
+        float viewZ = switch (face.axis) {
+            case X -> face.normalSign > 0 ? (float) renderCache.faceXP : (float) renderCache.faceXN;
+            case Y -> face.normalSign > 0 ? (float) renderCache.faceYP : (float) renderCache.faceYN;
+            case Z -> face.normalSign > 0 ? (float) renderCache.faceZP : (float) renderCache.faceZN;
+        };
+        return viewZ > 0.001f;
+    }
+
+    private void projectToScratch(double worldX, double worldY, double worldZ) {
+        double x = worldX - renderCache.centerX;
+        double y = worldY - renderCache.centerY;
+        double z = worldZ - renderCache.centerZ;
+        double yawX = x * renderCache.yawCos + z * renderCache.yawSin;
+        double yawZ = -x * renderCache.yawSin + z * renderCache.yawCos;
+        double pitchY = y * renderCache.pitchCos - yawZ * renderCache.pitchSin;
+        renderCache.projectedX = (float) (renderCache.screenCenterX + yawX * renderCache.screenScale);
+        renderCache.projectedY = (float) (renderCache.screenCenterY - pitchY * renderCache.screenScale);
+    }
+
+    private float projectX(double worldX, double worldY, double worldZ) {
+        double x = worldX - renderCache.centerX;
+        double z = worldZ - renderCache.centerZ;
+        double yawX = x * renderCache.yawCos + z * renderCache.yawSin;
+        return (float) (renderCache.screenCenterX + yawX * renderCache.screenScale);
+    }
+
+    private float projectY(double worldX, double worldY, double worldZ) {
+        double x = worldX - renderCache.centerX;
+        double y = worldY - renderCache.centerY;
+        double z = worldZ - renderCache.centerZ;
+        double yawZ = -x * renderCache.yawSin + z * renderCache.yawCos;
+        double pitchY = y * renderCache.pitchCos - yawZ * renderCache.pitchSin;
+        return (float) (renderCache.screenCenterY - pitchY * renderCache.screenScale);
+    }
+
+    private boolean projectedSegmentOnScreen(float x1, float y1, float x2, float y2) {
+        return Math.max(x1, x2) >= -SCREEN_CULL_MARGIN
+            && Math.min(x1, x2) <= this.width + SCREEN_CULL_MARGIN
+            && Math.max(y1, y2) >= -SCREEN_CULL_MARGIN
+            && Math.min(y1, y2) <= this.height + SCREEN_CULL_MARGIN;
+    }
+
+    private boolean projectedQuadOnScreen(float x1, float y1,
+                                          float x2, float y2,
+                                          float x3, float y3,
+                                          float x4, float y4) {
+        float minX = Math.min(Math.min(x1, x2), Math.min(x3, x4));
+        float maxX = Math.max(Math.max(x1, x2), Math.max(x3, x4));
+        float minY = Math.min(Math.min(y1, y2), Math.min(y3, y4));
+        float maxY = Math.max(Math.max(y1, y2), Math.max(y3, y4));
+        return maxX >= -SCREEN_CULL_MARGIN
+            && minX <= this.width + SCREEN_CULL_MARGIN
+            && maxY >= -SCREEN_CULL_MARGIN
+            && minY <= this.height + SCREEN_CULL_MARGIN;
     }
 
     private static boolean isRoomActive(RoomActivity activity, int roomIndex) {
@@ -974,6 +1127,26 @@ public class RoomMapScreen extends Screen {
             return -1;
         }
         return distances[index];
+    }
+
+    private int[] computeCurrentRoomDistances() {
+        if (pipeLinks.isEmpty()) {
+            return cachedRoomDistances;
+        }
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        List<RoomClientState.RoomEntry> rooms = RoomClientState.getRooms();
+        int playerRoomIndex = -1;
+        if (client.player != null) {
+            playerRoomIndex = findRoomIndex(rooms, client.player.getBlockPos());
+        }
+
+        if (cachedRoomDistancesRoomCount != rooms.size() || cachedRoomDistancesStartRoom != playerRoomIndex) {
+            cachedRoomDistances = computeRoomDistances(rooms.size(), playerRoomIndex);
+            cachedRoomDistancesRoomCount = rooms.size();
+            cachedRoomDistancesStartRoom = playerRoomIndex;
+        }
+        return cachedRoomDistances;
     }
 
     private int[] computeRoomDistances(int roomCount, int startRoomIndex) {
@@ -1016,86 +1189,48 @@ public class RoomMapScreen extends Screen {
         return distances;
     }
 
-    private void drawDashedBezier(VertexConsumer buffer,
-                                  Matrix4f matrix,
-                                  double x1, double y1, double z1,
-                                  double x2, double y2, double z2,
-                                  double startDirX, double startDirY, double startDirZ,
-                                  double endDirX, double endDirY, double endDirZ,
-                                  boolean startActive,
-                                  boolean endActive,
-                                  float aReveal,
-                                  float bReveal,
-                                  float time) {
-        double dx = x2 - x1;
-        double dy = y2 - y1;
-        double dz = z2 - z1;
-        double length = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (length <= 1.0e-6) {
+    private void drawDashedPipeCurve(VertexConsumer buffer,
+                                      Matrix4f matrix,
+                                      PipeCurve curve,
+                                      boolean startActive,
+                                      boolean endActive,
+                                      float aReveal,
+                                      float bReveal,
+                                      float time) {
+        if (curve == null || curve.totalLength <= 1.0e-6) {
             return;
         }
 
-        double handle = Math.min(6.0, Math.max(1.25, length * 0.35));
-        double c1x = x1 + startDirX * handle;
-        double c1y = y1 + startDirY * handle;
-        double c1z = z1 + startDirZ * handle;
-        double c2x = x2 - endDirX * handle;
-        double c2y = y2 - endDirY * handle;
-        double c2z = z2 - endDirZ * handle;
-
-        int sampleCount = clampInt((int) Math.ceil(length * 2.0), 12, 40);
-        double[] xs = new double[sampleCount + 1];
-        double[] ys = new double[sampleCount + 1];
-        double[] zs = new double[sampleCount + 1];
-        double[] lengths = new double[sampleCount + 1];
-
-        double lastX = x1;
-        double lastY = y1;
-        double lastZ = z1;
-        xs[0] = lastX;
-        ys[0] = lastY;
-        zs[0] = lastZ;
-        lengths[0] = 0.0;
-
-        for (int i = 1; i <= sampleCount; i++) {
-            double t = (double) i / sampleCount;
-            double ix = cubicBezier(x1, c1x, c2x, x2, t);
-            double iy = cubicBezier(y1, c1y, c2y, y2, t);
-            double iz = cubicBezier(z1, c1z, c2z, z2, t);
-            xs[i] = ix;
-            ys[i] = iy;
-            zs[i] = iz;
-            double segDx = ix - lastX;
-            double segDy = iy - lastY;
-            double segDz = iz - lastZ;
-            lengths[i] = lengths[i - 1] + Math.sqrt(segDx * segDx + segDy * segDy + segDz * segDz);
-            lastX = ix;
-            lastY = iy;
-            lastZ = iz;
-        }
-
-        double totalLength = lengths[sampleCount];
-        if (totalLength <= 1.0e-6) {
-            return;
-        }
+        float startR = startActive ? MAP_R : INACTIVE_PIPE_R_FAST;
+        float startG = startActive ? MAP_G : INACTIVE_PIPE_G_FAST;
+        float startB = startActive ? MAP_B : INACTIVE_PIPE_B_FAST;
+        float startA = startActive ? 1.0f : INACTIVE_PIPE_A_FAST;
+        float endR = endActive ? MAP_R : INACTIVE_PIPE_R_FAST;
+        float endG = endActive ? MAP_G : INACTIVE_PIPE_G_FAST;
+        float endB = endActive ? MAP_B : INACTIVE_PIPE_B_FAST;
+        float endA = endActive ? 1.0f : INACTIVE_PIPE_A_FAST;
 
         double step = PIPE_DASH_LENGTH + PIPE_DASH_GAP;
         double offset = (time * PIPE_DASH_SPEED) % step;
+        MutableCurvePoint p0 = curve.p0;
+        MutableCurvePoint p1 = curve.p1;
 
-        for (double dashStart = offset; dashStart < totalLength; dashStart += step) {
-            double dashEnd = Math.min(dashStart + PIPE_DASH_LENGTH, totalLength);
+        for (double dashStart = offset; dashStart < curve.totalLength; dashStart += step) {
+            double dashEnd = Math.min(dashStart + PIPE_DASH_LENGTH, curve.totalLength);
             if (dashEnd <= dashStart) {
                 continue;
             }
 
-            CurvePoint p0 = sampleCurvePoint(xs, ys, zs, lengths, dashStart);
-            CurvePoint p1 = sampleCurvePoint(xs, ys, zs, lengths, dashEnd);
+            sampleCurvePointInto(curve, dashStart, p0);
+            sampleCurvePointInto(curve, dashEnd, p1);
 
-            float reveal0 = lerp(aReveal, bReveal, (float) p0.t);
-            float reveal1 = lerp(aReveal, bReveal, (float) p1.t);
-            ColorSample c0 = blendPipeColor(startActive, endActive, (float) p0.t, reveal0);
-            ColorSample c1 = blendPipeColor(startActive, endActive, (float) p1.t, reveal1);
-            if (c0.a <= 0.001f && c1.a <= 0.001f) {
+            float t0 = (float) p0.t;
+            float t1 = (float) p1.t;
+            float reveal0 = lerp(aReveal, bReveal, t0);
+            float reveal1 = lerp(aReveal, bReveal, t1);
+            float a0 = lerp(startA, endA, t0) * PIPE_LINK_ALPHA * reveal0;
+            float a1 = lerp(startA, endA, t1) * PIPE_LINK_ALPHA * reveal1;
+            if (a0 <= 0.001f && a1 <= 0.001f) {
                 continue;
             }
 
@@ -1104,21 +1239,43 @@ public class RoomMapScreen extends Screen {
                 matrix,
                 p0.x, p0.y, p0.z,
                 p1.x, p1.y, p1.z,
-                c0.r, c0.g, c0.b, c0.a,
-                c1.r, c1.g, c1.b, c1.a
+                lerp(startR, endR, t0), lerp(startG, endG, t0), lerp(startB, endB, t0), a0,
+                lerp(startR, endR, t1), lerp(startG, endG, t1), lerp(startB, endB, t1), a1
             );
         }
     }
 
-    private ColorSample blendPipeColor(boolean startActive, boolean endActive, float t, float reveal) {
-        PointReveal base = new PointReveal(MAP_R, MAP_G, MAP_B, 1.0f, 1.0f);
-        PointReveal startColor = adjustedPointReveal(base, startActive);
-        PointReveal endColor = adjustedPointReveal(base, endActive);
-        float r = lerp(startColor.r, endColor.r, t);
-        float g = lerp(startColor.g, endColor.g, t);
-        float b = lerp(startColor.b, endColor.b, t);
-        float a = lerp(startColor.alpha, endColor.alpha, t) * PIPE_LINK_ALPHA * reveal;
-        return new ColorSample(r, g, b, a);
+    private static void sampleCurvePointInto(PipeCurve curve, double distance, MutableCurvePoint out) {
+        int count = curve.sampleCount;
+        if (distance <= 0.0) {
+            out.set(curve.xs[0], curve.ys[0], curve.zs[0], 0.0);
+            return;
+        }
+        if (distance >= curve.lengths[count]) {
+            out.set(curve.xs[count], curve.ys[count], curve.zs[count], 1.0);
+            return;
+        }
+
+        int low = 0;
+        int high = count - 1;
+        while (low < high) {
+            int mid = (low + high) >>> 1;
+            if (curve.lengths[mid + 1] < distance) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        int segment = low;
+        double segStart = curve.lengths[segment];
+        double segEnd = curve.lengths[segment + 1];
+        double segLength = Math.max(1.0e-9, segEnd - segStart);
+        double localT = (distance - segStart) / segLength;
+        double x = lerpDouble(curve.xs[segment], curve.xs[segment + 1], localT);
+        double y = lerpDouble(curve.ys[segment], curve.ys[segment + 1], localT);
+        double z = lerpDouble(curve.zs[segment], curve.zs[segment + 1], localT);
+        double t = (segment + localT) / count;
+        out.set(x, y, z, t);
     }
 
     private static double[] resolveDirectionVector(Direction dir,
@@ -1152,30 +1309,6 @@ public class RoomMapScreen extends Screen {
             return new double[] {isStart ? 1.0 : -1.0, 0.0, 0.0};
         }
         return new double[] {vx / vLen, vy / vLen, vz / vLen};
-    }
-
-    private static CurvePoint sampleCurvePoint(double[] xs, double[] ys, double[] zs, double[] lengths, double distance) {
-        int count = lengths.length - 1;
-        if (distance <= 0.0) {
-            return new CurvePoint(xs[0], ys[0], zs[0], 0.0);
-        }
-        if (distance >= lengths[count]) {
-            return new CurvePoint(xs[count], ys[count], zs[count], 1.0);
-        }
-
-        int segment = 0;
-        while (segment < count && lengths[segment + 1] < distance) {
-            segment++;
-        }
-        double segStart = lengths[segment];
-        double segEnd = lengths[segment + 1];
-        double segLength = Math.max(1.0e-9, segEnd - segStart);
-        double localT = (distance - segStart) / segLength;
-        double x = lerpDouble(xs[segment], xs[segment + 1], localT);
-        double y = lerpDouble(ys[segment], ys[segment + 1], localT);
-        double z = lerpDouble(zs[segment], zs[segment + 1], localT);
-        double t = (segment + localT) / count;
-        return new CurvePoint(x, y, z, t);
     }
 
     private static double cubicBezier(double a, double b, double c, double d, double t) {
@@ -1301,12 +1434,6 @@ public class RoomMapScreen extends Screen {
         roomByKey.clear();
         hasRooms = false;
 
-        MinecraftClient client = MinecraftClient.getInstance();
-        ClientWorld world = client.world;
-        if (world == null) {
-            return;
-        }
-
         List<RoomClientState.RoomEntry> rooms = RoomClientState.getRooms();
         if (rooms.isEmpty()) {
             return;
@@ -1321,14 +1448,12 @@ public class RoomMapScreen extends Screen {
         maxWorldY = Double.NEGATIVE_INFINITY;
         maxWorldZ = Double.NEGATIVE_INFINITY;
 
-        Map<FaceKey, Face> exteriorFaces = new HashMap<>();
-        BlockPos.Mutable mutable = new BlockPos.Mutable();
-
         for (int roomIndex = 0; roomIndex < rooms.size(); roomIndex++) {
             RoomClientState.RoomEntry room = rooms.get(roomIndex);
             String key = roomKey(room);
             roomKeys.add(key);
             roomByKey.put(key, room);
+
             BlockPos min = room.min();
             BlockPos max = room.max();
 
@@ -1348,93 +1473,62 @@ public class RoomMapScreen extends Screen {
                 toUnit(max.getZ() + 1.0)
             ));
 
-            for (int x = min.getX(); x <= max.getX(); x++) {
-                for (int y = min.getY(); y <= max.getY(); y++) {
-                    for (int z = min.getZ(); z <= max.getZ(); z++) {
-                        mutable.set(x, y, z);
-                        BlockState state = world.getBlockState(mutable);
-                        if (state.isAir()) {
-                            continue;
-                        }
+            RoomGeometry geometry = room.geometry();
+            if (geometry == null || geometry.isEmpty()) {
+                continue;
+            }
 
-                        if (state.getBlock() instanceof PipeEntrance) {
-                            BlockPos exitPos = RoomPipeMapHelper.findOtherEntrance(world, mutable);
-                            if (exitPos != null) {
-                                int exitRoomIndex = findRoomIndex(rooms, exitPos);
-                                if (exitRoomIndex >= 0 && exitRoomIndex != roomIndex) {
-                                    BlockPos startPos = mutable.toImmutable();
-                                    PipeLinkKey linkKey = pipeLinkKey(startPos, exitPos);
-                                    Direction startDir = getEntranceDirection(state);
-                                    Direction endDir = getEntranceDirection(world.getBlockState(exitPos));
-                                    uniquePipeLinks.putIfAbsent(
-                                        linkKey,
-                                        new PipeLink(startPos, exitPos, roomIndex, exitRoomIndex, startDir, endDir)
-                                    );
-                                }
-                            }
-                        }
+            RoomBounds currentRoomBounds = roomBounds.get(roomBounds.size() - 1);
+            List<Face> optimizedFaces = collectOptimizedRoomFaces(geometry, currentRoomBounds);
+            for (Face face : optimizedFaces) {
+                MapFace mapFace = new MapFace(face, key, roomIndex);
+                roomFaces.add(mapFace);
+                facesByPlane.computeIfAbsent(new PlaneKey(mapFace.axis, mapFace.plane), ignored -> new ArrayList<>()).add(mapFace);
+            }
 
-                        // Use only the physical collision shape for map geometry.
-                        // Blocks such as tall grass have an outline/selection shape but no
-                        // collision, so using getOutlineShape() would make decorative plants
-                        // appear as solid map geometry. Pipe links are detected above before
-                        // this filter, so non-solid pipe entrance blocks can still contribute
-                        // shortcut connections without drawing as room solids.
-                        VoxelShape shape = state.getCollisionShape(world, mutable);
-                        if (shape.isEmpty()) {
-                            continue;
-                        }
+            List<EdgeKey> optimizedLines = collectOptimizedRoomLines(geometry, optimizedFaces, currentRoomBounds);
+            for (EdgeKey line : optimizedLines) {
+                roomLines.add(new MapLine(line, key, roomIndex));
+            }
 
-                        final int blockX = x;
-                        final int blockY = y;
-                        final int blockZ = z;
-
-                        shape.forEachBox((boxMinX, boxMinY, boxMinZ, boxMaxX, boxMaxY, boxMaxZ) -> {
-                            int x0 = toUnit(blockX + boxMinX);
-                            int y0 = toUnit(blockY + boxMinY);
-                            int z0 = toUnit(blockZ + boxMinZ);
-                            int x1 = toUnit(blockX + boxMaxX);
-                            int y1 = toUnit(blockY + boxMaxY);
-                            int z1 = toUnit(blockZ + boxMaxZ);
-
-                            if (x0 == x1 || y0 == y1 || z0 == z1) {
-                                return;
-                            }
-
-                            addBoxFaces(exteriorFaces, x0, y0, z0, x1, y1, z1);
-                        });
-                    }
-                }
+            for (RoomGeometry.PipeLinkData link : geometry.pipeLinks()) {
+                BlockPos start = new BlockPos(link.startX(), link.startY(), link.startZ());
+                BlockPos end = new BlockPos(link.endX(), link.endY(), link.endZ());
+                int startRoomIndex = findRoomIndex(rooms, start);
+                int endRoomIndex = findRoomIndex(rooms, end);
+                PipeLinkKey linkKey = pipeLinkKey(start, end);
+                uniquePipeLinks.putIfAbsent(
+                    linkKey,
+                    new PipeLink(
+                        start,
+                        end,
+                        startRoomIndex,
+                        endRoomIndex,
+                        parseDirection(link.startDirection()),
+                        parseDirection(link.endDirection())
+                    )
+                );
             }
         }
 
-        for (Face face : exteriorFaces.values()) {
-            MapFace mapFace = new MapFace(face, findRoomKeyForFace(face));
-            roomFaces.add(mapFace);
-            facesByPlane.computeIfAbsent(new PlaneKey(mapFace.axis, mapFace.plane), ignored -> new ArrayList<>()).add(mapFace);
+        rebuildLineFaceAdjacency();
+        if (CULL_UNATTACHED_LINES) {
+            removeLinesWithoutAdjacentFaces();
         }
-
-        // Build wire lines from merged coplanar surface outlines.
-        // Then add only the missing room-shell axes. This keeps coplanar block seams
-        // removed, but still closes the 3D cuboid outline when the block mesh only
-        // supplied two opposite wall planes.
-        List<EdgeKey> outlineEdges = buildMergedSurfaceEdges(exteriorFaces.values());
-        addMissingRoomShellAxes(outlineEdges, roomBounds);
-
-        for (EdgeKey edge : mergeCollinearEdges(outlineEdges)) {
-            roomLines.add(new MapLine(edge, findRoomKeyForEdge(edge)));
-        }
-        hasRooms = !roomLines.isEmpty();
         pipeLinks.addAll(uniquePipeLinks.values());
-
+        rebuildPipeCurves();
+        hasRooms = !roomLines.isEmpty();
         assignPipeRevealCells();
+        cachedRoomDistances = new int[0];
+        cachedRoomDistancesStartRoom = Integer.MIN_VALUE;
+        cachedRoomDistancesRoomCount = -1;
 
+        MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
             revealCenterX = client.player.getX();
             revealCenterY = client.player.getY() + 0.9;
             revealCenterZ = client.player.getZ();
 
-            // Start focused on the player, like the C# map opens on the owner's room position.
             focusX = revealCenterX;
             focusY = revealCenterY;
             focusZ = revealCenterZ;
@@ -1449,10 +1543,224 @@ public class RoomMapScreen extends Screen {
         double sizeZ = Math.max(1.0, maxWorldZ - minWorldZ);
         double maxDim = Math.max(sizeX, Math.max(sizeY, sizeZ));
 
-        // Keep the C# map's roomy scale but preserve a readable 3D block silhouette.
         float target = (float) Math.min(this.width, this.height) * 0.46f;
         scale = target / (float) maxDim;
         scale = MathHelper.clamp(scale, 2.5f, 34.0f);
+    }
+
+    private static List<Face> collectOptimizedRoomFaces(RoomGeometry geometry, RoomBounds roomBounds) {
+        List<Face> rawFaces = new ArrayList<>();
+        for (RoomGeometry.FaceData face : geometry.faces()) {
+            Face normalized = normalizeFace(new Face(
+                Axis.valueOf(face.axis()),
+                face.plane(),
+                face.a0(),
+                face.b0(),
+                face.a1(),
+                face.b1(),
+                face.normalSign()
+            ));
+
+            if (faceHasArea(normalized) && faceIntersectsRoom(normalized, roomBounds)) {
+                rawFaces.add(normalized);
+            }
+        }
+
+        if (!ENABLE_TOPOLOGY_MESH_OPTIMIZATION) {
+            return rawFaces;
+        }
+        return mergeCoplanarFaces(rawFaces);
+    }
+
+    private static List<EdgeKey> collectOptimizedRoomLines(RoomGeometry geometry, List<Face> optimizedFaces, RoomBounds roomBounds) {
+        List<EdgeKey> edges;
+        if (ENABLE_TOPOLOGY_MESH_OPTIMIZATION && REBUILD_LINES_FROM_OPTIMIZED_FACES && !optimizedFaces.isEmpty()) {
+            edges = buildMergedSurfaceEdges(optimizedFaces, roomBounds);
+            List<RoomBounds> singleRoomBounds = new ArrayList<>(1);
+            singleRoomBounds.add(roomBounds);
+            addMissingRoomShellAxes(edges, singleRoomBounds);
+        } else {
+            edges = collectRawRoomLines(geometry, roomBounds);
+        }
+
+        if (edges.isEmpty()) {
+            edges = collectRawRoomLines(geometry, roomBounds);
+        }
+
+        return mergeCollinearEdges(edges);
+    }
+
+    private static List<EdgeKey> collectRawRoomLines(RoomGeometry geometry, RoomBounds roomBounds) {
+        List<EdgeKey> edges = new ArrayList<>();
+        for (RoomGeometry.LineData line : geometry.lines()) {
+            EdgeKey edge = edgeKey(line.x1(), line.y1(), line.z1(), line.x2(), line.y2(), line.z2());
+            if (edgeIntersectsRoom(edge, roomBounds)) {
+                edges.add(edge);
+            }
+        }
+        return edges;
+    }
+
+    private static Face normalizeFace(Face face) {
+        return new Face(
+            face.axis(),
+            face.plane(),
+            Math.min(face.a0(), face.a1()),
+            Math.min(face.b0(), face.b1()),
+            Math.max(face.a0(), face.a1()),
+            Math.max(face.b0(), face.b1()),
+            face.normalSign()
+        );
+    }
+
+    private static boolean faceHasArea(Face face) {
+        return face.a1() > face.a0() && face.b1() > face.b0();
+    }
+
+    private static List<Face> mergeCoplanarFaces(List<Face> faces) {
+        Map<FaceMergeKey, List<Face>> byPlane = new HashMap<>();
+        for (Face face : faces) {
+            Face normalized = normalizeFace(face);
+            if (!faceHasArea(normalized)) {
+                continue;
+            }
+            byPlane.computeIfAbsent(
+                new FaceMergeKey(normalized.axis(), normalized.plane(), normalized.normalSign()),
+                ignored -> new ArrayList<>()
+            ).add(normalized);
+        }
+
+        List<Face> merged = new ArrayList<>();
+        for (Map.Entry<FaceMergeKey, List<Face>> entry : byPlane.entrySet()) {
+            merged.addAll(mergeFacePlane(entry.getKey(), entry.getValue()));
+        }
+        return merged;
+    }
+
+    private static List<Face> mergeFacePlane(FaceMergeKey key, List<Face> faces) {
+        if (faces.isEmpty()) {
+            return new ArrayList<>();
+        }
+        if (faces.size() == 1) {
+            List<Face> single = new ArrayList<>(1);
+            single.add(faces.get(0));
+            return single;
+        }
+
+        List<Integer> bBounds = new ArrayList<>(faces.size() * 2);
+        for (Face face : faces) {
+            bBounds.add(face.b0());
+            bBounds.add(face.b1());
+        }
+        bBounds.sort(Integer::compareTo);
+
+        List<Integer> uniqueBBounds = new ArrayList<>(bBounds.size());
+        int last = Integer.MIN_VALUE;
+        boolean hasLast = false;
+        for (int value : bBounds) {
+            if (!hasLast || value != last) {
+                uniqueBBounds.add(value);
+                last = value;
+                hasLast = true;
+            }
+        }
+
+        List<MutableFaceRect> rects = new ArrayList<>();
+        Map<IntRange, MutableFaceRect> active = new HashMap<>();
+
+        for (int i = 0; i < uniqueBBounds.size() - 1; i++) {
+            int stripB0 = uniqueBBounds.get(i);
+            int stripB1 = uniqueBBounds.get(i + 1);
+            if (stripB1 <= stripB0) {
+                continue;
+            }
+
+            List<IntRange> intervals = new ArrayList<>();
+            for (Face face : faces) {
+                if (face.b0() <= stripB0 && face.b1() >= stripB1) {
+                    intervals.add(new IntRange(face.a0(), face.a1()));
+                }
+            }
+
+            intervals = mergeIntervals(intervals);
+            Map<IntRange, MutableFaceRect> nextActive = new HashMap<>();
+            for (IntRange interval : intervals) {
+                if (interval.end() <= interval.start()) {
+                    continue;
+                }
+
+                MutableFaceRect rect = active.get(interval);
+                if (rect != null && rect.b1 == stripB0) {
+                    rect.b1 = stripB1;
+                } else {
+                    rect = new MutableFaceRect(interval.start(), stripB0, interval.end(), stripB1);
+                    rects.add(rect);
+                }
+                nextActive.put(interval, rect);
+            }
+            active = nextActive;
+        }
+
+        List<Face> merged = new ArrayList<>(rects.size());
+        for (MutableFaceRect rect : rects) {
+            if (rect.a1 > rect.a0 && rect.b1 > rect.b0) {
+                merged.add(new Face(key.axis(), key.plane(), rect.a0, rect.b0, rect.a1, rect.b1, key.normalSign()));
+            }
+        }
+        return merged;
+    }
+
+    private static List<IntRange> mergeIntervals(List<IntRange> intervals) {
+        if (intervals.isEmpty()) {
+            return intervals;
+        }
+
+        intervals.sort((a, b) -> {
+            if (a.start() != b.start()) {
+                return Integer.compare(a.start(), b.start());
+            }
+            return Integer.compare(a.end(), b.end());
+        });
+
+        List<IntRange> merged = new ArrayList<>();
+        int currentStart = Integer.MIN_VALUE;
+        int currentEnd = Integer.MIN_VALUE;
+        for (IntRange interval : intervals) {
+            if (interval.end() <= interval.start()) {
+                continue;
+            }
+
+            if (currentStart == Integer.MIN_VALUE) {
+                currentStart = interval.start();
+                currentEnd = interval.end();
+                continue;
+            }
+
+            if (interval.start() <= currentEnd) {
+                currentEnd = Math.max(currentEnd, interval.end());
+            } else {
+                merged.add(new IntRange(currentStart, currentEnd));
+                currentStart = interval.start();
+                currentEnd = interval.end();
+            }
+        }
+
+        if (currentStart != Integer.MIN_VALUE) {
+            merged.add(new IntRange(currentStart, currentEnd));
+        }
+        return merged;
+    }
+
+    private static Direction parseDirection(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+
+        try {
+            return Direction.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     private void resetReveal() {
@@ -1461,34 +1769,24 @@ public class RoomMapScreen extends Screen {
         revealFrontier.clear();
         revealFadeCells.clear();
         for (MapFace face : roomFaces) {
-            face.reveal = 0.0f;
-            face.lastReveal = 0.0f;
+            face.reveal = 1.0f;
+            face.lastReveal = 1.0f;
         }
         for (MapLine line : roomLines) {
-            line.reveal = 0.0f;
-            line.lastReveal = 0.0f;
+            line.reveal = 1.0f;
+            line.lastReveal = 1.0f;
         }
 
         for (PipeLink link : pipeLinks) {
             link.resetReveal();
+            link.revealA = 1.0f;
+            link.lastRevealA = 1.0f;
+            link.revealB = 1.0f;
+            link.lastRevealB = 1.0f;
+            link.startRevealA = 0;
+            link.startRevealB = 0;
+            link.direction = 0.0f;
         }
-
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null) {
-            return;
-        }
-
-        List<RoomClientState.RoomEntry> rooms = RoomClientState.getRooms();
-        int roomIndex = findRoomIndex(rooms, client.player.getBlockPos());
-        if (roomIndex < 0) {
-            return;
-        }
-
-        RoomClientState.RoomEntry room = rooms.get(roomIndex);
-        BlockPos playerPos = client.player.getBlockPos();
-
-        addDiscoveredPatch(room, playerPos);
-        seedRevealAround(room, playerPos, 1);
     }
 
 
@@ -1728,21 +2026,203 @@ public class RoomMapScreen extends Screen {
         toggleFace(faces, Axis.Z, z1, x0, y0, x1, y1, 1);
     }
 
-    private static List<EdgeKey> buildMergedSurfaceEdges(Iterable<Face> faces) {
-        Map<EdgeKey, EdgeUse> edgeUses = new HashMap<>();
+    private static List<EdgeKey> buildMergedSurfaceEdges(Iterable<Face> faces, RoomBounds roomBounds) {
+        // Build outline/crease lines with interval parity instead of exact EdgeKey parity.
+        // The older optimizer only cancelled shared edges when two rectangles had identical
+        // endpoints. Real merged room geometry often creates T-junctions: a long rectangle
+        // border touches several shorter rectangle borders. Exact-key cancellation leaves the
+        // overlapped pieces behind as the "extra" lines seen on large flat walls/floors.
+        //
+        // This pass groups every face edge by its infinite axis-aligned line, splits that line
+        // at every endpoint, then applies the same odd/even visibility rule per split interval.
+        // Result: partial overlaps cancel correctly, adjacent collinear fragments become one
+        // line, and coplanar seams inside one flat surface disappear before rendering.
+        Map<LineKey, List<SegmentUse>> usesByLine = new HashMap<>();
 
         for (Face face : faces) {
-            addFaceEdgeUses(edgeUses, face);
+            addFaceSegmentUses(usesByLine, face);
         }
 
         List<EdgeKey> outlineEdges = new ArrayList<>();
-        for (Map.Entry<EdgeKey, EdgeUse> entry : edgeUses.entrySet()) {
-            if (entry.getValue().isVisibleOutline()) {
-                outlineEdges.add(entry.getKey());
+        for (Map.Entry<LineKey, List<SegmentUse>> entry : usesByLine.entrySet()) {
+            LineKey line = entry.getKey();
+            List<SegmentUse> uses = entry.getValue();
+            if (uses.isEmpty()) {
+                continue;
+            }
+
+            List<Integer> cuts = new ArrayList<>(uses.size() * 2);
+            for (SegmentUse use : uses) {
+                if (use.end <= use.start) {
+                    continue;
+                }
+                cuts.add(use.start);
+                cuts.add(use.end);
+            }
+            if (cuts.size() < 2) {
+                continue;
+            }
+            cuts.sort(Integer::compareTo);
+
+            int lastCut = Integer.MIN_VALUE;
+            List<Integer> uniqueCuts = new ArrayList<>(cuts.size());
+            for (int cut : cuts) {
+                if (cut != lastCut) {
+                    uniqueCuts.add(cut);
+                    lastCut = cut;
+                }
+            }
+
+            int currentStart = Integer.MIN_VALUE;
+            int currentEnd = Integer.MIN_VALUE;
+            for (int i = 0; i < uniqueCuts.size() - 1; i++) {
+                int start = uniqueCuts.get(i);
+                int end = uniqueCuts.get(i + 1);
+                if (end <= start) {
+                    continue;
+                }
+
+                boolean visible = splitIntervalIsVisibleOutline(uses, line, start, end, roomBounds);
+                if (visible) {
+                    if (currentStart == Integer.MIN_VALUE) {
+                        currentStart = start;
+                        currentEnd = end;
+                    } else if (start <= currentEnd) {
+                        currentEnd = Math.max(currentEnd, end);
+                    } else {
+                        addMergedLine(outlineEdges, line, currentStart, currentEnd);
+                        currentStart = start;
+                        currentEnd = end;
+                    }
+                } else if (currentStart != Integer.MIN_VALUE) {
+                    addMergedLine(outlineEdges, line, currentStart, currentEnd);
+                    currentStart = Integer.MIN_VALUE;
+                    currentEnd = Integer.MIN_VALUE;
+                }
+            }
+
+            if (currentStart != Integer.MIN_VALUE) {
+                addMergedLine(outlineEdges, line, currentStart, currentEnd);
             }
         }
 
         return mergeCollinearEdges(outlineEdges);
+    }
+
+    private static boolean splitIntervalIsVisibleOutline(List<SegmentUse> uses,
+                                                          LineKey line,
+                                                          int start,
+                                                          int end,
+                                                          RoomBounds roomBounds) {
+        Map<PlaneKey, Integer> countsByPlane = new HashMap<>();
+        for (SegmentUse use : uses) {
+            if (use.start <= start && use.end >= end) {
+                countsByPlane.merge(use.plane, 1, Integer::sum);
+            }
+        }
+
+        int oddPlaneCount = 0;
+        Axis firstOddAxis = null;
+        boolean hasDifferentOddAxes = false;
+        for (Map.Entry<PlaneKey, Integer> entry : countsByPlane.entrySet()) {
+            if ((entry.getValue() & 1) == 0) {
+                continue;
+            }
+            oddPlaneCount++;
+            Axis axis = entry.getKey().axis();
+            if (firstOddAxis == null) {
+                firstOddAxis = axis;
+            } else if (firstOddAxis != axis) {
+                hasDifferentOddAxes = true;
+            }
+        }
+
+        if (oddPlaneCount == 0) {
+            return false;
+        }
+        if (!CULL_FLAT_INTERIOR_BOUNDARY_LINES) {
+            return true;
+        }
+
+        // Keep true 3D creases/silhouettes. They have two different face planes using
+        // the same edge interval. These are the important outlines that communicate shape.
+        if (oddPlaneCount > 1 || hasDifferentOddAxes) {
+            return true;
+        }
+
+        // Keep pure one-face edges only when they lie on the coarse room shell. Interior
+        // one-face boundaries are usually holes/empty-space cuts from block detail, and are
+        // what creates the distracting extra lines on otherwise flat walls/floors.
+        return lineIntervalOnRoomShellEdge(line, roomBounds);
+    }
+
+    private static boolean lineIntervalOnRoomShellEdge(LineKey line, RoomBounds roomBounds) {
+        return switch (line.axis) {
+            case 0 -> isBoundary(line.fixedA, roomBounds.y0, roomBounds.y1)
+                && isBoundary(line.fixedB, roomBounds.z0, roomBounds.z1);
+            case 1 -> isBoundary(line.fixedA, roomBounds.x0, roomBounds.x1)
+                && isBoundary(line.fixedB, roomBounds.z0, roomBounds.z1);
+            case 2 -> isBoundary(line.fixedA, roomBounds.x0, roomBounds.x1)
+                && isBoundary(line.fixedB, roomBounds.y0, roomBounds.y1);
+            default -> false;
+        };
+    }
+
+    private static void addFaceSegmentUses(Map<LineKey, List<SegmentUse>> usesByLine, Face face) {
+        PlaneKey plane = new PlaneKey(face.axis, face.plane);
+        switch (face.axis) {
+            case X -> {
+                int x = face.plane;
+                addSegmentUse(usesByLine, plane, x, face.a0, face.b0, x, face.a1, face.b0);
+                addSegmentUse(usesByLine, plane, x, face.a1, face.b0, x, face.a1, face.b1);
+                addSegmentUse(usesByLine, plane, x, face.a1, face.b1, x, face.a0, face.b1);
+                addSegmentUse(usesByLine, plane, x, face.a0, face.b1, x, face.a0, face.b0);
+            }
+            case Y -> {
+                int y = face.plane;
+                addSegmentUse(usesByLine, plane, face.a0, y, face.b0, face.a1, y, face.b0);
+                addSegmentUse(usesByLine, plane, face.a1, y, face.b0, face.a1, y, face.b1);
+                addSegmentUse(usesByLine, plane, face.a1, y, face.b1, face.a0, y, face.b1);
+                addSegmentUse(usesByLine, plane, face.a0, y, face.b1, face.a0, y, face.b0);
+            }
+            case Z -> {
+                int z = face.plane;
+                addSegmentUse(usesByLine, plane, face.a0, face.b0, z, face.a1, face.b0, z);
+                addSegmentUse(usesByLine, plane, face.a1, face.b0, z, face.a1, face.b1, z);
+                addSegmentUse(usesByLine, plane, face.a1, face.b1, z, face.a0, face.b1, z);
+                addSegmentUse(usesByLine, plane, face.a0, face.b1, z, face.a0, face.b0, z);
+            }
+        }
+    }
+
+    private static void addSegmentUse(Map<LineKey, List<SegmentUse>> usesByLine,
+                                      PlaneKey plane,
+                                      int x1, int y1, int z1,
+                                      int x2, int y2, int z2) {
+        if (x1 == x2 && y1 == y2 && z1 == z2) {
+            return;
+        }
+
+        LineKey line;
+        int start;
+        int end;
+        if (x1 != x2) {
+            line = new LineKey(0, y1, z1);
+            start = Math.min(x1, x2);
+            end = Math.max(x1, x2);
+        } else if (y1 != y2) {
+            line = new LineKey(1, x1, z1);
+            start = Math.min(y1, y2);
+            end = Math.max(y1, y2);
+        } else {
+            line = new LineKey(2, x1, y1);
+            start = Math.min(z1, z2);
+            end = Math.max(z1, z2);
+        }
+
+        if (end > start) {
+            usesByLine.computeIfAbsent(line, ignored -> new ArrayList<>()).add(new SegmentUse(start, end, plane));
+        }
     }
 
     private static void addFaceEdgeUses(Map<EdgeKey, EdgeUse> edgeUses, Face face) {
@@ -1913,9 +2393,33 @@ public class RoomMapScreen extends Screen {
     }
 
     private boolean lineHasFacingFace(MapLine line) {
+        for (MapFace face : line.adjacentFaces) {
+            if (face.facingCamera) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void rebuildLineFaceAdjacency() {
+        for (MapLine line : roomLines) {
+            line.adjacentFaces.clear();
+            addAdjacentFacesForLine(line);
+        }
+    }
+
+    private void removeLinesWithoutAdjacentFaces() {
+        for (int i = roomLines.size() - 1; i >= 0; i--) {
+            if (roomLines.get(i).adjacentFaces.isEmpty()) {
+                roomLines.remove(i);
+            }
+        }
+    }
+
+    private void addAdjacentFacesForLine(MapLine line) {
         int axis = lineAxis(line);
         if (axis < 0) {
-            return false;
+            return;
         }
 
         int minX = Math.min(line.x1, line.x2);
@@ -1927,26 +2431,53 @@ public class RoomMapScreen extends Screen {
 
         switch (axis) {
             case 0 -> {
-                if (lineTouchesFacingYFace(line.y1, line.z1, minX, maxX)) {
-                    return true;
-                }
-                return lineTouchesFacingZFace(line.z1, line.y1, minX, maxX);
+                addLineFacesByB(line, Axis.Y, line.y1, line.z1, minX, maxX, true);
+                addLineFacesByB(line, Axis.Z, line.z1, line.y1, minX, maxX, true);
             }
             case 1 -> {
-                if (lineTouchesFacingXFace(line.x1, line.z1, minY, maxY)) {
-                    return true;
-                }
-                return lineTouchesFacingZFaceAtX(line.z1, line.x1, minY, maxY);
+                addLineFacesByB(line, Axis.X, line.x1, line.z1, minY, maxY, true);
+                addLineFacesByA(line, Axis.Z, line.z1, line.x1, minY, maxY, false);
             }
             case 2 -> {
-                if (lineTouchesFacingXFaceAtY(line.x1, line.y1, minZ, maxZ)) {
-                    return true;
-                }
-                return lineTouchesFacingYFaceAtX(line.y1, line.x1, minZ, maxZ);
+                addLineFacesByA(line, Axis.X, line.x1, line.y1, minZ, maxZ, false);
+                addLineFacesByA(line, Axis.Y, line.y1, line.x1, minZ, maxZ, false);
             }
-            default -> {
-                return false;
+        }
+    }
+
+    private void addLineFacesByB(MapLine line, Axis planeAxis, int plane, int fixedB, int lineStart, int lineEnd, boolean overlapA) {
+        List<MapFace> faces = facesByPlane.get(new PlaneKey(planeAxis, plane));
+        if (faces == null) {
+            return;
+        }
+
+        for (MapFace face : faces) {
+            int overlap0 = overlapA ? Math.min(face.a0, face.a1) : Math.min(face.b0, face.b1);
+            int overlap1 = overlapA ? Math.max(face.a0, face.a1) : Math.max(face.b0, face.b1);
+            if ((fixedB == face.b0 || fixedB == face.b1) && rangesOverlap(lineStart, lineEnd, overlap0, overlap1)) {
+                addAdjacentFace(line, face);
             }
+        }
+    }
+
+    private void addLineFacesByA(MapLine line, Axis planeAxis, int plane, int fixedA, int lineStart, int lineEnd, boolean overlapA) {
+        List<MapFace> faces = facesByPlane.get(new PlaneKey(planeAxis, plane));
+        if (faces == null) {
+            return;
+        }
+
+        for (MapFace face : faces) {
+            int overlap0 = overlapA ? Math.min(face.a0, face.a1) : Math.min(face.b0, face.b1);
+            int overlap1 = overlapA ? Math.max(face.a0, face.a1) : Math.max(face.b0, face.b1);
+            if ((fixedA == face.a0 || fixedA == face.a1) && rangesOverlap(lineStart, lineEnd, overlap0, overlap1)) {
+                addAdjacentFace(line, face);
+            }
+        }
+    }
+
+    private static void addAdjacentFace(MapLine line, MapFace face) {
+        if (!line.adjacentFaces.contains(face)) {
+            line.adjacentFaces.add(face);
         }
     }
 
@@ -2059,29 +2590,7 @@ public class RoomMapScreen extends Screen {
     }
 
     private boolean isFaceFacingCamera(MapFace face) {
-        double nx = 0.0;
-        double ny = 0.0;
-        double nz = 0.0;
-
-        switch (face.axis) {
-            case X -> nx = face.normalSign;
-            case Y -> ny = face.normalSign;
-            case Z -> nz = face.normalSign;
-        }
-
-        double yawRad = Math.toRadians(yaw);
-        double yawCos = Math.cos(yawRad);
-        double yawSin = Math.sin(yawRad);
-
-        double yawX = nx * yawCos + nz * yawSin;
-        double yawZ = -nx * yawSin + nz * yawCos;
-
-        double pitchRad = Math.toRadians(pitch);
-        double pitchCos = Math.cos(pitchRad);
-        double pitchSin = Math.sin(pitchRad);
-
-        double viewZ = ny * pitchSin + yawZ * pitchCos;
-        return viewZ > 0.001;
+        return face.facingCamera;
     }
 
     private static int lineAxis(MapLine line) {
@@ -2127,7 +2636,7 @@ public class RoomMapScreen extends Screen {
                                 int x1, int y1, int z1,
                                 int x2, int y2, int z2) {
         EdgeKey key = edgeKey(x1, y1, z1, x2, y2, z2);
-        edges.putIfAbsent(key, new MapLine(key, null));
+        edges.putIfAbsent(key, new MapLine(key, null, -1));
     }
 
     private static EdgeKey edgeKey(int x1, int y1, int z1, int x2, int y2, int z2) {
@@ -2175,13 +2684,21 @@ public class RoomMapScreen extends Screen {
                                      double x2, double y2, double z2,
                                      float r1, float g1, float b1, float a1,
                                      float r2, float g2, float b2, float a2) {
-        ProjectedPoint p1 = projectPoint(x1, y1, z1);
-        ProjectedPoint p2 = projectPoint(x2, y2, z2);
+        projectToScratch(x1, y1, z1);
+        float sx1 = renderCache.projectedX;
+        float sy1 = renderCache.projectedY;
+        projectToScratch(x2, y2, z2);
+        float sx2 = renderCache.projectedX;
+        float sy2 = renderCache.projectedY;
+        if (!projectedSegmentOnScreen(sx1, sy1, sx2, sy2)) {
+            return;
+        }
+
         drawScreenLineGradient(
             buffer,
             matrix,
-            p1.x, p1.y,
-            p2.x, p2.y,
+            sx1, sy1,
+            sx2, sy2,
             MAP_LINE_THICKNESS,
             r1, g1, b1, MathHelper.clamp(a1, 0.0f, 1.0f),
             r2, g2, b2, MathHelper.clamp(a2, 0.0f, 1.0f)
@@ -2189,59 +2706,34 @@ public class RoomMapScreen extends Screen {
     }
 
     private ProjectedPoint projectPoint(double worldX, double worldY, double worldZ) {
-        double x = worldX - focusX + panX;
-        double y = worldY - focusY + panY;
-        double z = worldZ - focusZ + panZ;
-
-        double yawRad = Math.toRadians(yaw);
-        double yawCos = Math.cos(yawRad);
-        double yawSin = Math.sin(yawRad);
-
-        // Match the 3D map orbit, but keep it in our own projection so line thickness
-        // stays stable.
-        double yawX = x * yawCos + z * yawSin;
-        double yawZ = -x * yawSin + z * yawCos;
-
-        double pitchRad = Math.toRadians(pitch);
-        double pitchCos = Math.cos(pitchRad);
-        double pitchSin = Math.sin(pitchRad);
-        double pitchY = y * pitchCos - yawZ * pitchSin;
-
-        double screenScale = scale * zoom;
-        float sx = (float) (this.width * 0.5 + yawX * screenScale);
-
-        // GUI Y grows downward; subtract so world +Y renders upward instead of the
-        // whole map appearing upside down.
-        float sy = (float) (this.height * 0.55 - pitchY * screenScale);
-        return new ProjectedPoint(sx, sy);
+        return new ProjectedPoint(projectX(worldX, worldY, worldZ), projectY(worldX, worldY, worldZ));
     }
 
     private RoomActivity computeRoomActivity() {
-        boolean[] activeRooms = new boolean[roomBounds.size()];
-        for (int i = 0; i < roomBounds.size(); i++) {
-            activeRooms[i] = roomIntersectsActiveSlab(roomBounds.get(i));
+        if (activeRoomCache.length != roomBounds.size()) {
+            activeRoomCache = new boolean[roomBounds.size()];
         }
-        return new RoomActivity(activeRooms);
+        for (int i = 0; i < roomBounds.size(); i++) {
+            activeRoomCache[i] = roomIntersectsActiveSlab(roomBounds.get(i));
+        }
+        roomActivityCache.activeRooms = activeRoomCache;
+        return roomActivityCache;
     }
 
     private boolean roomIntersectsActiveSlab(RoomBounds room) {
         // projectPoint() centers a world coordinate when:
         // world - focus + pan == 0, so the current map view center is focus - pan.
-        double centerX = focusX - panX;
-        double centerY = focusY - panY;
-        double centerZ = focusZ - panZ;
-
-        double yawRad = Math.toRadians(yaw);
-        double yawCos = Math.cos(yawRad);
-        double yawSin = Math.sin(yawRad);
+        double centerX = renderCache.centerX;
+        double centerY = renderCache.centerY;
+        double centerZ = renderCache.centerZ;
 
         // Same yaw basis as the map projection, but with world-locked vertical pitch.
-        double rightX = yawCos;
+        double rightX = renderCache.yawCos;
         double rightY = 0.0;
-        double rightZ = yawSin;
-        double depthX = -yawSin;
+        double rightZ = renderCache.yawSin;
+        double depthX = -renderCache.yawSin;
         double depthY = 0.0;
-        double depthZ = yawCos;
+        double depthZ = renderCache.yawCos;
         double upX = 0.0;
         double upY = 1.0;
         double upZ = 0.0;
@@ -2274,21 +2766,11 @@ public class RoomMapScreen extends Screen {
     }
 
     private boolean isFaceActive(MapFace face, RoomActivity activity) {
-        for (int i = 0; i < roomBounds.size(); i++) {
-            if (activity.activeRooms[i] && faceIntersectsRoom(face, roomBounds.get(i))) {
-                return true;
-            }
-        }
-        return false;
+        return isRoomActive(activity, face.roomIndex);
     }
 
     private boolean isLineActive(MapLine line, RoomActivity activity) {
-        for (int i = 0; i < roomBounds.size(); i++) {
-            if (activity.activeRooms[i] && lineIntersectsRoom(line, roomBounds.get(i))) {
-                return true;
-            }
-        }
-        return false;
+        return isRoomActive(activity, line.roomIndex);
     }
 
     private boolean faceIntersectsRoom(MapFace face, RoomBounds room) {
@@ -2500,101 +2982,35 @@ public class RoomMapScreen extends Screen {
         buffer.vertex(matrix, -10001.0f, -10001.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
         buffer.vertex(matrix, -10001.0f, -10000.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
 
-        for (int i = 0; i < roomBounds.size(); i++) {
-            if (activity.activeRooms[i] != activePass) {
+        if (ENABLE_ROOM_VOLUME_STENCIL) {
+            drawRoomVolumeDepthMask(buffer, matrix, activity, activePass, 0.0f, false);
+            return;
+        }
+
+        for (MapFace face : roomFaces) {
+            if (!face.visibleOnScreen || isFaceActive(face, activity) != activePass) {
                 continue;
             }
 
-            RoomBounds room = roomBounds.get(i);
-            String roomKey = roomKeys.get(i);
-            double x0 = room.x0 * INV_SHAPE_UNIT;
-            double y0 = room.y0 * INV_SHAPE_UNIT;
-            double z0 = room.z0 * INV_SHAPE_UNIT;
-            double x1 = room.x1 * INV_SHAPE_UNIT;
-            double y1 = room.y1 * INV_SHAPE_UNIT;
-            double z1 = room.z1 * INV_SHAPE_UNIT;
-
-            // -X
-            drawRoomFaceMask(buffer, matrix, roomKey, Axis.X, x0, y0, z0, y1, z1, delta);
-            // +X
-            drawRoomFaceMask(buffer, matrix, roomKey, Axis.X, x1, y0, z0, y1, z1, delta);
-            // -Y
-            drawRoomFaceMask(buffer, matrix, roomKey, Axis.Y, y0, x0, z0, x1, z1, delta);
-            // +Y
-            drawRoomFaceMask(buffer, matrix, roomKey, Axis.Y, y1, x0, z0, x1, z1, delta);
-            // -Z
-            drawRoomFaceMask(buffer, matrix, roomKey, Axis.Z, z0, x0, y0, x1, y1, delta);
-            // +Z
-            drawRoomFaceMask(buffer, matrix, roomKey, Axis.Z, z1, x0, y0, x1, y1, delta);
-        }
-    }
-
-    private void drawRoomFaceMask(VertexConsumer buffer, Matrix4f matrix,
-                                  String roomKey,
-                                  Axis axis,
-                                  double fixed,
-                                  double a0, double b0,
-                                  double a1, double b1,
-                                  float delta) {
-        double step = ROOM_MASK_STEP;
-
-        for (double a = a0; a < a1 - 1.0e-6; a += step) {
-            double an = Math.min(a + step, a1);
-            for (double b = b0; b < b1 - 1.0e-6; b += step) {
-                double bn = Math.min(b + step, b1);
-
-                double cx;
-                double cy;
-                double cz;
-
-                switch (axis) {
-                    case X -> {
-                        cx = fixed;
-                        cy = (a + an) * 0.5;
-                        cz = (b + bn) * 0.5;
-                    }
-                    case Y -> {
-                        cx = (a + an) * 0.5;
-                        cy = fixed;
-                        cz = (b + bn) * 0.5;
-                    }
-                    case Z -> {
-                        cx = (a + an) * 0.5;
-                        cy = (b + bn) * 0.5;
-                        cz = fixed;
-                    }
-                    default -> {
-                        cx = 0.0;
-                        cy = 0.0;
-                        cz = 0.0;
-                    }
-                }
-
-                PointReveal reveal = pointRevealInRoom(roomKey, cx, cy, cz);
-                if (reveal.alpha <= 0.02f) {
-                    continue;
-                }
-
-                switch (axis) {
-                    case X -> drawRoomFace(buffer, matrix,
-                        fixed, a, b,
-                        fixed, an, b,
-                        fixed, an, bn,
-                        fixed, a, bn,
-                        0.0f, 0.0f, 0.0f, 1.0f);
-                    case Y -> drawRoomFace(buffer, matrix,
-                        a, fixed, b,
-                        an, fixed, b,
-                        an, fixed, bn,
-                        a, fixed, bn,
-                        0.0f, 0.0f, 0.0f, 1.0f);
-                    case Z -> drawRoomFace(buffer, matrix,
-                        a, b, fixed,
-                        an, b, fixed,
-                        an, bn, fixed,
-                        a, bn, fixed,
-                        0.0f, 0.0f, 0.0f, 1.0f);
-                }
+            switch (face.axis) {
+                case X -> drawProjectedFaceDepth(buffer, matrix,
+                    face.projectedX1, face.projectedY1,
+                    face.projectedX2, face.projectedY2,
+                    face.projectedX3, face.projectedY3,
+                    face.projectedX4, face.projectedY4,
+                    0.0f);
+                case Y -> drawProjectedFaceDepth(buffer, matrix,
+                    face.projectedX1, face.projectedY1,
+                    face.projectedX2, face.projectedY2,
+                    face.projectedX3, face.projectedY3,
+                    face.projectedX4, face.projectedY4,
+                    0.0f);
+                case Z -> drawProjectedFaceDepth(buffer, matrix,
+                    face.projectedX1, face.projectedY1,
+                    face.projectedX2, face.projectedY2,
+                    face.projectedX3, face.projectedY3,
+                    face.projectedX4, face.projectedY4,
+                    0.0f);
             }
         }
     }
@@ -2606,7 +3022,7 @@ public class RoomMapScreen extends Screen {
         buffer.vertex(matrix, -10001.0f, -10000.0f, 1.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
 
         for (MapFace face : roomFaces) {
-            if (isFaceActive(face, activity) != activePass) {
+            if (!face.visibleOnScreen || isFaceActive(face, activity) != activePass) {
                 continue;
             }
 
@@ -2617,46 +3033,114 @@ public class RoomMapScreen extends Screen {
 
             switch (face.axis) {
                 case X -> {
-                    double x = face.planeWorld();
-                    double y0 = face.a0World();
-                    double y1 = face.a1World();
-                    double z0 = face.b0World();
-                    double z1 = face.b1World();
-                    drawRoomFaceDepth(buffer, matrix,
-                        x, y0, z0,
-                        x, y1, z0,
-                        x, y1, z1,
-                        x, y0, z1,
+                    drawProjectedFaceDepth(buffer, matrix,
+                        face.projectedX1, face.projectedY1,
+                        face.projectedX2, face.projectedY2,
+                        face.projectedX3, face.projectedY3,
+                        face.projectedX4, face.projectedY4,
                         1.0f);
                 }
                 case Y -> {
-                    double y = face.planeWorld();
-                    double x0 = face.a0World();
-                    double x1 = face.a1World();
-                    double z0 = face.b0World();
-                    double z1 = face.b1World();
-                    drawRoomFaceDepth(buffer, matrix,
-                        x0, y, z0,
-                        x1, y, z0,
-                        x1, y, z1,
-                        x0, y, z1,
+                    drawProjectedFaceDepth(buffer, matrix,
+                        face.projectedX1, face.projectedY1,
+                        face.projectedX2, face.projectedY2,
+                        face.projectedX3, face.projectedY3,
+                        face.projectedX4, face.projectedY4,
                         1.0f);
                 }
                 case Z -> {
-                    double z = face.planeWorld();
-                    double x0 = face.a0World();
-                    double x1 = face.a1World();
-                    double y0 = face.b0World();
-                    double y1 = face.b1World();
-                    drawRoomFaceDepth(buffer, matrix,
-                        x0, y0, z,
-                        x1, y0, z,
-                        x1, y1, z,
-                        x0, y1, z,
+                    drawProjectedFaceDepth(buffer, matrix,
+                        face.projectedX1, face.projectedY1,
+                        face.projectedX2, face.projectedY2,
+                        face.projectedX3, face.projectedY3,
+                        face.projectedX4, face.projectedY4,
                         1.0f);
                 }
             }
         }
+    }
+
+    private void drawRoomVolumeEmptyFill(VertexConsumer buffer, Matrix4f matrix, RoomActivity activity, boolean activePass) {
+        buffer.vertex(matrix, -10000.0f, -10000.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
+        buffer.vertex(matrix, -10000.0f, -10001.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
+        buffer.vertex(matrix, -10001.0f, -10001.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
+        buffer.vertex(matrix, -10001.0f, -10000.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
+
+        float r = activePass ? ROOM_VOLUME_FILL_R : INACTIVE_ROOM_VOLUME_FILL_R;
+        float g = activePass ? ROOM_VOLUME_FILL_G : INACTIVE_ROOM_VOLUME_FILL_G;
+        float b = activePass ? ROOM_VOLUME_FILL_B : INACTIVE_ROOM_VOLUME_FILL_B;
+        float a = activePass ? ROOM_VOLUME_FILL_A : INACTIVE_ROOM_VOLUME_FILL_A;
+
+        for (int roomIndex = 0; roomIndex < roomBounds.size(); roomIndex++) {
+            if (isRoomActive(activity, roomIndex) != activePass) {
+                continue;
+            }
+            drawRoomBoundsFaces(buffer, matrix, roomBounds.get(roomIndex), r, g, b, a, 0.0f, true);
+        }
+    }
+
+    private void drawRoomVolumeDepthMask(VertexConsumer buffer, Matrix4f matrix,
+                                         RoomActivity activity,
+                                         boolean activePass,
+                                         float depth,
+                                         boolean cullToScreen) {
+        for (int roomIndex = 0; roomIndex < roomBounds.size(); roomIndex++) {
+            if (isRoomActive(activity, roomIndex) != activePass) {
+                continue;
+            }
+            drawRoomBoundsFaces(buffer, matrix, roomBounds.get(roomIndex), 0.0f, 0.0f, 0.0f, 1.0f, depth, cullToScreen);
+        }
+    }
+
+    private void drawRoomBoundsFaces(VertexConsumer buffer, Matrix4f matrix,
+                                     RoomBounds room,
+                                     float r, float g, float b, float a,
+                                     float depth,
+                                     boolean cullToScreen) {
+        double x0 = room.x0World();
+        double y0 = room.y0World();
+        double z0 = room.z0World();
+        double x1 = room.x1World();
+        double y1 = room.y1World();
+        double z1 = room.z1World();
+
+        drawProjectedWorldQuad(buffer, matrix, x0, y0, z0, x0, y1, z0, x0, y1, z1, x0, y0, z1, r, g, b, a, depth, cullToScreen);
+        drawProjectedWorldQuad(buffer, matrix, x1, y0, z1, x1, y1, z1, x1, y1, z0, x1, y0, z0, r, g, b, a, depth, cullToScreen);
+        drawProjectedWorldQuad(buffer, matrix, x0, y0, z1, x1, y0, z1, x1, y0, z0, x0, y0, z0, r, g, b, a, depth, cullToScreen);
+        drawProjectedWorldQuad(buffer, matrix, x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1, r, g, b, a, depth, cullToScreen);
+        drawProjectedWorldQuad(buffer, matrix, x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0, r, g, b, a, depth, cullToScreen);
+        drawProjectedWorldQuad(buffer, matrix, x0, y0, z1, x0, y1, z1, x1, y1, z1, x1, y0, z1, r, g, b, a, depth, cullToScreen);
+    }
+
+    private void drawProjectedWorldQuad(VertexConsumer buffer, Matrix4f matrix,
+                                        double wx1, double wy1, double wz1,
+                                        double wx2, double wy2, double wz2,
+                                        double wx3, double wy3, double wz3,
+                                        double wx4, double wy4, double wz4,
+                                        float r, float g, float b, float a,
+                                        float depth,
+                                        boolean cullToScreen) {
+        projectToScratch(wx1, wy1, wz1);
+        float x1 = renderCache.projectedX;
+        float y1 = renderCache.projectedY;
+        projectToScratch(wx2, wy2, wz2);
+        float x2 = renderCache.projectedX;
+        float y2 = renderCache.projectedY;
+        projectToScratch(wx3, wy3, wz3);
+        float x3 = renderCache.projectedX;
+        float y3 = renderCache.projectedY;
+        projectToScratch(wx4, wy4, wz4);
+        float x4 = renderCache.projectedX;
+        float y4 = renderCache.projectedY;
+
+        if (cullToScreen && !projectedQuadOnScreen(x1, y1, x2, y2, x3, y3, x4, y4)) {
+            return;
+        }
+
+        buffer.vertex(matrix, x1, y1, depth).color(r, g, b, a);
+        buffer.vertex(matrix, x2, y2, depth).color(r, g, b, a);
+        buffer.vertex(matrix, x3, y3, depth).color(r, g, b, a);
+        buffer.vertex(matrix, x4, y4, depth).color(r, g, b, a);
     }
 
     private void drawSolidBlockFill(VertexConsumer buffer, Matrix4f matrix, float delta, RoomActivity activity, boolean activePass) {
@@ -2666,7 +3150,7 @@ public class RoomMapScreen extends Screen {
         buffer.vertex(matrix, -10001.0f, -10000.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
 
         for (MapFace face : roomFaces) {
-            if (isFaceActive(face, activity) != activePass) {
+            if (!face.visibleOnScreen || isFaceActive(face, activity) != activePass) {
                 continue;
             }
 
@@ -2687,11 +3171,11 @@ public class RoomMapScreen extends Screen {
                     double y1 = face.a1World();
                     double z0 = face.b0World();
                     double z1 = face.b1World();
-                    drawRoomFace(buffer, matrix,
-                        x, y0, z0,
-                        x, y1, z0,
-                        x, y1, z1,
-                        x, y0, z1,
+                    drawProjectedFace(buffer, matrix,
+                        face.projectedX1, face.projectedY1,
+                        face.projectedX2, face.projectedY2,
+                        face.projectedX3, face.projectedY3,
+                        face.projectedX4, face.projectedY4,
                         fillR, fillG, fillB, alpha);
                 }
                 case Y -> {
@@ -2700,11 +3184,11 @@ public class RoomMapScreen extends Screen {
                     double x1 = face.a1World();
                     double z0 = face.b0World();
                     double z1 = face.b1World();
-                    drawRoomFace(buffer, matrix,
-                        x0, y, z0,
-                        x1, y, z0,
-                        x1, y, z1,
-                        x0, y, z1,
+                    drawProjectedFace(buffer, matrix,
+                        face.projectedX1, face.projectedY1,
+                        face.projectedX2, face.projectedY2,
+                        face.projectedX3, face.projectedY3,
+                        face.projectedX4, face.projectedY4,
                         fillR, fillG, fillB, alpha);
                 }
                 case Z -> {
@@ -2713,11 +3197,11 @@ public class RoomMapScreen extends Screen {
                     double x1 = face.a1World();
                     double y0 = face.b0World();
                     double y1 = face.b1World();
-                    drawRoomFace(buffer, matrix,
-                        x0, y0, z,
-                        x1, y0, z,
-                        x1, y1, z,
-                        x0, y1, z,
+                    drawProjectedFace(buffer, matrix,
+                        face.projectedX1, face.projectedY1,
+                        face.projectedX2, face.projectedY2,
+                        face.projectedX3, face.projectedY3,
+                        face.projectedX4, face.projectedY4,
                         fillR, fillG, fillB, alpha);
                 }
             }
@@ -2733,38 +3217,35 @@ public class RoomMapScreen extends Screen {
         buffer.vertex(matrix, x1, y0, 0.0f).color(r, g, b, a);
     }
 
-    private void drawRoomFace(VertexConsumer buffer, Matrix4f matrix,
-                              double x1, double y1, double z1,
-                              double x2, double y2, double z2,
-                              double x3, double y3, double z3,
-                              double x4, double y4, double z4,
-                              float r, float g, float b, float a) {
-        ProjectedPoint p1 = projectPoint(x1, y1, z1);
-        ProjectedPoint p2 = projectPoint(x2, y2, z2);
-        ProjectedPoint p3 = projectPoint(x3, y3, z3);
-        ProjectedPoint p4 = projectPoint(x4, y4, z4);
-
-        buffer.vertex(matrix, p1.x, p1.y, 0.0f).color(r, g, b, a);
-        buffer.vertex(matrix, p2.x, p2.y, 0.0f).color(r, g, b, a);
-        buffer.vertex(matrix, p3.x, p3.y, 0.0f).color(r, g, b, a);
-        buffer.vertex(matrix, p4.x, p4.y, 0.0f).color(r, g, b, a);
+    private void drawProjectedFace(VertexConsumer buffer, Matrix4f matrix,
+                                   float x1, float y1,
+                                   float x2, float y2,
+                                   float x3, float y3,
+                                   float x4, float y4,
+                                   float r, float g, float b, float a) {
+        buffer.vertex(matrix, x1, y1, 0.0f).color(r, g, b, a);
+        buffer.vertex(matrix, x2, y2, 0.0f).color(r, g, b, a);
+        buffer.vertex(matrix, x3, y3, 0.0f).color(r, g, b, a);
+        buffer.vertex(matrix, x4, y4, 0.0f).color(r, g, b, a);
     }
 
-    private void drawRoomFaceDepth(VertexConsumer buffer, Matrix4f matrix,
-                                   double x1, double y1, double z1,
-                                   double x2, double y2, double z2,
-                                   double x3, double y3, double z3,
-                                   double x4, double y4, double z4,
-                                   float depth) {
-        ProjectedPoint p1 = projectPoint(x1, y1, z1);
-        ProjectedPoint p2 = projectPoint(x2, y2, z2);
-        ProjectedPoint p3 = projectPoint(x3, y3, z3);
-        ProjectedPoint p4 = projectPoint(x4, y4, z4);
+    private void drawProjectedFaceDepth(VertexConsumer buffer, Matrix4f matrix,
+                                        float x1, float y1,
+                                        float x2, float y2,
+                                        float x3, float y3,
+                                        float x4, float y4,
+                                        float depth) {
+        buffer.vertex(matrix, x1, y1, depth).color(0.0f, 0.0f, 0.0f, 1.0f);
+        buffer.vertex(matrix, x2, y2, depth).color(0.0f, 0.0f, 0.0f, 1.0f);
+        buffer.vertex(matrix, x3, y3, depth).color(0.0f, 0.0f, 0.0f, 1.0f);
+        buffer.vertex(matrix, x4, y4, depth).color(0.0f, 0.0f, 0.0f, 1.0f);
+    }
 
-        buffer.vertex(matrix, p1.x, p1.y, depth).color(0.0f, 0.0f, 0.0f, 1.0f);
-        buffer.vertex(matrix, p2.x, p2.y, depth).color(0.0f, 0.0f, 0.0f, 1.0f);
-        buffer.vertex(matrix, p3.x, p3.y, depth).color(0.0f, 0.0f, 0.0f, 1.0f);
-        buffer.vertex(matrix, p4.x, p4.y, depth).color(0.0f, 0.0f, 0.0f, 1.0f);
+    private static void drawScreenLine(VertexConsumer buffer, Matrix4f matrix,
+                                       float x1, float y1,
+                                       float x2, float y2,
+                                       float r, float g, float b, float a) {
+        drawScreenLineGradient(buffer, matrix, x1, y1, x2, y2, MAP_LINE_THICKNESS, r, g, b, a, r, g, b, a);
     }
 
     private static void drawScreenLineGradient(VertexConsumer buffer, Matrix4f matrix,
@@ -2990,6 +3471,27 @@ public class RoomMapScreen extends Screen {
         return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
+    private static final class RenderFrameCache {
+        private double yawCos = 1.0;
+        private double yawSin = 0.0;
+        private double pitchCos = 1.0;
+        private double pitchSin = 0.0;
+        private double screenScale = 1.0;
+        private double centerX = 0.0;
+        private double centerY = 0.0;
+        private double centerZ = 0.0;
+        private double screenCenterX = 0.0;
+        private double screenCenterY = 0.0;
+        private double faceXP = 0.0;
+        private double faceXN = 0.0;
+        private double faceYP = 0.0;
+        private double faceYN = 0.0;
+        private double faceZP = 1.0;
+        private double faceZN = -1.0;
+        private float projectedX = 0.0f;
+        private float projectedY = 0.0f;
+    }
+
     private enum Axis {
         X,
         Y,
@@ -2999,6 +3501,7 @@ public class RoomMapScreen extends Screen {
 
     private static final class MapFace {
         private final String roomKey;
+        private final int roomIndex;
         private final Axis axis;
         private final int plane;
         private final int a0;
@@ -3009,9 +3512,32 @@ public class RoomMapScreen extends Screen {
 
         private float reveal = 0.0f;
         private float lastReveal = 0.0f;
+        private float projectedX1;
+        private float projectedY1;
+        private float projectedX2;
+        private float projectedY2;
+        private float projectedX3;
+        private float projectedY3;
+        private float projectedX4;
+        private float projectedY4;
+        private boolean facingCamera;
+        private boolean visibleOnScreen;
+        private double wx1;
+        private double wy1;
+        private double wz1;
+        private double wx2;
+        private double wy2;
+        private double wz2;
+        private double wx3;
+        private double wy3;
+        private double wz3;
+        private double wx4;
+        private double wy4;
+        private double wz4;
 
-        private MapFace(Face face, String roomKey) {
+        private MapFace(Face face, String roomKey, int roomIndex) {
             this.roomKey = roomKey;
+            this.roomIndex = roomIndex;
             this.axis = face.axis;
             this.plane = face.plane;
             this.a0 = face.a0;
@@ -3019,6 +3545,49 @@ public class RoomMapScreen extends Screen {
             this.a1 = face.a1;
             this.b1 = face.b1;
             this.normalSign = face.normalSign;
+            cacheWorldCoordinates();
+        }
+
+        private MapFace(RoomGeometry.FaceData face, String roomKey, int roomIndex) {
+            this.roomKey = roomKey;
+            this.roomIndex = roomIndex;
+            this.axis = Axis.valueOf(face.axis());
+            this.plane = face.plane();
+            this.a0 = face.a0();
+            this.b0 = face.b0();
+            this.a1 = face.a1();
+            this.b1 = face.b1();
+            this.normalSign = face.normalSign();
+            cacheWorldCoordinates();
+        }
+
+        private void cacheWorldCoordinates() {
+            double p = plane * INV_SHAPE_UNIT;
+            double a0w = a0 * INV_SHAPE_UNIT;
+            double b0w = b0 * INV_SHAPE_UNIT;
+            double a1w = a1 * INV_SHAPE_UNIT;
+            double b1w = b1 * INV_SHAPE_UNIT;
+
+            switch (axis) {
+                case X -> {
+                    wx1 = p;   wy1 = a0w; wz1 = b0w;
+                    wx2 = p;   wy2 = a1w; wz2 = b0w;
+                    wx3 = p;   wy3 = a1w; wz3 = b1w;
+                    wx4 = p;   wy4 = a0w; wz4 = b1w;
+                }
+                case Y -> {
+                    wx1 = a0w; wy1 = p;   wz1 = b0w;
+                    wx2 = a1w; wy2 = p;   wz2 = b0w;
+                    wx3 = a1w; wy3 = p;   wz3 = b1w;
+                    wx4 = a0w; wy4 = p;   wz4 = b1w;
+                }
+                case Z -> {
+                    wx1 = a0w; wy1 = b0w; wz1 = p;
+                    wx2 = a1w; wy2 = b0w; wz2 = p;
+                    wx3 = a1w; wy3 = b1w; wz3 = p;
+                    wx4 = a0w; wy4 = b1w; wz4 = p;
+                }
+            }
         }
 
         private String roomKey() {
@@ -3043,6 +3612,94 @@ public class RoomMapScreen extends Screen {
 
         private double b1World() {
             return b1 * INV_SHAPE_UNIT;
+        }
+
+        private double corner1WorldX() {
+            return switch (axis) {
+                case X -> planeWorld();
+                case Y, Z -> a0World();
+            };
+        }
+
+        private double corner1WorldY() {
+            return switch (axis) {
+                case Y -> planeWorld();
+                case X -> a0World();
+                case Z -> b0World();
+            };
+        }
+
+        private double corner1WorldZ() {
+            return switch (axis) {
+                case Z -> planeWorld();
+                case X, Y -> b0World();
+            };
+        }
+
+        private double corner2WorldX() {
+            return switch (axis) {
+                case X -> planeWorld();
+                case Y, Z -> a1World();
+            };
+        }
+
+        private double corner2WorldY() {
+            return switch (axis) {
+                case Y -> planeWorld();
+                case X -> a1World();
+                case Z -> b0World();
+            };
+        }
+
+        private double corner2WorldZ() {
+            return switch (axis) {
+                case Z -> planeWorld();
+                case X, Y -> b0World();
+            };
+        }
+
+        private double corner3WorldX() {
+            return switch (axis) {
+                case X -> planeWorld();
+                case Y, Z -> a1World();
+            };
+        }
+
+        private double corner3WorldY() {
+            return switch (axis) {
+                case Y -> planeWorld();
+                case X -> a1World();
+                case Z -> b1World();
+            };
+        }
+
+        private double corner3WorldZ() {
+            return switch (axis) {
+                case Z -> planeWorld();
+                case X, Y -> b1World();
+            };
+        }
+
+        private double corner4WorldX() {
+            return switch (axis) {
+                case X -> planeWorld();
+                case Y, Z -> a0World();
+            };
+        }
+
+        private double corner4WorldY() {
+            return switch (axis) {
+                case Y -> planeWorld();
+                case X -> a0World();
+                case Z -> b1World();
+            };
+        }
+
+        private double corner4WorldZ() {
+            return switch (axis) {
+                case Z -> planeWorld();
+                case X, Y -> b1World();
+            };
         }
 
         private double centerX() {
@@ -3070,6 +3727,7 @@ public class RoomMapScreen extends Screen {
 
     private static final class MapLine {
         private final String roomKey;
+        private final int roomIndex;
         private final int x1;
         private final int y1;
         private final int z1;
@@ -3079,15 +3737,51 @@ public class RoomMapScreen extends Screen {
 
         private float reveal = 0.0f;
         private float lastReveal = 0.0f;
+        private float projectedX1;
+        private float projectedY1;
+        private float projectedX2;
+        private float projectedY2;
+        private boolean visibleOnScreen;
+        private boolean hasFacingFace;
+        private double wx1;
+        private double wy1;
+        private double wz1;
+        private double wx2;
+        private double wy2;
+        private double wz2;
+        private final List<MapFace> adjacentFaces = new ArrayList<>(4);
 
-        private MapLine(EdgeKey key, String roomKey) {
+        private MapLine(EdgeKey key, String roomKey, int roomIndex) {
             this.roomKey = roomKey;
+            this.roomIndex = roomIndex;
             this.x1 = key.x1;
             this.y1 = key.y1;
             this.z1 = key.z1;
             this.x2 = key.x2;
             this.y2 = key.y2;
             this.z2 = key.z2;
+            cacheWorldCoordinates();
+        }
+
+        private MapLine(RoomGeometry.LineData line, String roomKey, int roomIndex) {
+            this.roomKey = roomKey;
+            this.roomIndex = roomIndex;
+            this.x1 = line.x1();
+            this.y1 = line.y1();
+            this.z1 = line.z1();
+            this.x2 = line.x2();
+            this.y2 = line.y2();
+            this.z2 = line.z2();
+            cacheWorldCoordinates();
+        }
+
+        private void cacheWorldCoordinates() {
+            wx1 = x1 * INV_SHAPE_UNIT;
+            wy1 = y1 * INV_SHAPE_UNIT;
+            wz1 = z1 * INV_SHAPE_UNIT;
+            wx2 = x2 * INV_SHAPE_UNIT;
+            wy2 = y2 * INV_SHAPE_UNIT;
+            wz2 = z2 * INV_SHAPE_UNIT;
         }
 
         private String roomKey() {
@@ -3125,6 +3819,39 @@ public class RoomMapScreen extends Screen {
     private record RoomCell(String roomKey, int x, int y, int z) {
     }
 
+    private static final class PipeCurve {
+        private final int sampleCount;
+        private final double[] xs;
+        private final double[] ys;
+        private final double[] zs;
+        private final double[] lengths;
+        private final MutableCurvePoint p0 = new MutableCurvePoint();
+        private final MutableCurvePoint p1 = new MutableCurvePoint();
+        private double totalLength;
+
+        private PipeCurve(int sampleCount) {
+            this.sampleCount = sampleCount;
+            this.xs = new double[sampleCount + 1];
+            this.ys = new double[sampleCount + 1];
+            this.zs = new double[sampleCount + 1];
+            this.lengths = new double[sampleCount + 1];
+        }
+    }
+
+    private static final class MutableCurvePoint {
+        private double x;
+        private double y;
+        private double z;
+        private double t;
+
+        private void set(double x, double y, double z, double t) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.t = t;
+        }
+    }
+
     private static final class PipeLink {
         private final BlockPos start;
         private final BlockPos end;
@@ -3135,6 +3862,8 @@ public class RoomMapScreen extends Screen {
 
         private RoomCell startRevealCell;
         private RoomCell endRevealCell;
+        private PipeCurve forwardCurve;
+        private PipeCurve reverseCurve;
 
         private float revealA = 0.0f;
         private float lastRevealA = 0.0f;
@@ -3201,12 +3930,6 @@ public class RoomMapScreen extends Screen {
     private record PipeLinkKey(int ax, int ay, int az, int bx, int by, int bz) {
     }
 
-    private record CurvePoint(double x, double y, double z, double t) {
-    }
-
-    private record ColorSample(float r, float g, float b, float a) {
-    }
-
     private record Face(Axis axis, int plane, int a0, int b0, int a1, int b1, int normalSign) {
     }
 
@@ -3245,10 +3968,31 @@ public class RoomMapScreen extends Screen {
         }
     }
 
-    private record RoomActivity(boolean[] activeRooms) {
+    private record FaceMergeKey(Axis axis, int plane, int normalSign) {
+    }
+
+    private static final class MutableFaceRect {
+        private final int a0;
+        private final int a1;
+        private final int b0;
+        private int b1;
+
+        private MutableFaceRect(int a0, int b0, int a1, int b1) {
+            this.a0 = a0;
+            this.b0 = b0;
+            this.a1 = a1;
+            this.b1 = b1;
+        }
+    }
+
+    private static final class RoomActivity {
+        private boolean[] activeRooms = new boolean[0];
     }
 
     private record IntRange(int start, int end) {
+    }
+
+    private record SegmentUse(int start, int end, PlaneKey plane) {
     }
 
     private static final class EdgeUse {
