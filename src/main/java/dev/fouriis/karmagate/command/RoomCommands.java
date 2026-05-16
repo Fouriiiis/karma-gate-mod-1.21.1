@@ -15,6 +15,7 @@ import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.math.BlockPos;
+import dev.fouriis.karmagate.room.RoomGeometry;
 
 import java.util.Optional;
 
@@ -50,7 +51,53 @@ public class RoomCommands {
                         .executes(RoomCommands::executeDelete)
                     )
                 )
+                .then(literal("rebuild")
+                    .executes(RoomCommands::executeRebuildAll)
+                    .then(argument("name", StringArgumentType.word())
+                        .suggests(ROOM_NAME_SUGGESTIONS)
+                        .executes(RoomCommands::executeRebuild)
+                    )
+                )
         );
+    }
+
+    private static int executeRebuildAll(CommandContext<ServerCommandSource> context) {
+        ServerCommandSource source = context.getSource();
+        RoomManager manager = RoomManager.get(source.getServer());
+
+        int rebuilt = 0;
+        for (RoomData room : manager.getAllRooms()) {
+            manager.addRoom(source.getServer(), room.withGeometry(RoomGeometry.empty()));
+            rebuilt++;
+        }
+
+        ModNetworking.syncRoomsToAll(source.getServer());
+        int rebuiltCount = rebuilt;
+        source.sendFeedback(() -> Text.literal("Rebuilt ").append(Text.literal(String.valueOf(rebuiltCount)).formatted(Formatting.GREEN)).append(" rooms"), true);
+        return 1;
+    }
+
+    private static int executeRebuild(CommandContext<ServerCommandSource> context) {
+        ServerCommandSource source = context.getSource();
+        String name = StringArgumentType.getString(context, "name");
+
+        RoomManager manager = RoomManager.get(source.getServer());
+        Optional<RoomData> found = manager.getAllRooms().stream().filter(r -> r.name().equals(name)).findFirst();
+
+        if (found.isPresent()) {
+            RoomData room = found.get();
+            manager.addRoom(source.getServer(), room.withGeometry(RoomGeometry.empty()));
+            ModNetworking.syncRoomsToAll(source.getServer());
+            source.sendFeedback(() -> Text.literal("Rebuilt room '").append(Text.literal(name).formatted(Formatting.GREEN)).append("'"), true);
+            return 1;
+        }
+
+        source.sendError(
+            Text.literal("No room named '")
+                .append(Text.literal(name).formatted(Formatting.YELLOW))
+                .append("' exists")
+        );
+        return 0;
     }
 
     private static int executeNew(CommandContext<ServerCommandSource> context) {
