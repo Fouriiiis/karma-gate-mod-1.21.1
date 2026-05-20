@@ -19,6 +19,7 @@ import rainworld.mechanics.common.block.pipes.PipeEntrance;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.client.world.ClientWorld;
+import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
@@ -82,6 +83,19 @@ public class RoomMapScreen extends Screen {
     private static final float SOLID_FILL_B = 0.28f;
     private static final float SOLID_FILL_A = 0.45f;
 
+    // Water gets its own cached surface mesh and uses the same explored/reveal
+    // clipping as solid fills. Drawing it separately keeps water readable without
+    // tinting every solid face or adding per-frame block-state lookups.
+    private static final float WATER_FILL_R = 0.04f;
+    private static final float WATER_FILL_G = 0.34f;
+    private static final float WATER_FILL_B = 1.00f;
+    private static final float WATER_FILL_A = 0.58f;
+
+    private static final float INACTIVE_WATER_FILL_R = 0.04f;
+    private static final float INACTIVE_WATER_FILL_G = 0.16f;
+    private static final float INACTIVE_WATER_FILL_B = 0.34f;
+    private static final float INACTIVE_WATER_FILL_A = 0.34f;
+
     private static final float INACTIVE_MAP_R = 0.34f;
     private static final float INACTIVE_MAP_G = 0.45f;
     private static final float INACTIVE_MAP_B = 0.48f;
@@ -115,6 +129,10 @@ public class RoomMapScreen extends Screen {
     private static final double EXPLORED_LINE_EPSILON = 1.0e-5;
     private static final double EXPLORED_SCREEN_MASK_STEP_PIXELS = 0.65;
     private static final double EXPLORED_SCREEN_MASK_MERGE_EPSILON = 0.75;
+    // The solid-face explored fill is sampled in face/world space. Keep this
+    // above sub-block size so panning the map does not regenerate thousands of
+    // tiny trapezoids per frame on large rooms.
+    private static final double EXPLORED_FACE_MASK_STEP_BLOCKS = 1.25;
 
     // Exploration is still a smooth 16-block blob, but overlapping samples are
     // collapsed into larger merged blobs before render-time. This keeps the visual
@@ -134,9 +152,21 @@ public class RoomMapScreen extends Screen {
     private static final float REVEAL_TARGET_TICKS = REVEAL_TARGET_SECONDS * MINECRAFT_TPS;
     private static final double REVEAL_INITIAL_RADIUS_BLOCKS = 1.25;
     private static final double REVEAL_MIN_SPEED_BLOCKS_PER_TICK = 0.45;
+    // The expanding reveal starts with only a small fraction of its final speed,
+    // then eases up to the normal max speed. This keeps the reveal from popping
+    // open instantly near the source while preserving the same fast outer sweep.
+    private static final float REVEAL_ACCELERATION_SECONDS = 1.15f;
+    private static final double REVEAL_ACCELERATION_TICKS = REVEAL_ACCELERATION_SECONDS * MINECRAFT_TPS;
+    private static final double REVEAL_INITIAL_SPEED_FRACTION = 0.08;
     private static final double REVEAL_CELL_DIAGONAL_PADDING = 0.875;
     private static final int REVEAL_SPHERE_LAT_SEGMENTS = 10;
     private static final int REVEAL_SPHERE_LON_SEGMENTS = 24;
+    private static final int EXPLORED_OVERLAY_SEGMENTS = 32;
+    private static final double EXPLORED_OVERLAY_SCREEN_CULL_MARGIN = 32.0;
+    // The cheap explored-room overlay is clipped in screen space against the
+    // projected room volume. Keep the step coarse enough that dragging/panning
+    // remains smooth; the solid face fill still provides the crisp geometry.
+    private static final double EXPLORED_CLIPPED_OVERLAY_STEP_PIXELS = 2.0;
 
     private static final int PLAYER_RING_SEGMENTS = 48;
     private static final float PLAYER_RING_RADIUS = 0.85f;
@@ -154,7 +184,7 @@ public class RoomMapScreen extends Screen {
     // reveal mesh. Room lines are clipped directly against expanding reveal spheres,
     // and the backdrop/empty-volume stencil uses the same smooth sphere sources.
     private static final boolean ENABLE_SCREEN_WARP = false;
-    private static final boolean ENABLE_ROOM_BACKDROP_CUTOUT = true;
+    private static final boolean ENABLE_ROOM_BACKDROP_CUTOUT = false;
     private static final boolean ENABLE_ACTIVE_ROOM_DEPTH_CLIP = false;
     private static final boolean ENABLE_INACTIVE_GEOMETRY = true;
     private static final boolean ENABLE_ACTIVE_SOLID_FILLS = true;
@@ -200,6 +230,7 @@ public class RoomMapScreen extends Screen {
     private static final float INACTIVE_PIPE_A_FAST = 0.48f;
 
     private final List<MapFace> roomFaces = new ArrayList<>();
+    private final List<MapFace> waterFaces = new ArrayList<>();
     private final List<MapLine> roomLines = new ArrayList<>();
     private final List<PipeLink> pipeLinks = new ArrayList<>();
     private final List<RoomBounds> roomBounds = new ArrayList<>();
@@ -262,6 +293,27 @@ public class RoomMapScreen extends Screen {
     private final Map<RoomCell, List<LineRevealSegment>> revealLineSegmentsByCell = new HashMap<>();
     private final java.util.Random revealRandom = new java.util.Random();
     private final List<SegmentInterval> scratchLineRevealIntervals = new ArrayList<>();
+    private final List<FaceLens> scratchFaceLenses = new ArrayList<>();
+    private final List<SegmentInterval> scratchFaceTopIntervals = new ArrayList<>();
+    private final List<SegmentInterval> scratchFaceMiddleIntervals = new ArrayList<>();
+    private final List<SegmentInterval> scratchFaceBottomIntervals = new ArrayList<>();
+    private final List<ScreenLens> scratchScreenLenses = new ArrayList<>();
+    private final List<SegmentInterval> scratchScreenTopIntervals = new ArrayList<>();
+    private final List<SegmentInterval> scratchScreenMiddleIntervals = new ArrayList<>();
+    private final List<SegmentInterval> scratchScreenBottomIntervals = new ArrayList<>();
+    private final List<FaceCircle> scratchExploredFaceCircles = new ArrayList<>();
+    private final List<FaceFillQuad> exploredSolidFillQuads = new ArrayList<>();
+    private final List<FaceFillQuad> exploredWaterFillQuads = new ArrayList<>();
+    private long exploredSolidFillQuadsVersion = Long.MIN_VALUE;
+    private long exploredWaterFillQuadsVersion = Long.MIN_VALUE;
+
+    // Rooms move from animated reveal-sphere clipping to cached static explored
+    // rendering once every currently explored blob in that room has been covered
+    // by at least one reveal sphere. The cache is invalidated whenever exploration
+    // adds/merges blobs, so newly explored areas animate in again.
+    private final java.util.HashSet<String> fullyRevealedRoomKeys = new java.util.HashSet<>();
+    private long fullyRevealedRoomKeysVersion = Long.MIN_VALUE;
+
     private final Map<MapLine, List<SegmentInterval>> exploredIntervalsByLine = new IdentityHashMap<>();
     private long exploredIntervalsVersion = Long.MIN_VALUE;
 
@@ -482,6 +534,7 @@ public class RoomMapScreen extends Screen {
             }
             if (ENABLE_INACTIVE_SOLID_FILLS) {
                 drawSolidBlockFill(inactiveBuffer, matrix, delta, activity, false);
+                drawWaterBlockFill(inactiveBuffer, matrix, delta, activity, false);
             }
             drawRevealWave(inactiveBuffer, matrix, delta);
             drawRoomGeometry(inactiveBuffer, matrix, delta, activity, false);
@@ -506,6 +559,7 @@ public class RoomMapScreen extends Screen {
         }
         if (ENABLE_ACTIVE_SOLID_FILLS) {
             drawSolidBlockFill(activeBuffer, matrix, delta, activity, true);
+            drawWaterBlockFill(activeBuffer, matrix, delta, activity, true);
         }
         drawRoomGeometry(activeBuffer, matrix, delta, activity, true);
         drawPipeLinks(activeBuffer, matrix, delta, activity, true, pipeDistances);
@@ -619,8 +673,11 @@ public class RoomMapScreen extends Screen {
                                         MapLine line,
                                         float delta,
                                         float r, float g, float b, float a) {
-        List<SphericalRevealSource> roomSources = revealSourcesByRoom.get(line.roomKey());
-        if (roomSources == null || roomSources.isEmpty()) {
+        if (isCreativeMapView()) {
+            drawRawLine(buffer, matrix,
+                line.wx1, line.wy1, line.wz1,
+                line.wx2, line.wy2, line.wz2,
+                r, g, b, a);
             return;
         }
 
@@ -629,9 +686,38 @@ public class RoomMapScreen extends Screen {
             return;
         }
 
+        // Once a room's explored geometry has been fully swept by its reveal
+        // sphere(s), stop doing per-frame line/sphere intersections for that room.
+        // The cached explored intervals are stable across camera movement.
+        if (roomRevealIsComplete(line.roomKey(), delta)) {
+            for (SegmentInterval interval : exploredIntervals) {
+                drawRawLine(buffer, matrix,
+                    lerpDouble(line.wx1, line.wx2, interval.start()),
+                    lerpDouble(line.wy1, line.wy2, interval.start()),
+                    lerpDouble(line.wz1, line.wz2, interval.start()),
+                    lerpDouble(line.wx1, line.wx2, interval.end()),
+                    lerpDouble(line.wy1, line.wy2, interval.end()),
+                    lerpDouble(line.wz1, line.wz2, interval.end()),
+                    r, g, b, a);
+            }
+            return;
+        }
+
+        List<SphericalRevealSource> roomSources = revealSourcesByRoom.get(line.roomKey());
+        if (roomSources == null || roomSources.isEmpty()) {
+            return;
+        }
+
         scratchLineRevealIntervals.clear();
 
+        // Animated path: draw only line parts inside both the persistent explored
+        // blobs and the currently expanding reveal sphere(s). This restores the
+        // original sweep without revealing unexplored/full room bounds.
         for (SphericalRevealSource source : roomSources) {
+            if (source.roomIndex() != line.roomIndex) {
+                continue;
+            }
+
             SegmentInterval revealInterval = segmentSphereInterval(
                 source.x(), source.y(), source.z(),
                 source.radius(revealTicks, delta, revealSpeedBlocksPerTick),
@@ -831,11 +917,12 @@ public class RoomMapScreen extends Screen {
         }
 
         float time = revealTicks + delta;
+        boolean creativeMapView = isCreativeMapView();
 
         for (PipeLink link : pipeLinks) {
             // Connection pipes are binary with the smooth reveal: they remain hidden
             // until an expanding room sphere reaches either endpoint.
-            if (!link.isReached() || !isPipeEndpointExplored(link)) {
+            if (!creativeMapView && (!link.isReached() || !isPipeEndpointExplored(link))) {
                 continue;
             }
 
@@ -888,6 +975,10 @@ public class RoomMapScreen extends Screen {
     }
 
     private void updateDiscoveredAreaFromPlayer() {
+        if (isCreativeMapView()) {
+            return;
+        }
+
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null) {
             return;
@@ -1021,6 +1112,10 @@ public class RoomMapScreen extends Screen {
     }
 
     private static boolean isPointExplored(String roomKey, double x, double y, double z) {
+        if (isCreativeMapView()) {
+            return true;
+        }
+
         List<ExploredBlob> blobs = exploredBlobsByRoom.get(roomKey);
         if (blobs == null || blobs.isEmpty()) {
             return false;
@@ -1035,7 +1130,16 @@ public class RoomMapScreen extends Screen {
         return false;
     }
 
+    private static boolean isCreativeMapView() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        return client.player != null && client.player.isCreative();
+    }
+
     private boolean isCellExplored(RoomCell cell) {
+        if (isCreativeMapView()) {
+            return true;
+        }
+
         RoomClientState.RoomEntry room = roomByKey.get(cell.roomKey());
         if (room == null) {
             return false;
@@ -1049,6 +1153,10 @@ public class RoomMapScreen extends Screen {
     }
 
     private boolean isPipeEndpointExplored(PipeLink link) {
+        if (isCreativeMapView()) {
+            return true;
+        }
+
         boolean startExplored = false;
         if (link.startRoomIndex() >= 0 && link.startRoomIndex() < roomKeys.size()) {
             startExplored = isPointExplored(roomKeys.get(link.startRoomIndex()),
@@ -1073,6 +1181,10 @@ public class RoomMapScreen extends Screen {
                                                  double p2x, double p2y, double p2z,
                                                  double p3x, double p3y, double p3z,
                                                  double p4x, double p4y, double p4z) {
+        if (isCreativeMapView()) {
+            return true;
+        }
+
         double cx = (p1x + p2x + p3x + p4x) * 0.25;
         double cy = (p1y + p2y + p3y + p4y) * 0.25;
         double cz = (p1z + p2z + p3z + p4z) * 0.25;
@@ -1350,12 +1462,91 @@ public class RoomMapScreen extends Screen {
     }
 
     private boolean isDiscovered(RoomCell cell) {
+        if (isCreativeMapView()) {
+            return true;
+        }
+
         return cell != null && isCellExplored(cell);
     }
 
     private boolean roomHasDiscoveredCells(String roomKey) {
+        if (isCreativeMapView()) {
+            return true;
+        }
+
         List<ExploredBlob> blobs = exploredBlobsByRoom.get(roomKey);
         return blobs != null && !blobs.isEmpty();
+    }
+
+    private void refreshFullyRevealedRoomCacheVersion() {
+        if (fullyRevealedRoomKeysVersion == exploredShapeVersion) {
+            return;
+        }
+
+        fullyRevealedRoomKeys.clear();
+        fullyRevealedRoomKeysVersion = exploredShapeVersion;
+    }
+
+    private boolean roomRevealIsComplete(String roomKey, float delta) {
+        if (isCreativeMapView()) {
+            return true;
+        }
+        if (roomKey == null) {
+            return false;
+        }
+
+        refreshFullyRevealedRoomCacheVersion();
+        if (fullyRevealedRoomKeys.contains(roomKey)) {
+            return true;
+        }
+
+        List<ExploredBlob> blobs = exploredBlobsByRoom.get(roomKey);
+        if (blobs == null || blobs.isEmpty()) {
+            return false;
+        }
+
+        List<SphericalRevealSource> sources = revealSourcesByRoom.get(roomKey);
+        if (sources == null || sources.isEmpty()) {
+            return false;
+        }
+
+        boolean hasRoomBlob = false;
+        for (ExploredBlob blob : blobs) {
+            if (!blob.roomKey().equals(roomKey)) {
+                continue;
+            }
+            hasRoomBlob = true;
+            if (!exploredBlobCoveredByAnyRevealSource(blob, sources, delta)) {
+                return false;
+            }
+        }
+
+        if (!hasRoomBlob) {
+            return false;
+        }
+
+        fullyRevealedRoomKeys.add(roomKey);
+        return true;
+    }
+
+    private boolean exploredBlobCoveredByAnyRevealSource(ExploredBlob blob,
+                                                         List<SphericalRevealSource> sources,
+                                                         float delta) {
+        for (SphericalRevealSource source : sources) {
+            if (source.roomIndex() != blob.roomIndex() || !source.roomKey().equals(blob.roomKey())) {
+                continue;
+            }
+
+            double revealRadius = source.radius(revealTicks, delta, revealSpeedBlocksPerTick);
+            double dx = source.x() - blob.x();
+            double dy = source.y() - blob.y();
+            double dz = source.z() - blob.z();
+            double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (distance + blob.radius() <= revealRadius + EXPLORED_CONTAINMENT_PADDING_BLOCKS) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private RoomCell nearestDiscoveredCellInRoom(RoomCell preferredCell) {
@@ -1762,6 +1953,17 @@ public class RoomMapScreen extends Screen {
             }
             face.reveal = reveal;
         }
+        for (MapFace face : waterFaces) {
+            face.lastReveal = face.reveal;
+            float reveal = 0.0f;
+            for (RevealQuad tile : face.revealTiles) {
+                reveal = Math.max(reveal, revealValue(tile.cell()));
+                if (reveal >= 1.0f) {
+                    break;
+                }
+            }
+            face.reveal = reveal;
+        }
         for (MapLine line : roomLines) {
             line.lastReveal = line.reveal;
             float reveal = 0.0f;
@@ -1810,6 +2012,27 @@ public class RoomMapScreen extends Screen {
             return;
         }
         for (MapFace face : roomFaces) {
+            face.facingCamera = isFaceFacingCameraFast(face);
+
+            projectToScratch(face.wx1, face.wy1, face.wz1);
+            face.projectedX1 = renderCache.projectedX;
+            face.projectedY1 = renderCache.projectedY;
+            projectToScratch(face.wx2, face.wy2, face.wz2);
+            face.projectedX2 = renderCache.projectedX;
+            face.projectedY2 = renderCache.projectedY;
+            projectToScratch(face.wx3, face.wy3, face.wz3);
+            face.projectedX3 = renderCache.projectedX;
+            face.projectedY3 = renderCache.projectedY;
+            projectToScratch(face.wx4, face.wy4, face.wz4);
+            face.projectedX4 = renderCache.projectedX;
+            face.projectedY4 = renderCache.projectedY;
+            face.visibleOnScreen = projectedQuadOnScreen(
+                face.projectedX1, face.projectedY1,
+                face.projectedX2, face.projectedY2,
+                face.projectedX3, face.projectedY3,
+                face.projectedX4, face.projectedY4);
+        }
+        for (MapFace face : waterFaces) {
             face.facingCamera = isFaceFacingCameraFast(face);
 
             projectToScratch(face.wx1, face.wy1, face.wz1);
@@ -2145,6 +2368,10 @@ public class RoomMapScreen extends Screen {
     }
 
     private float sampleRevealInRoom(String roomKey, double wx, double wy, double wz) {
+        if (isCreativeMapView()) {
+            return 1.0f;
+        }
+
         RoomClientState.RoomEntry room = roomByKey.get(roomKey);
         if (room == null) {
             return 0.0f;
@@ -2169,6 +2396,10 @@ public class RoomMapScreen extends Screen {
     }
 
     private float revealValue(RoomCell cell) {
+        if (isCreativeMapView()) {
+            return 1.0f;
+        }
+
         if (cell == null) {
             return 0.0f;
         }
@@ -2278,6 +2509,8 @@ public class RoomMapScreen extends Screen {
         CachedMapGeometry cached = cachedMapGeometry;
         if (cached != null && cached.fingerprint == fingerprint) {
             loadCachedGeometry(cached);
+            rebuildWaterFacesFromClientWorld(rooms);
+            hasRooms = hasRooms || !waterFaces.isEmpty();
             pruneExploredStateToCurrentRooms();
             updateInitialViewFromPlayerOrBounds();
             return;
@@ -2363,7 +2596,8 @@ public class RoomMapScreen extends Screen {
         }
         pipeLinks.addAll(uniquePipeLinks.values());
         rebuildPipeCurves();
-        hasRooms = !roomLines.isEmpty();
+        rebuildWaterFacesFromClientWorld(rooms);
+        hasRooms = !roomLines.isEmpty() || !waterFaces.isEmpty();
         assignPipeRevealCells();
         cachedRoomDistances = new int[0];
         cachedRoomDistancesStartRoom = Integer.MIN_VALUE;
@@ -2376,6 +2610,7 @@ public class RoomMapScreen extends Screen {
 
     private void clearGeometryState() {
         roomFaces.clear();
+        waterFaces.clear();
         roomLines.clear();
         pipeLinks.clear();
         roomBounds.clear();
@@ -2394,6 +2629,12 @@ public class RoomMapScreen extends Screen {
         roomByKey.clear();
         exploredIntervalsByLine.clear();
         exploredIntervalsVersion = Long.MIN_VALUE;
+        exploredSolidFillQuads.clear();
+        exploredWaterFillQuads.clear();
+        exploredSolidFillQuadsVersion = Long.MIN_VALUE;
+        exploredWaterFillQuadsVersion = Long.MIN_VALUE;
+        fullyRevealedRoomKeys.clear();
+        fullyRevealedRoomKeysVersion = Long.MIN_VALUE;
         hasRooms = false;
         projectionCacheValid = false;
     }
@@ -2742,6 +2983,120 @@ public class RoomMapScreen extends Screen {
         return merged;
     }
 
+    private void rebuildWaterFacesFromClientWorld(List<RoomClientState.RoomEntry> rooms) {
+        waterFaces.clear();
+        exploredWaterFillQuads.clear();
+        exploredWaterFillQuadsVersion = Long.MIN_VALUE;
+        projectionCacheValid = false;
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        ClientWorld world = client == null ? null : client.world;
+        if (world == null || rooms.isEmpty()) {
+            return;
+        }
+
+        for (int roomIndex = 0; roomIndex < rooms.size(); roomIndex++) {
+            RoomClientState.RoomEntry room = rooms.get(roomIndex);
+            String key = roomKey(room);
+            collectWaterFacesForRoom(world, room, key, roomIndex);
+        }
+    }
+
+    private void collectWaterFacesForRoom(ClientWorld world,
+                                          RoomClientState.RoomEntry room,
+                                          String roomKey,
+                                          int roomIndex) {
+        BlockPos min = room.min();
+        BlockPos max = room.max();
+        java.util.HashSet<Long> waterBlocks = new java.util.HashSet<>();
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
+
+        for (int wx = min.getX(); wx <= max.getX(); wx++) {
+            for (int wy = min.getY(); wy <= max.getY(); wy++) {
+                for (int wz = min.getZ(); wz <= max.getZ(); wz++) {
+                    mutable.set(wx, wy, wz);
+                    if (world.getBlockState(mutable).getFluidState().isIn(FluidTags.WATER)) {
+                        waterBlocks.add(BlockPos.asLong(wx, wy, wz));
+                    }
+                }
+            }
+        }
+
+        if (waterBlocks.isEmpty()) {
+            return;
+        }
+
+        List<Face> rawFaces = new ArrayList<>();
+        for (int wx = min.getX(); wx <= max.getX(); wx++) {
+            for (int wy = min.getY(); wy <= max.getY(); wy++) {
+                for (int wz = min.getZ(); wz <= max.getZ(); wz++) {
+                    if (!waterBlocks.contains(BlockPos.asLong(wx, wy, wz))) {
+                        continue;
+                    }
+                    addWaterBlockBoundaryFaces(rawFaces, waterBlocks, room, wx, wy, wz);
+                }
+            }
+        }
+
+        if (rawFaces.isEmpty()) {
+            return;
+        }
+
+        List<Face> mergedFaces = ENABLE_TOPOLOGY_MESH_OPTIMIZATION ? mergeCoplanarFaces(rawFaces) : rawFaces;
+        RoomBounds bounds = roomIndex >= 0 && roomIndex < roomBounds.size() ? roomBounds.get(roomIndex) : null;
+        for (Face face : mergedFaces) {
+            Face normalized = normalizeFace(face);
+            if (!faceHasArea(normalized)) {
+                continue;
+            }
+            if (bounds != null && !faceIntersectsRoom(normalized, bounds)) {
+                continue;
+            }
+            waterFaces.add(new MapFace(normalized, roomKey, roomIndex));
+        }
+    }
+
+    private static void addWaterBlockBoundaryFaces(List<Face> faces,
+                                                   java.util.HashSet<Long> waterBlocks,
+                                                   RoomClientState.RoomEntry room,
+                                                   int wx,
+                                                   int wy,
+                                                   int wz) {
+        int x0 = (int) Math.round(wx * SHAPE_UNIT);
+        int y0 = (int) Math.round(wy * SHAPE_UNIT);
+        int z0 = (int) Math.round(wz * SHAPE_UNIT);
+        int x1 = (int) Math.round((wx + 1) * SHAPE_UNIT);
+        int y1 = (int) Math.round((wy + 1) * SHAPE_UNIT);
+        int z1 = (int) Math.round((wz + 1) * SHAPE_UNIT);
+
+        if (!neighborWaterInRoom(waterBlocks, room, wx - 1, wy, wz)) {
+            faces.add(new Face(Axis.X, x0, y0, z0, y1, z1, -1));
+        }
+        if (!neighborWaterInRoom(waterBlocks, room, wx + 1, wy, wz)) {
+            faces.add(new Face(Axis.X, x1, y0, z0, y1, z1, 1));
+        }
+        if (!neighborWaterInRoom(waterBlocks, room, wx, wy - 1, wz)) {
+            faces.add(new Face(Axis.Y, y0, x0, z0, x1, z1, -1));
+        }
+        if (!neighborWaterInRoom(waterBlocks, room, wx, wy + 1, wz)) {
+            faces.add(new Face(Axis.Y, y1, x0, z0, x1, z1, 1));
+        }
+        if (!neighborWaterInRoom(waterBlocks, room, wx, wy, wz - 1)) {
+            faces.add(new Face(Axis.Z, z0, x0, y0, x1, y1, -1));
+        }
+        if (!neighborWaterInRoom(waterBlocks, room, wx, wy, wz + 1)) {
+            faces.add(new Face(Axis.Z, z1, x0, y0, x1, y1, 1));
+        }
+    }
+
+    private static boolean neighborWaterInRoom(java.util.HashSet<Long> waterBlocks,
+                                               RoomClientState.RoomEntry room,
+                                               int wx,
+                                               int wy,
+                                               int wz) {
+        return worldBlockInsideRoom(room, wx, wy, wz) && waterBlocks.contains(BlockPos.asLong(wx, wy, wz));
+    }
+
     private static Direction parseDirection(String value) {
         if (value == null || value.isBlank()) {
             return null;
@@ -2763,12 +3118,18 @@ public class RoomMapScreen extends Screen {
         discoveredRoomKeys.clear();
         revealSources.clear();
         revealSourcesByRoom.clear();
+        fullyRevealedRoomKeys.clear();
+        fullyRevealedRoomKeysVersion = Long.MIN_VALUE;
         revealSpeedBlocksPerTick = REVEAL_MIN_SPEED_BLOCKS_PER_TICK;
         visibleRevealVolumeFaces.clear();
         visibleRevealVolumeFaceIndices.clear();
         visibleRevealFaceTiles.clear();
         visibleRevealLineSegments.clear();
         for (MapFace face : roomFaces) {
+            face.reveal = 0.0f;
+            face.lastReveal = 0.0f;
+        }
+        for (MapFace face : waterFaces) {
             face.reveal = 0.0f;
             face.lastReveal = 0.0f;
         }
@@ -4183,6 +4544,11 @@ public class RoomMapScreen extends Screen {
         buffer.vertex(matrix, -10001.0f, -10001.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
         buffer.vertex(matrix, -10001.0f, -10000.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
 
+        if (isCreativeMapView()) {
+            drawRoomVolumeDepthMask(buffer, matrix, activity, activePass, 0.0f, false);
+            return;
+        }
+
         if (ENABLE_ROOM_VOLUME_STENCIL) {
             drawSmoothRevealVolumeMask(buffer, matrix, delta, activity, activePass, 0.0f, false);
             return;
@@ -4242,8 +4608,130 @@ public class RoomMapScreen extends Screen {
         float b = activePass ? ROOM_VOLUME_FILL_B : INACTIVE_ROOM_VOLUME_FILL_B;
         float baseA = activePass ? ROOM_VOLUME_FILL_A : INACTIVE_ROOM_VOLUME_FILL_A;
 
+        // Completed rooms are cheap/static: draw the explored blobs clipped to the
+        // projected room volume. Incomplete rooms use the animated expanding
+        // reveal-sphere path below, clipped to explored blobs and room bounds.
+        drawFastExploredBlobOverlay(buffer, matrix, delta, activity, activePass, r, g, b, baseA * 0.72f);
         drawSmoothRevealVolumeMask(buffer, matrix, delta, activity, activePass,
             0.0f, true, r, g, b, baseA * 0.72f);
+    }
+
+    private void drawFastExploredBlobOverlay(VertexConsumer buffer, Matrix4f matrix,
+                                             float delta,
+                                             RoomActivity activity,
+                                             boolean activePass,
+                                             float r, float g, float b, float a) {
+        if (a <= 0.001f) {
+            return;
+        }
+
+        if (isCreativeMapView()) {
+            for (int roomIndex = 0; roomIndex < roomBounds.size(); roomIndex++) {
+                if (isRoomActive(activity, roomIndex) != activePass) {
+                    continue;
+                }
+                drawRoomBoundsFaces(buffer, matrix, roomBounds.get(roomIndex), r, g, b, a, 0.0f, true);
+            }
+            return;
+        }
+
+        if (exploredBlobsByRoom.isEmpty()) {
+            return;
+        }
+
+        // Keep the explored overlay cheap, but do not let it bleed outside rooms.
+        // The previous optimized version drew each explored blob as a free
+        // screen-space disc. That was fast, but the disc ignored the registered
+        // room AABB and visibly extended through walls / outside the room. Here
+        // we still stay in screen space for smooth camera movement, but first
+        // project the room's 3D bounds into a convex screen mask and draw only
+        // the circle intervals that lie inside that projected room volume.
+        for (int roomIndex = 0; roomIndex < roomBounds.size() && roomIndex < roomKeys.size(); roomIndex++) {
+            if (isRoomActive(activity, roomIndex) != activePass) {
+                continue;
+            }
+
+            String roomKey = roomKeys.get(roomIndex);
+            if (!roomRevealIsComplete(roomKey, delta)) {
+                continue;
+            }
+
+            List<ExploredBlob> blobs = exploredBlobsByRoom.get(roomKey);
+            if (blobs == null || blobs.isEmpty()) {
+                continue;
+            }
+
+            ScreenRoomMask roomMask = projectedRoomScreenMask(roomBounds.get(roomIndex));
+            if (!screenBoundsVisible(roomMask.bounds())) {
+                continue;
+            }
+
+            scratchScreenLenses.clear();
+            ScreenBounds roomScreenBounds = roomMask.bounds();
+
+            for (ExploredBlob blob : blobs) {
+                if (blob.roomIndex() != roomIndex) {
+                    continue;
+                }
+
+                projectToScratch(blob.x(), blob.y(), blob.z());
+                float cx = renderCache.projectedX;
+                float cy = renderCache.projectedY;
+                float radius = (float) Math.max(0.0, blob.radius() * renderCache.screenScale);
+                if (radius <= 0.5f) {
+                    continue;
+                }
+
+                float minX = Math.max(roomScreenBounds.minX(), cx - radius);
+                float maxX = Math.min(roomScreenBounds.maxX(), cx + radius);
+                float minY = Math.max(roomScreenBounds.minY(), cy - radius);
+                float maxY = Math.min(roomScreenBounds.maxY(), cy + radius);
+                if (maxX <= minX || maxY <= minY) {
+                    continue;
+                }
+                if (maxX < -EXPLORED_OVERLAY_SCREEN_CULL_MARGIN
+                    || minX > this.width + EXPLORED_OVERLAY_SCREEN_CULL_MARGIN
+                    || maxY < -EXPLORED_OVERLAY_SCREEN_CULL_MARGIN
+                    || minY > this.height + EXPLORED_OVERLAY_SCREEN_CULL_MARGIN) {
+                    continue;
+                }
+
+                // ScreenLens already represents reveal ∩ explored ∩ roomMask.
+                // Use the same circle for reveal and explored so the result is
+                // just exploredCircle ∩ roomMask, with the existing interval code.
+                scratchScreenLenses.add(new ScreenLens(
+                    cx, cy, radius,
+                    cx, cy, radius,
+                    roomMask,
+                    minX, minY, maxX, maxY
+                ));
+            }
+
+            drawMergedScreenLensMask(buffer, matrix, scratchScreenLenses, r, g, b, a, 0.0f);
+        }
+    }
+
+    private void drawScreenDisc(VertexConsumer buffer, Matrix4f matrix,
+                                float cx, float cy, float radius,
+                                float r, float g, float b, float a,
+                                float depth) {
+        float previousX = cx + radius;
+        float previousY = cy;
+        for (int i = 1; i <= EXPLORED_OVERLAY_SEGMENTS; i++) {
+            double angle = (Math.PI * 2.0 * i) / EXPLORED_OVERLAY_SEGMENTS;
+            float nextX = (float) (cx + Math.cos(angle) * radius);
+            float nextY = (float) (cy + Math.sin(angle) * radius);
+
+            // Degenerate quad used as a triangle fan slice in the existing QUADS
+            // buffer, so this pass does not need an extra draw call or buffer mode.
+            buffer.vertex(matrix, cx, cy, depth).color(r, g, b, a);
+            buffer.vertex(matrix, previousX, previousY, depth).color(r, g, b, a);
+            buffer.vertex(matrix, nextX, nextY, depth).color(r, g, b, a);
+            buffer.vertex(matrix, cx, cy, depth).color(r, g, b, a);
+
+            previousX = nextX;
+            previousY = nextY;
+        }
     }
 
     private void drawSmoothRevealVolumeMask(VertexConsumer buffer, Matrix4f matrix,
@@ -4263,24 +4751,39 @@ public class RoomMapScreen extends Screen {
                                             float depth,
                                             boolean cullToScreen,
                                             float r, float g, float b, float a) {
-        if (revealSources.isEmpty() || a <= 0.001f) {
+        if (a <= 0.001f) {
             return;
         }
 
-        // Render the explored/revealed empty-volume mask as a single merged
-        // screen-space union instead of drawing one translucent sphere per
-        // exploration sample. The old sphere-by-sphere path made overlapping
-        // samples visibly stack, which showed separate circles and darker seams.
-        // This scanline union emits each covered pixel strip once, so connected
-        // blobs visually become one continuous shape while still being clipped by
-        // both the reveal sphere and the persistent explored blob.
-        List<ScreenLens> lenses = new ArrayList<>();
+        if (isCreativeMapView()) {
+            for (int roomIndex = 0; roomIndex < roomBounds.size(); roomIndex++) {
+                if (isRoomActive(activity, roomIndex) != activePass) {
+                    continue;
+                }
+                drawRoomBoundsFaces(buffer, matrix, roomBounds.get(roomIndex), r, g, b, a, depth, cullToScreen);
+            }
+            return;
+        }
 
+        if (revealSources.isEmpty()) {
+            return;
+        }
+
+        // Keep this pass bounded by room/reveal geometry rather than by screen
+        // resolution. The previous implementation rebuilt a sub-pixel scanline
+        // union of every reveal/explored overlap for every depth/fill pass. While
+        // dragging or panning, that meant thousands of interval merges per frame,
+        // which showed up as choppy map movement. The mesh path below emits a
+        // fixed number of quads per visible lens, so camera movement only changes
+        // the projection math and remains smooth.
         for (SphericalRevealSource source : revealSources) {
             if (source.roomIndex() < 0 || source.roomIndex() >= roomBounds.size()) {
                 continue;
             }
             if (isRoomActive(activity, source.roomIndex()) != activePass) {
+                continue;
+            }
+            if (roomRevealIsComplete(source.roomKey(), delta)) {
                 continue;
             }
 
@@ -4290,24 +4793,20 @@ public class RoomMapScreen extends Screen {
             }
 
             RoomBounds room = roomBounds.get(source.roomIndex());
-            ScreenRoomMask roomScreenMask = projectedRoomScreenMask(room);
-            if (cullToScreen && !screenBoundsVisible(roomScreenMask.bounds())) {
-                continue;
-            }
-
             double revealRadius = source.radius(revealTicks, delta, revealSpeedBlocksPerTick);
             for (ExploredBlob blob : blobs) {
                 if (blob.roomIndex() != source.roomIndex()) {
                     continue;
                 }
-                addRevealExploredScreenLens(lenses, roomScreenMask,
+
+                drawRevealExploredSphereIntersection(buffer, matrix, room,
                     source.x(), source.y(), source.z(), revealRadius,
                     blob.x(), blob.y(), blob.z(), blob.radius(),
+                    r, g, b, a,
+                    depth,
                     cullToScreen);
             }
         }
-
-        drawMergedScreenLensMask(buffer, matrix, lenses, r, g, b, a, depth);
     }
 
     private void addRevealExploredScreenLens(List<ScreenLens> lenses,
@@ -4491,10 +4990,10 @@ public class RoomMapScreen extends Screen {
         // and x endpoint, which made the circular blob silhouette look chunky.
         // Here each band uses the exact union intervals at its top, middle and
         // bottom edges, so the edge follows a sub-pixel polygonal contour.
-        List<SegmentInterval> topIntervals = new ArrayList<>();
-        List<SegmentInterval> middleIntervals = new ArrayList<>();
-        List<SegmentInterval> bottomIntervals = new ArrayList<>();
-        double step = Math.max(0.25, EXPLORED_SCREEN_MASK_STEP_PIXELS);
+        List<SegmentInterval> topIntervals = scratchScreenTopIntervals;
+        List<SegmentInterval> middleIntervals = scratchScreenMiddleIntervals;
+        List<SegmentInterval> bottomIntervals = scratchScreenBottomIntervals;
+        double step = Math.max(1.0, EXPLORED_CLIPPED_OVERLAY_STEP_PIXELS);
 
         for (double y0 = minY; y0 < maxY; y0 += step) {
             double y1 = Math.min(maxY, y0 + step);
@@ -5024,16 +5523,316 @@ public class RoomMapScreen extends Screen {
                                          boolean activePass,
                                          float r, float g, float b, float a,
                                          float depth) {
-        if (revealSources.isEmpty() || a <= 0.001f) {
+        if (a <= 0.001f) {
             return;
         }
 
+        if (isCreativeMapView()) {
+            for (MapFace face : roomFaces) {
+                if (!face.visibleOnScreen || !face.facingCamera || isFaceActive(face, activity) != activePass) {
+                    continue;
+                }
+                drawFullSolidFace(buffer, matrix, face, r, g, b, a, depth);
+            }
+            return;
+        }
+
+        if (revealSources.isEmpty()) {
+            return;
+        }
+
+        refreshExploredSolidFillCache();
+
+        // Static/cached path for rooms whose explored blobs have already been
+        // fully swept by their reveal sphere(s). No sphere math is done here.
+        if (!exploredSolidFillQuads.isEmpty()) {
+            for (FaceFillQuad quad : exploredSolidFillQuads) {
+                MapFace face = quad.face();
+                if (!face.visibleOnScreen || !face.facingCamera || isFaceActive(face, activity) != activePass) {
+                    continue;
+                }
+                if (!roomRevealIsComplete(face.roomKey(), delta)) {
+                    continue;
+                }
+
+                drawFaceLocalTrapezoid(buffer, matrix, face,
+                    quad.u0(), quad.v0(),
+                    quad.u1(), quad.v1(),
+                    quad.u2(), quad.v2(),
+                    quad.u3(), quad.v3(),
+                    r, g, b, a, depth);
+            }
+        }
+
+        // Animated path for incomplete rooms: solid geometry appears only where
+        // the expanding reveal sphere overlaps persistent explored blobs.
         for (MapFace face : roomFaces) {
             if (!face.visibleOnScreen || !face.facingCamera || isFaceActive(face, activity) != activePass) {
                 continue;
             }
+            if (roomRevealIsComplete(face.roomKey(), delta)) {
+                continue;
+            }
 
             drawSmoothRevealedSolidFaceMask(buffer, matrix, face, delta, r, g, b, a, depth);
+        }
+    }
+
+    private void drawWaterBlockFill(VertexConsumer buffer, Matrix4f matrix, float delta, RoomActivity activity, boolean activePass) {
+        if (waterFaces.isEmpty()) {
+            return;
+        }
+
+        buffer.vertex(matrix, -10000.0f, -10000.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
+        buffer.vertex(matrix, -10000.0f, -10001.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
+        buffer.vertex(matrix, -10001.0f, -10001.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
+        buffer.vertex(matrix, -10001.0f, -10000.0f, 0.0f).color(0.0f, 0.0f, 0.0f, 0.0f);
+
+        float fillR = activePass ? WATER_FILL_R : INACTIVE_WATER_FILL_R;
+        float fillG = activePass ? WATER_FILL_G : INACTIVE_WATER_FILL_G;
+        float fillB = activePass ? WATER_FILL_B : INACTIVE_WATER_FILL_B;
+        float baseAlpha = activePass ? WATER_FILL_A : INACTIVE_WATER_FILL_A;
+
+        drawWaterBlockFaceMasks(buffer, matrix, delta, activity, activePass,
+            fillR, fillG, fillB, baseAlpha,
+            0.0f);
+    }
+
+    private void drawWaterBlockFaceMasks(VertexConsumer buffer, Matrix4f matrix,
+                                         float delta,
+                                         RoomActivity activity,
+                                         boolean activePass,
+                                         float r, float g, float b, float a,
+                                         float depth) {
+        if (a <= 0.001f || waterFaces.isEmpty()) {
+            return;
+        }
+
+        if (isCreativeMapView()) {
+            for (MapFace face : waterFaces) {
+                if (!face.visibleOnScreen || !face.facingCamera || isFaceActive(face, activity) != activePass) {
+                    continue;
+                }
+                drawFullSolidFace(buffer, matrix, face, r, g, b, a, depth);
+            }
+            return;
+        }
+
+        if (revealSources.isEmpty()) {
+            return;
+        }
+
+        refreshExploredWaterFillCache();
+
+        // Completed rooms use the cached explored water surface strips; incomplete
+        // rooms use the same expanding sphere ∩ explored blob clipping as solids.
+        if (!exploredWaterFillQuads.isEmpty()) {
+            for (FaceFillQuad quad : exploredWaterFillQuads) {
+                MapFace face = quad.face();
+                if (!face.visibleOnScreen || !face.facingCamera || isFaceActive(face, activity) != activePass) {
+                    continue;
+                }
+                if (!roomRevealIsComplete(face.roomKey(), delta)) {
+                    continue;
+                }
+
+                drawFaceLocalTrapezoid(buffer, matrix, face,
+                    quad.u0(), quad.v0(),
+                    quad.u1(), quad.v1(),
+                    quad.u2(), quad.v2(),
+                    quad.u3(), quad.v3(),
+                    r, g, b, a, depth);
+            }
+        }
+
+        for (MapFace face : waterFaces) {
+            if (!face.visibleOnScreen || !face.facingCamera || isFaceActive(face, activity) != activePass) {
+                continue;
+            }
+            if (roomRevealIsComplete(face.roomKey(), delta)) {
+                continue;
+            }
+
+            drawSmoothRevealedSolidFaceMask(buffer, matrix, face, delta, r, g, b, a, depth);
+        }
+    }
+
+    private void refreshExploredWaterFillCache() {
+        if (exploredWaterFillQuadsVersion == exploredShapeVersion) {
+            return;
+        }
+
+        exploredWaterFillQuads.clear();
+        exploredWaterFillQuadsVersion = exploredShapeVersion;
+
+        if (exploredBlobsByRoom.isEmpty() || waterFaces.isEmpty()) {
+            return;
+        }
+
+        for (MapFace face : waterFaces) {
+            List<ExploredBlob> blobs = exploredBlobsByRoom.get(face.roomKey());
+            if (blobs == null || blobs.isEmpty()) {
+                continue;
+            }
+            cacheExploredFillForFace(face, blobs, exploredWaterFillQuads);
+        }
+    }
+
+    private void drawFullSolidFace(VertexConsumer buffer, Matrix4f matrix,
+                                   MapFace face,
+                                   float r, float g, float b, float a,
+                                   float depth) {
+        drawProjectedWorldQuad(buffer, matrix,
+            face.wx1, face.wy1, face.wz1,
+            face.wx2, face.wy2, face.wz2,
+            face.wx3, face.wy3, face.wz3,
+            face.wx4, face.wy4, face.wz4,
+            r, g, b, a,
+            depth,
+            false);
+    }
+
+    private void refreshExploredSolidFillCache() {
+        if (exploredSolidFillQuadsVersion == exploredShapeVersion) {
+            return;
+        }
+
+        exploredSolidFillQuads.clear();
+        exploredSolidFillQuadsVersion = exploredShapeVersion;
+
+        if (exploredBlobsByRoom.isEmpty()) {
+            return;
+        }
+
+        for (MapFace face : roomFaces) {
+            List<ExploredBlob> blobs = exploredBlobsByRoom.get(face.roomKey());
+            if (blobs == null || blobs.isEmpty()) {
+                continue;
+            }
+            cacheExploredSolidFillForFace(face, blobs);
+        }
+    }
+
+    private void cacheExploredSolidFillForFace(MapFace face, List<ExploredBlob> blobs) {
+        cacheExploredFillForFace(face, blobs, exploredSolidFillQuads);
+    }
+
+    private void cacheExploredFillForFace(MapFace face, List<ExploredBlob> blobs, List<FaceFillQuad> output) {
+        scratchExploredFaceCircles.clear();
+
+        double faceMinU = Math.min(face.a0World(), face.a1World());
+        double faceMaxU = Math.max(face.a0World(), face.a1World());
+        double faceMinV = Math.min(face.b0World(), face.b1World());
+        double faceMaxV = Math.max(face.b0World(), face.b1World());
+
+        double minV = Double.POSITIVE_INFINITY;
+        double maxV = Double.NEGATIVE_INFINITY;
+
+        for (ExploredBlob blob : blobs) {
+            if (blob.roomIndex() != face.roomIndex) {
+                continue;
+            }
+
+            FaceCircle circle = faceCircleFromSphere(face, blob.x(), blob.y(), blob.z(), blob.radius());
+            if (circle == null) {
+                continue;
+            }
+
+            double circleMinU = circle.u() - circle.radius();
+            double circleMaxU = circle.u() + circle.radius();
+            double circleMinV = circle.v() - circle.radius();
+            double circleMaxV = circle.v() + circle.radius();
+            if (circleMaxU <= faceMinU || circleMinU >= faceMaxU || circleMaxV <= faceMinV || circleMinV >= faceMaxV) {
+                continue;
+            }
+
+            scratchExploredFaceCircles.add(circle);
+            minV = Math.min(minV, Math.max(faceMinV, circleMinV));
+            maxV = Math.max(maxV, Math.min(faceMaxV, circleMaxV));
+        }
+
+        if (scratchExploredFaceCircles.isEmpty() || maxV <= minV) {
+            return;
+        }
+
+        // This cache is rebuilt only when exploration changes. Keep the generated
+        // quad count bounded so camera movement remains smooth even in large rooms.
+        double spanV = maxV - minV;
+        double step = Math.max(EXPLORED_FACE_MASK_STEP_BLOCKS, spanV / 36.0);
+
+        List<SegmentInterval> topIntervals = scratchFaceTopIntervals;
+        List<SegmentInterval> middleIntervals = scratchFaceMiddleIntervals;
+        List<SegmentInterval> bottomIntervals = scratchFaceBottomIntervals;
+
+        for (double v0 = minV; v0 < maxV; v0 += step) {
+            double v1 = Math.min(maxV, v0 + step);
+            if (v1 <= v0) {
+                continue;
+            }
+
+            double middleV = (v0 + v1) * 0.5;
+            buildMergedExploredFaceIntervalsAtV(scratchExploredFaceCircles, v0, faceMinU, faceMaxU, topIntervals);
+            buildMergedExploredFaceIntervalsAtV(scratchExploredFaceCircles, middleV, faceMinU, faceMaxU, middleIntervals);
+            buildMergedExploredFaceIntervalsAtV(scratchExploredFaceCircles, v1, faceMinU, faceMaxU, bottomIntervals);
+            if (middleIntervals.isEmpty()) {
+                continue;
+            }
+
+            for (SegmentInterval middle : middleIntervals) {
+                SegmentInterval top = matchingUnionInterval(topIntervals, middle);
+                SegmentInterval bottom = matchingUnionInterval(bottomIntervals, middle);
+                if (top.end() <= top.start() || bottom.end() <= bottom.start()) {
+                    continue;
+                }
+
+                output.add(new FaceFillQuad(face,
+                    top.start(), v0,
+                    top.end(), v0,
+                    bottom.end(), v1,
+                    bottom.start(), v1));
+            }
+        }
+    }
+
+    private static void buildMergedExploredFaceIntervalsAtV(List<FaceCircle> circles,
+                                                            double v,
+                                                            double faceMinU,
+                                                            double faceMaxU,
+                                                            List<SegmentInterval> out) {
+        out.clear();
+
+        for (FaceCircle circle : circles) {
+            SegmentInterval interval = circleIntervalAtV(circle.u(), circle.v(), circle.radius(), v);
+            if (interval == null) {
+                continue;
+            }
+
+            double u0 = Math.max(interval.start(), faceMinU);
+            double u1 = Math.min(interval.end(), faceMaxU);
+            if (u1 > u0) {
+                out.add(new SegmentInterval(u0, u1));
+            }
+        }
+
+        if (out.size() <= 1) {
+            return;
+        }
+
+        out.sort((aInterval, bInterval) -> Double.compare(aInterval.start(), bInterval.start()));
+        int writeIndex = 0;
+        SegmentInterval current = out.get(0);
+        for (int i = 1; i < out.size(); i++) {
+            SegmentInterval interval = out.get(i);
+            if (interval.start() <= current.end() + EXPLORED_LINE_EPSILON) {
+                current = new SegmentInterval(current.start(), Math.max(current.end(), interval.end()));
+                continue;
+            }
+            out.set(writeIndex++, current);
+            current = interval;
+        }
+        out.set(writeIndex++, current);
+        while (out.size() > writeIndex) {
+            out.remove(out.size() - 1);
         }
     }
 
@@ -5042,6 +5841,55 @@ public class RoomMapScreen extends Screen {
                                                  float delta,
                                                  float r, float g, float b, float a,
                                                  float depth) {
+        if (isCreativeMapView()) {
+            double x0;
+            double y0;
+            double z0;
+            double x1;
+            double y1;
+            double z1;
+
+            switch (face.axis) {
+                case X -> {
+                    x0 = face.planeWorld();
+                    x1 = x0;
+                    y0 = Math.min(face.a0World(), face.a1World());
+                    y1 = Math.max(face.a0World(), face.a1World());
+                    z0 = Math.min(face.b0World(), face.b1World());
+                    z1 = Math.max(face.b0World(), face.b1World());
+                }
+                case Y -> {
+                    x0 = Math.min(face.a0World(), face.a1World());
+                    x1 = Math.max(face.a0World(), face.a1World());
+                    y0 = face.planeWorld();
+                    y1 = y0;
+                    z0 = Math.min(face.b0World(), face.b1World());
+                    z1 = Math.max(face.b0World(), face.b1World());
+                }
+                case Z -> {
+                    x0 = Math.min(face.a0World(), face.a1World());
+                    x1 = Math.max(face.a0World(), face.a1World());
+                    y0 = Math.min(face.b0World(), face.b1World());
+                    y1 = Math.max(face.b0World(), face.b1World());
+                    z0 = face.planeWorld();
+                    z1 = z0;
+                }
+                default -> {
+                    return;
+                }
+            }
+
+            drawProjectedWorldQuad(buffer, matrix,
+                x0, y0, z0,
+                x1, y0, z0,
+                x1, y1, z1,
+                x0, y1, z1,
+                r, g, b, a,
+                depth,
+                false);
+            return;
+        }
+
         List<SphericalRevealSource> roomSources = revealSourcesByRoom.get(face.roomKey());
         if (roomSources == null || roomSources.isEmpty()) {
             return;
@@ -5052,7 +5900,8 @@ public class RoomMapScreen extends Screen {
             return;
         }
 
-        List<FaceLens> lenses = new ArrayList<>();
+        List<FaceLens> lenses = scratchFaceLenses;
+        lenses.clear();
         double minU = Math.min(face.a0World(), face.a1World());
         double maxU = Math.max(face.a0World(), face.a1World());
         double minV = Math.min(face.b0World(), face.b1World());
@@ -5178,11 +6027,12 @@ public class RoomMapScreen extends Screen {
             return;
         }
 
-        List<SegmentInterval> topIntervals = new ArrayList<>();
-        List<SegmentInterval> middleIntervals = new ArrayList<>();
-        List<SegmentInterval> bottomIntervals = new ArrayList<>();
-        double step = Math.max(0.125, EXPLORED_SCREEN_MASK_STEP_PIXELS / Math.max(0.001, renderCache.screenScale));
-        step = Math.min(0.75, step);
+        List<SegmentInterval> topIntervals = scratchFaceTopIntervals;
+        List<SegmentInterval> middleIntervals = scratchFaceMiddleIntervals;
+        List<SegmentInterval> bottomIntervals = scratchFaceBottomIntervals;
+        double step = Math.max(EXPLORED_FACE_MASK_STEP_BLOCKS,
+            EXPLORED_SCREEN_MASK_STEP_PIXELS / Math.max(0.001, renderCache.screenScale));
+        step = Math.min(1.25, step);
 
         for (double v0 = minV; v0 < maxV; v0 += step) {
             double v1 = Math.min(maxV, v0 + step);
@@ -6005,9 +6855,35 @@ public class RoomMapScreen extends Screen {
     private record SphericalRevealSource(String roomKey, int roomIndex,
                                          double x, double y, double z,
                                          int startTick) {
-        private double radius(int currentTick, float tickDelta, double speedBlocksPerTick) {
+        private double radius(int currentTick, float tickDelta, double maxSpeedBlocksPerTick) {
             double age = Math.max(0.0, currentTick + tickDelta - startTick);
-            return REVEAL_INITIAL_RADIUS_BLOCKS + age * speedBlocksPerTick;
+            return REVEAL_INITIAL_RADIUS_BLOCKS + acceleratedRevealDistance(age, maxSpeedBlocksPerTick);
+        }
+
+        private static double acceleratedRevealDistance(double ageTicks, double maxSpeedBlocksPerTick) {
+            if (ageTicks <= 0.0 || maxSpeedBlocksPerTick <= 0.0) {
+                return 0.0;
+            }
+
+            double rampTicks = Math.max(1.0, REVEAL_ACCELERATION_TICKS);
+            double startFraction = MathHelper.clamp(REVEAL_INITIAL_SPEED_FRACTION, 0.0, 1.0);
+
+            if (ageTicks >= rampTicks) {
+                // Integral over smoothstep(0..1) is 0.5, so the ramp distance is
+                // deterministic and the reveal continues at the unchanged max speed.
+                double rampDistance = maxSpeedBlocksPerTick * rampTicks
+                    * (startFraction + (1.0 - startFraction) * 0.5);
+                return rampDistance + (ageTicks - rampTicks) * maxSpeedBlocksPerTick;
+            }
+
+            double t = ageTicks / rampTicks;
+            // Integral of smoothstep velocity 3t^2 - 2t^3 is t^3 - 0.5t^4.
+            // Using the integral gives a smooth radius curve while the instantaneous
+            // expansion speed eases from startFraction * maxSpeed to maxSpeed.
+            double smoothstepIntegral = t * t * t - 0.5 * t * t * t * t;
+            double normalizedDistance = startFraction * t
+                + (1.0 - startFraction) * smoothstepIntegral;
+            return maxSpeedBlocksPerTick * rampTicks * normalizedDistance;
         }
     }
 
@@ -6033,6 +6909,13 @@ public class RoomMapScreen extends Screen {
     private record FaceLens(double revealU, double revealV, double revealRadius,
                             double exploredU, double exploredV, double exploredRadius,
                             double minU, double minV, double maxU, double maxV) {
+    }
+
+    private record FaceFillQuad(MapFace face,
+                                double u0, double v0,
+                                double u1, double v1,
+                                double u2, double v2,
+                                double u3, double v3) {
     }
 
     private record ExploredBlob(String roomKey, int roomIndex,

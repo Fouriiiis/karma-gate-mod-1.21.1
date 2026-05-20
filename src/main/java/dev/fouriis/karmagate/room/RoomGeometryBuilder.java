@@ -14,9 +14,12 @@ import rainworld.mechanics.common.block.pipes.TelePipeBlock;
 import rainworld.mechanics.common.block.pipes.TelePipeBlockEntity;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Bakes room geometry from the world once at room creation time.
@@ -89,8 +92,15 @@ public final class RoomGeometryBuilder {
             }
         }
 
-        List<RoomGeometry.FaceData> faces = new ArrayList<>();
-        for (Face face : exteriorFaces.values()) {
+        /*
+         * Faces are merged for smaller JSON.
+         * Lines are still derived from the original exterior face set so partial
+         * edge overlaps remain mathematically correct before the final line merge.
+         */
+        List<Face> mergedFaces = mergeCoplanarFaces(exteriorFaces.values());
+
+        List<RoomGeometry.FaceData> faces = new ArrayList<>(mergedFaces.size());
+        for (Face face : mergedFaces) {
             faces.add(new RoomGeometry.FaceData(
                 face.axis.name(),
                 face.plane,
@@ -258,24 +268,227 @@ public final class RoomGeometryBuilder {
         }
     }
 
+    private static List<Face> mergeCoplanarFaces(Collection<Face> sourceFaces) {
+        Map<FaceGroupKey, List<FaceRect>> rectsByPlane = new HashMap<>();
+
+        for (Face face : sourceFaces) {
+            int a0 = Math.min(face.a0, face.a1);
+            int b0 = Math.min(face.b0, face.b1);
+            int a1 = Math.max(face.a0, face.a1);
+            int b1 = Math.max(face.b0, face.b1);
+
+            if (a0 == a1 || b0 == b1) {
+                continue;
+            }
+
+            FaceGroupKey key = new FaceGroupKey(face.axis, face.plane, face.normalSign);
+            rectsByPlane.computeIfAbsent(key, ignored -> new ArrayList<>())
+                .add(new FaceRect(a0, b0, a1, b1));
+        }
+
+        List<Face> merged = new ArrayList<>();
+        for (Map.Entry<FaceGroupKey, List<FaceRect>> entry : rectsByPlane.entrySet()) {
+            FaceGroupKey key = entry.getKey();
+            List<FaceRect> rects = mergeFaceRects(entry.getValue());
+
+            for (FaceRect rect : rects) {
+                merged.add(new Face(
+                    key.axis,
+                    key.plane,
+                    rect.a0,
+                    rect.b0,
+                    rect.a1,
+                    rect.b1,
+                    key.normalSign
+                ));
+            }
+        }
+
+        merged.sort((a, b) -> {
+            int result = Integer.compare(a.axis.ordinal(), b.axis.ordinal());
+            if (result != 0) {
+                return result;
+            }
+
+            result = Integer.compare(a.plane, b.plane);
+            if (result != 0) {
+                return result;
+            }
+
+            result = Integer.compare(a.normalSign, b.normalSign);
+            if (result != 0) {
+                return result;
+            }
+
+            result = Integer.compare(a.a0, b.a0);
+            if (result != 0) {
+                return result;
+            }
+
+            result = Integer.compare(a.b0, b.b0);
+            if (result != 0) {
+                return result;
+            }
+
+            result = Integer.compare(a.a1, b.a1);
+            if (result != 0) {
+                return result;
+            }
+
+            return Integer.compare(a.b1, b.b1);
+        });
+
+        return merged;
+    }
+
+    private static List<FaceRect> mergeFaceRects(List<FaceRect> input) {
+        List<FaceRect> current = new ArrayList<>(input);
+
+        boolean changed;
+        do {
+            int before = current.size();
+            current = mergeFaceRectsByBSpan(current);
+            current = mergeFaceRectsByASpan(current);
+            changed = current.size() < before;
+        } while (changed);
+
+        current.sort((a, b) -> {
+            int result = Integer.compare(a.a0, b.a0);
+            if (result != 0) {
+                return result;
+            }
+
+            result = Integer.compare(a.b0, b.b0);
+            if (result != 0) {
+                return result;
+            }
+
+            result = Integer.compare(a.a1, b.a1);
+            if (result != 0) {
+                return result;
+            }
+
+            return Integer.compare(a.b1, b.b1);
+        });
+
+        return current;
+    }
+
+    private static List<FaceRect> mergeFaceRectsByBSpan(List<FaceRect> rects) {
+        Map<IntRange, List<FaceRect>> groups = new HashMap<>();
+
+        for (FaceRect rect : rects) {
+            groups.computeIfAbsent(new IntRange(rect.b0, rect.b1), ignored -> new ArrayList<>())
+                .add(rect);
+        }
+
+        List<FaceRect> merged = new ArrayList<>();
+        for (Map.Entry<IntRange, List<FaceRect>> entry : groups.entrySet()) {
+            IntRange bSpan = entry.getKey();
+            List<FaceRect> group = entry.getValue();
+
+            group.sort((a, b) -> {
+                int result = Integer.compare(a.a0, b.a0);
+                if (result != 0) {
+                    return result;
+                }
+                return Integer.compare(a.a1, b.a1);
+            });
+
+            int currentA0 = Integer.MIN_VALUE;
+            int currentA1 = Integer.MIN_VALUE;
+
+            for (FaceRect rect : group) {
+                if (currentA0 == Integer.MIN_VALUE) {
+                    currentA0 = rect.a0;
+                    currentA1 = rect.a1;
+                    continue;
+                }
+
+                if (rect.a0 <= currentA1) {
+                    currentA1 = Math.max(currentA1, rect.a1);
+                } else {
+                    merged.add(new FaceRect(currentA0, bSpan.start, currentA1, bSpan.end));
+                    currentA0 = rect.a0;
+                    currentA1 = rect.a1;
+                }
+            }
+
+            if (currentA0 != Integer.MIN_VALUE) {
+                merged.add(new FaceRect(currentA0, bSpan.start, currentA1, bSpan.end));
+            }
+        }
+
+        return merged;
+    }
+
+    private static List<FaceRect> mergeFaceRectsByASpan(List<FaceRect> rects) {
+        Map<IntRange, List<FaceRect>> groups = new HashMap<>();
+
+        for (FaceRect rect : rects) {
+            groups.computeIfAbsent(new IntRange(rect.a0, rect.a1), ignored -> new ArrayList<>())
+                .add(rect);
+        }
+
+        List<FaceRect> merged = new ArrayList<>();
+        for (Map.Entry<IntRange, List<FaceRect>> entry : groups.entrySet()) {
+            IntRange aSpan = entry.getKey();
+            List<FaceRect> group = entry.getValue();
+
+            group.sort((a, b) -> {
+                int result = Integer.compare(a.b0, b.b0);
+                if (result != 0) {
+                    return result;
+                }
+                return Integer.compare(a.b1, b.b1);
+            });
+
+            int currentB0 = Integer.MIN_VALUE;
+            int currentB1 = Integer.MIN_VALUE;
+
+            for (FaceRect rect : group) {
+                if (currentB0 == Integer.MIN_VALUE) {
+                    currentB0 = rect.b0;
+                    currentB1 = rect.b1;
+                    continue;
+                }
+
+                if (rect.b0 <= currentB1) {
+                    currentB1 = Math.max(currentB1, rect.b1);
+                } else {
+                    merged.add(new FaceRect(aSpan.start, currentB0, aSpan.end, currentB1));
+                    currentB0 = rect.b0;
+                    currentB1 = rect.b1;
+                }
+            }
+
+            if (currentB0 != Integer.MIN_VALUE) {
+                merged.add(new FaceRect(aSpan.start, currentB0, aSpan.end, currentB1));
+            }
+        }
+
+        return merged;
+    }
+
     private static List<EdgeKey> buildMergedSurfaceEdges(Iterable<Face> faces) {
-        Map<EdgeKey, EdgeUse> edgeUses = new HashMap<>();
+        Map<PlaneLineKey, List<IntRange>> edgeUses = new HashMap<>();
 
         for (Face face : faces) {
             addFaceEdgeUses(edgeUses, face);
         }
 
-        List<EdgeKey> outlineEdges = new ArrayList<>();
-        for (Map.Entry<EdgeKey, EdgeUse> entry : edgeUses.entrySet()) {
-            if (entry.getValue().isVisibleOutline()) {
-                outlineEdges.add(entry.getKey());
+        Set<EdgeKey> outlineEdges = new HashSet<>();
+        for (Map.Entry<PlaneLineKey, List<IntRange>> entry : edgeUses.entrySet()) {
+            PlaneLineKey key = entry.getKey();
+            for (IntRange visibleRange : oddCoverageRanges(entry.getValue())) {
+                outlineEdges.add(edgeKey(key.line, visibleRange.start, visibleRange.end));
             }
         }
 
-        return outlineEdges;
+        return new ArrayList<>(outlineEdges);
     }
 
-    private static void addFaceEdgeUses(Map<EdgeKey, EdgeUse> edgeUses, Face face) {
+    private static void addFaceEdgeUses(Map<PlaneLineKey, List<IntRange>> edgeUses, Face face) {
         PlaneKey plane = new PlaneKey(face.axis, face.plane);
         switch (face.axis) {
             case X -> {
@@ -302,12 +515,84 @@ public final class RoomGeometryBuilder {
         }
     }
 
-    private static void addEdgeUse(Map<EdgeKey, EdgeUse> edgeUses,
+    private static void addEdgeUse(Map<PlaneLineKey, List<IntRange>> edgeUses,
                                    PlaneKey plane,
                                    int x1, int y1, int z1,
                                    int x2, int y2, int z2) {
-        EdgeKey key = edgeKey(x1, y1, z1, x2, y2, z2);
-        edgeUses.computeIfAbsent(key, ignored -> new EdgeUse()).add(plane);
+        if (x1 == x2 && y1 == y2 && z1 == z2) {
+            return;
+        }
+
+        LineKey line;
+        int start;
+        int end;
+
+        if (x1 != x2) {
+            line = new LineKey(0, y1, z1);
+            start = Math.min(x1, x2);
+            end = Math.max(x1, x2);
+        } else if (y1 != y2) {
+            line = new LineKey(1, x1, z1);
+            start = Math.min(y1, y2);
+            end = Math.max(y1, y2);
+        } else {
+            line = new LineKey(2, x1, y1);
+            start = Math.min(z1, z2);
+            end = Math.max(z1, z2);
+        }
+
+        edgeUses.computeIfAbsent(new PlaneLineKey(plane, line), ignored -> new ArrayList<>())
+            .add(new IntRange(start, end));
+    }
+
+    private static List<IntRange> oddCoverageRanges(List<IntRange> ranges) {
+        List<SweepEvent> events = new ArrayList<>(ranges.size() * 2);
+
+        for (IntRange range : ranges) {
+            int start = Math.min(range.start, range.end);
+            int end = Math.max(range.start, range.end);
+
+            if (start == end) {
+                continue;
+            }
+
+            events.add(new SweepEvent(start, 1));
+            events.add(new SweepEvent(end, -1));
+        }
+
+        events.sort((a, b) -> {
+            int result = Integer.compare(a.position, b.position);
+            if (result != 0) {
+                return result;
+            }
+            return Integer.compare(a.delta, b.delta);
+        });
+
+        List<IntRange> visible = new ArrayList<>();
+        int coverage = 0;
+        int previousPosition = Integer.MIN_VALUE;
+        int index = 0;
+
+        while (index < events.size()) {
+            int position = events.get(index).position;
+
+            if (previousPosition != Integer.MIN_VALUE
+                && previousPosition < position
+                && (coverage & 1) == 1) {
+                visible.add(new IntRange(previousPosition, position));
+            }
+
+            int delta = 0;
+            while (index < events.size() && events.get(index).position == position) {
+                delta += events.get(index).delta;
+                index++;
+            }
+
+            coverage += delta;
+            previousPosition = position;
+        }
+
+        return visible;
     }
 
     private static List<RoomGeometry.LineData> mergeCollinearEdges(List<EdgeKey> edges) {
@@ -336,13 +621,15 @@ public final class RoomGeometryBuilder {
                 end = Math.max(edge.z1, edge.z2);
             }
 
-            rangesByLine.computeIfAbsent(line, ignored -> new ArrayList<>()).add(new IntRange(start, end));
+            rangesByLine.computeIfAbsent(line, ignored -> new ArrayList<>())
+                .add(new IntRange(start, end));
         }
 
         List<RoomGeometry.LineData> merged = new ArrayList<>();
         for (Map.Entry<LineKey, List<IntRange>> entry : rangesByLine.entrySet()) {
             LineKey line = entry.getKey();
             List<IntRange> ranges = entry.getValue();
+
             ranges.sort((a, b) -> {
                 if (a.start != b.start) {
                     return Integer.compare(a.start, b.start);
@@ -360,6 +647,10 @@ public final class RoomGeometryBuilder {
                     continue;
                 }
 
+                /*
+                 * This is the key line merge:
+                 * if one segment ends at the same point another starts, combine them.
+                 */
                 if (range.start <= currentEnd) {
                     currentEnd = Math.max(currentEnd, range.end);
                 } else {
@@ -386,7 +677,17 @@ public final class RoomGeometryBuilder {
             case 0 -> merged.add(new RoomGeometry.LineData(start, line.fixedA, line.fixedB, end, line.fixedA, line.fixedB));
             case 1 -> merged.add(new RoomGeometry.LineData(line.fixedA, start, line.fixedB, line.fixedA, end, line.fixedB));
             case 2 -> merged.add(new RoomGeometry.LineData(line.fixedA, line.fixedB, start, line.fixedA, line.fixedB, end));
+            default -> throw new IllegalArgumentException("Unknown line axis: " + line.axis);
         }
+    }
+
+    private static EdgeKey edgeKey(LineKey line, int start, int end) {
+        return switch (line.axis) {
+            case 0 -> edgeKey(start, line.fixedA, line.fixedB, end, line.fixedA, line.fixedB);
+            case 1 -> edgeKey(line.fixedA, start, line.fixedB, line.fixedA, end, line.fixedB);
+            case 2 -> edgeKey(line.fixedA, line.fixedB, start, line.fixedA, line.fixedB, end);
+            default -> throw new IllegalArgumentException("Unknown line axis: " + line.axis);
+        };
     }
 
     private static PipeLinkKey pipeLinkKey(BlockPos a, BlockPos b) {
@@ -448,7 +749,16 @@ public final class RoomGeometryBuilder {
     private record FaceKey(Axis axis, int plane, int a0, int b0, int a1, int b1) {
     }
 
+    private record FaceGroupKey(Axis axis, int plane, int normalSign) {
+    }
+
+    private record FaceRect(int a0, int b0, int a1, int b1) {
+    }
+
     private record PlaneKey(Axis axis, int plane) {
+    }
+
+    private record PlaneLineKey(PlaneKey plane, LineKey line) {
     }
 
     private record LineKey(int axis, int fixedA, int fixedB) {
@@ -460,20 +770,6 @@ public final class RoomGeometryBuilder {
     private record IntRange(int start, int end) {
     }
 
-    private static final class EdgeUse {
-        private final Map<PlaneKey, Integer> planes = new HashMap<>();
-
-        private void add(PlaneKey plane) {
-            planes.merge(plane, 1, Integer::sum);
-        }
-
-        private boolean isVisibleOutline() {
-            for (int count : planes.values()) {
-                if ((count & 1) == 1) {
-                    return true;
-                }
-            }
-            return false;
-        }
+    private record SweepEvent(int position, int delta) {
     }
 }
