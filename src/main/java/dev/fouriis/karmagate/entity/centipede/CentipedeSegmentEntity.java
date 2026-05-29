@@ -13,6 +13,7 @@ import net.minecraft.entity.data.TrackedDataHandlerRegistry;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.text.Text;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import software.bernie.geckolib.animatable.GeoAnimatable;
@@ -137,6 +138,19 @@ public abstract class CentipedeSegmentEntity extends MobEntity implements GeoAni
 
     public void setHasShell(boolean shell) {
         this.dataTracker.set(HAS_SHELL, shell);
+    }
+
+    @Override
+    public void setCustomName(Text customName) {
+        super.setCustomName(customName);
+        CentipedeController parent = getParentCentipede();
+        if (parent instanceof CentipedeEntity centipede) {
+            centipede.onSegmentCustomNamed(customName, this);
+        }
+    }
+
+    void applySharedCustomName(Text customName) {
+        super.setCustomName(customName);
     }
 
     // --- Damage propagation ---

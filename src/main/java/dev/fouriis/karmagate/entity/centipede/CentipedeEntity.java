@@ -19,6 +19,7 @@ import net.minecraft.nbt.NbtCompound;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundEvents;
+import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
@@ -247,6 +248,9 @@ private static final int SECONDARY_SHELL_COLOR = (145 << 16) | (66 << 8) | 8;
             seg.setParentId(this.getId());
             seg.setSegmentIndex(i);
             seg.setHasShell(true);
+            if (this.hasCustomName()) {
+                seg.applySharedCustomName(this.getCustomName());
+            }
             sw.spawnEntity(seg);
 
             segmentIds[i] = seg.getId();
@@ -1274,6 +1278,30 @@ private static final int SECONDARY_SHELL_COLOR = (145 << 16) | (66 << 8) | 8;
         this.setTarget(null);
         this.requestPath(target);
         this.setMoveTarget(Vec3d.ofCenter(target));
+    }
+
+    @Override
+    public void setCustomName(Text customName) {
+        super.setCustomName(customName);
+        syncSharedCustomName(customName, null);
+    }
+
+    void onSegmentCustomNamed(Text customName, CentipedeSegmentEntity source) {
+        super.setCustomName(customName);
+        syncSharedCustomName(customName, source);
+    }
+
+    private void syncSharedCustomName(Text customName, CentipedeSegmentEntity source) {
+        if (segments == null) {
+            return;
+        }
+
+        for (CentipedeSegmentEntity segment : segments) {
+            if (segment == null || segment.isRemoved() || segment == source) {
+                continue;
+            }
+            segment.applySharedCustomName(customName);
+        }
     }
 
     // =========================================================================

@@ -5,7 +5,6 @@ import net.minecraft.client.render.entity.EntityRendererFactory;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.RotationAxis;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -28,11 +27,7 @@ public class CentipedeBodyRenderer extends GeoEntityRenderer<CentipedeBodyEntity
 
     @Override
     public Color getRenderColor(CentipedeBodyEntity animatable, float partialTick, int packedLight) {
-        CentipedeController parent = animatable.getParentCentipede();
-        if (parent != null) {
-            return Color.ofOpaque(parent.getShellColorRGB());
-        }
-        return Color.WHITE;
+        return Color.ofOpaque(CentipedeRenderColorHelper.getRenderColor(animatable, partialTick));
     }
 
     @Override
