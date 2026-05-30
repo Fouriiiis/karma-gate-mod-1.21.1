@@ -21,6 +21,7 @@ import dev.fouriis.karmagate.entity.stowaway.StowawayBugEntity;
 import dev.fouriis.karmagate.item.ModItems;
 import dev.fouriis.karmagate.item.tool.CoralNeuronDefinition;
 import dev.fouriis.karmagate.item.tool.ProjectionZoneDefinition;
+import dev.fouriis.karmagate.hose.FuelHoseSessionManager;
 import dev.fouriis.karmagate.network.ModNetworking;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.ModSounds;
@@ -248,6 +249,21 @@ public class KarmaGateMod implements ModInitializer {
                         serverPlayer.sendMessage(Text.literal("Room corner A set to " + pos.getX() + ", " + pos.getY() + ", " + pos.getZ()), true);
                         return ActionResult.SUCCESS;
                 });
+
+        AttackBlockCallback.EVENT.register((player, world, hand, pos, direction) -> {
+                if (world.isClient) {
+                        return ActionResult.PASS;
+                }
+                if (!player.getStackInHand(hand).isOf(ModItems.FUEL_HOSE_TOOL)) {
+                        return ActionResult.PASS;
+                }
+                if (!(player instanceof ServerPlayerEntity serverPlayer)) {
+                        return ActionResult.PASS;
+                }
+                FuelHoseSessionManager.setFirstEndpoint(serverPlayer, pos, world.getRegistryKey());
+                serverPlayer.sendMessage(Text.literal("Fuel hose start set to " + pos.getX() + ", " + pos.getY() + ", " + pos.getZ()), true);
+                return ActionResult.SUCCESS;
+        });
 
         // Server-side door interaction cancellation
         UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {

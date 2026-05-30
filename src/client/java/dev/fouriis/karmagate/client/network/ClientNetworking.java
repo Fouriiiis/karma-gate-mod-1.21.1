@@ -1,9 +1,13 @@
 package dev.fouriis.karmagate.client.network;
 
 import dev.fouriis.karmagate.client.gridproject.ProjectionZone;
+import dev.fouriis.karmagate.client.hose.FuelHoseClientState;
+import dev.fouriis.karmagate.client.hose.FuelHoseConfigScreen;
 import dev.fouriis.karmagate.client.room.RoomClientState;
 import dev.fouriis.karmagate.client.room.RoomSelectionClientState;
 import dev.fouriis.karmagate.client.weather.GlobalRainClientState;
+import dev.fouriis.karmagate.network.FuelHoseSyncPayload;
+import dev.fouriis.karmagate.network.OpenFuelHoseConfigPayload;
 import dev.fouriis.karmagate.network.GlobalRainSyncPayload;
 import dev.fouriis.karmagate.network.ProjectionZoneSyncPayload;
 import dev.fouriis.karmagate.network.RoomSelectionSyncPayload;
@@ -62,6 +66,23 @@ public class ClientNetworking {
                     )
             )
         );
+
+                ClientPlayNetworking.registerGlobalReceiver(
+                    OpenFuelHoseConfigPayload.ID,
+                    (payload, context) -> context.client().execute(() ->
+                        context.client().setScreen(new FuelHoseConfigScreen(
+                            context.client().currentScreen,
+                            payload.dimensionId(),
+                            new BlockPos(payload.startX(), payload.startY(), payload.startZ()),
+                            new BlockPos(payload.endX(), payload.endY(), payload.endZ())
+                        ))
+                    )
+                );
+
+                ClientPlayNetworking.registerGlobalReceiver(
+                    FuelHoseSyncPayload.ID,
+                    (payload, context) -> context.client().execute(() -> FuelHoseClientState.applySync(payload))
+                );
     }
     
     /**

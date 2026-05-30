@@ -100,6 +100,17 @@ public class ModBlocks {
             .strength(0.0f)
             .sounds(BlockSoundGroup.SLIME)
             .dropsNothing()));
+
+    public static final Block FUEL_HOSE_SEGMENT = Registry.register(
+            Registries.BLOCK,
+            Identifier.of(KarmaGateMod.MOD_ID, "fuel_hose_segment"),
+            new Block(Block.Settings.create()
+                    .mapColor(MapColor.CLEAR)
+                    .noCollision()
+                    .nonOpaque()
+                    .strength(0.0f)
+                    .dropsNothing())
+    );
     
 
     private static Block registerBlock(String name, Block block) {

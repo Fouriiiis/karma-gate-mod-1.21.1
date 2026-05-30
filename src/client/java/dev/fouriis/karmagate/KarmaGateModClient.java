@@ -16,6 +16,8 @@ import dev.fouriis.karmagate.client.wormgrass.WormGrassWorldRenderer;
 import dev.fouriis.karmagate.client.cubefold.CubeFoldEffect;
 import dev.fouriis.karmagate.client.graffiti.GraffitiEntityRenderer;
 import dev.fouriis.karmagate.client.room.RoomMapScreen;
+import dev.fouriis.karmagate.client.hose.FuelHoseClientState;
+import dev.fouriis.karmagate.client.hose.FuelHoseWorldRenderer;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
 import dev.fouriis.karmagate.entity.centipede.CentiwingEntityRenderer;
 import dev.fouriis.karmagate.entity.centipede.CentipedeBodyRenderer;
@@ -95,6 +97,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 		// Register client networking
 		ClientNetworking.register();
 		RoomOverlayRenderer.register();
+		FuelHoseWorldRenderer.register();
 
 		// Register distant structure billboards
 		//dev.fouriis.karmagate.client.DistantStructuresRenderer.init();
@@ -352,6 +355,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			RotRenderCache.clearAll();
 			RotWorldRenderer.clearCache();
 			CubeFoldEffect.clearForWorldTransition();
+			FuelHoseClientState.clear();
 		});
 
 		// --- Wormgrass client hooks ---
