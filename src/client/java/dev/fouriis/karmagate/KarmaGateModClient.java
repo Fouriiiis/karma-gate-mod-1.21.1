@@ -8,15 +8,10 @@ import dev.fouriis.karmagate.client.rot.RotRenderCache;
 import dev.fouriis.karmagate.client.rot.RotWorldRenderer;
 import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerManager;
 import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerRenderer;
-import dev.fouriis.karmagate.client.weather.BulletRainRender;
-import dev.fouriis.karmagate.client.weather.DeathRainWeatherRenderer;
-import dev.fouriis.karmagate.client.weather.GlobalRainClientState;
-import dev.fouriis.karmagate.client.weather.RainCameraShakeController;
 import dev.fouriis.karmagate.client.wormgrass.WormGrassRenderCache;
 import dev.fouriis.karmagate.client.wormgrass.WormGrassWorldRenderer;
 import dev.fouriis.karmagate.client.cubefold.CubeFoldEffect;
 import dev.fouriis.karmagate.client.graffiti.GraffitiEntityRenderer;
-import dev.fouriis.karmagate.client.room.RoomMapScreen;
 import dev.fouriis.karmagate.client.hose.FuelHoseClientState;
 import dev.fouriis.karmagate.client.hose.FuelHoseWorldRenderer;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
@@ -41,7 +36,6 @@ import dev.fouriis.karmagate.entity.karmagate.WaterStreamBlockEntity;
 import dev.fouriis.karmagate.entity.spider.SpiderEntityRenderer;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugRenderer;
 import dev.fouriis.karmagate.hologram.HologramProjectorRenderer;
-import dev.fouriis.karmagate.client.room.RoomOverlayRenderer;
 import dev.fouriis.karmagate.item.KarmaGateItemGeoRenderer;
 import dev.fouriis.karmagate.item.tool.CoralNeuronClientDefinition;
 import dev.fouriis.karmagate.item.tool.ProjectionZoneClientDefinition;
@@ -49,7 +43,6 @@ import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.particle.SteamParticle;
 import dev.fouriis.karmagate.particle.WaterStreamParticle;
 import dev.fouriis.karmagate.sound.GateAudioSpecs;
-import dev.fouriis.karmagate.sound.GlobalRainAudioController;
 import dev.fouriis.karmagate.sound.ModSounds;
 import dev.fouriis.karmagate.sound.MultiSound;
 import dev.fouriis.karmagate.sound.MultiSound.Spec;
@@ -97,7 +90,6 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		// Register client networking
 		ClientNetworking.register();
-		RoomOverlayRenderer.register();
 		FuelHoseWorldRenderer.register();
 
 		// Register distant structure billboards
@@ -174,19 +166,9 @@ public class KarmaGateModClient implements ClientModInitializer {
 				return;
 			}
 
-			BulletRainRender.render(
-					client.world,
-					context.camera(),
-					context.tickCounter().getTickDelta(false),
-					context.matrixStack()
-			);
+			
 
-			DeathRainWeatherRenderer.render(
-					client.world,
-					context.camera(),
-					context.tickCounter().getTickDelta(false),
-					context.matrixStack()
-			);
+			
 		});
 
 		// Register Karma Gate item renderer with custom transforms
@@ -316,41 +298,20 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			SteamAudioController.get().clientTick();
-			GlobalRainAudioController.clientTick(client);
-			RainCameraShakeController.INSTANCE.tick();
 			// Update neuron swarmers
 			NeuronSwarmerManager.getInstance().tick();
 			// Update coral neuron endpoint circles
 			CoralNeuronCircleManager.getInstance().tick();
 			StarMatrixPatternManager.getInstance().tick();
 		});
-
-		ROOM_MAP_KEY = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-			"key.karma-gate-mod.room_map",
-			InputUtil.Type.KEYSYM,
-			GLFW.GLFW_KEY_M,
-			"key.categories.misc"
-		));
-
-		ClientTickEvents.END_CLIENT_TICK.register(client -> {
-			while (ROOM_MAP_KEY.wasPressed()) {
-				if (client.currentScreen instanceof RoomMapScreen) {
-					client.setScreen(null);
-				} else {
-					client.setScreen(new RoomMapScreen());
-				}
-			}
-		});
+		
 
 		// Clear cached loop references on disconnect or new join to avoid stale sound state after rejoin
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
 			SteamAudioController.get().clear();
-			GlobalRainAudioController.clear();
 			NeuronSwarmerManager.getInstance().clear();
 			CoralNeuronCircleManager.getInstance().clear();
 			StarMatrixPatternManager.getInstance().clear();
-			GlobalRainClientState.clear();
-			RainCameraShakeController.INSTANCE.reset();
 			clampLoops.values().forEach(MultiSound.Handle::stop);
 			screwLoops.values().forEach(MultiSound.Handle::stop);
 			clampLoops.clear();
@@ -378,12 +339,9 @@ public class KarmaGateModClient implements ClientModInitializer {
 		WorldRenderEvents.AFTER_ENTITIES.register(RotWorldRenderer::render);
 		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
 			SteamAudioController.get().clear();
-			GlobalRainAudioController.clear();
 			NeuronSwarmerManager.getInstance().clear();
 			CoralNeuronCircleManager.getInstance().clear();
 			StarMatrixPatternManager.getInstance().clear();
-			GlobalRainClientState.clear();
-			RainCameraShakeController.INSTANCE.reset();
 			clampLoops.values().forEach(MultiSound.Handle::stop);
 			screwLoops.values().forEach(MultiSound.Handle::stop);
 			clampLoops.clear();

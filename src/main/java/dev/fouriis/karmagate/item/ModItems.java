@@ -17,9 +17,6 @@ public class ModItems {
     public static final Item GRAFFITI_PLACER = registerItem("graffiti_placer",
         new GraffitiItem(new Item.Settings().maxCount(64)));
 
-    public static final Item ROOM_TOOL = registerItem("room_tool",
-        new RoomToolItem(new Item.Settings().maxCount(1)));
-
     public static final Item FUEL_HOSE_TOOL = registerItem("fuel_hose_tool",
         new FuelHoseToolItem(new Item.Settings().maxCount(1)));
 
@@ -63,7 +60,6 @@ public class ModItems {
         
         ItemGroupEvents.modifyEntriesEvent(RegistryKey.of(RegistryKeys.ITEM_GROUP, Identifier.of("minecraft", "tools"))).register(entries -> {
             entries.add(GRAFFITI_PLACER);
-            entries.add(ROOM_TOOL);
             entries.add(FUEL_HOSE_TOOL);
         });
 

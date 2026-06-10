@@ -12,10 +12,6 @@ import dev.fouriis.karmagate.hose.FuelHoseData;
 import dev.fouriis.karmagate.hose.FuelHoseManager;
 import dev.fouriis.karmagate.hose.FuelHoseSessionManager;
 import dev.fouriis.karmagate.hose.FuelHoseSimulation;
-import dev.fouriis.karmagate.rain.GlobalRain;
-import dev.fouriis.karmagate.room.RoomManager;
-import dev.fouriis.karmagate.room.RoomSelection;
-import dev.fouriis.karmagate.room.RoomSelectionManager;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -47,20 +43,6 @@ public class ModNetworking {
             StarMatrixSyncPayload.CODEC
         );
 
-        PayloadTypeRegistry.playS2C().register(
-            RoomSyncPayload.ID,
-            RoomSyncPayload.CODEC
-        );
-
-        PayloadTypeRegistry.playS2C().register(
-            RoomSelectionSyncPayload.ID,
-            RoomSelectionSyncPayload.CODEC
-        );
-
-        PayloadTypeRegistry.playS2C().register(
-            GlobalRainSyncPayload.ID,
-            GlobalRainSyncPayload.CODEC
-        );
         
         // Register the graffiti spawn payload type (client -> server)
         PayloadTypeRegistry.playC2S().register(
@@ -162,25 +144,8 @@ public class ModNetworking {
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             syncToPlayer(handler.getPlayer());
             syncStarMatricesToPlayer(handler.getPlayer());
-            syncRoomsToPlayer(handler.getPlayer());
-            RoomSelection selection = RoomSelectionManager.getSelection(handler.getPlayer());
-            syncRoomSelectionToPlayer(handler.getPlayer(), selection);
             syncFuelHosesToPlayer(handler.getPlayer());
-            GlobalRain rain = GlobalRain.get(server);
-            syncGlobalRainToPlayer(
-                    handler.getPlayer(),
-                    rain.getIntensity(),
-                    rain.getRainDirection(),
-                    rain.getBulletRainDensity(),
-                    rain.getRumbleSound(),
-                    rain.getScreenShake(),
-                    rain.getMicroScreenShake()
-            );
         });
-
-        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
-            RoomSelectionManager.clearSelection(handler.getPlayer())
-        );
 
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
                 FuelHoseSessionManager.clear(handler.getPlayer())
@@ -374,73 +339,6 @@ public class ModNetworking {
     public static void syncStarMatricesToAll(net.minecraft.server.MinecraftServer server) {
         StarMatrixManager manager = StarMatrixManager.get(server);
         StarMatrixSyncPayload payload = StarMatrixSyncPayload.fromMatrices(manager.getAllMatrices());
-        for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
-            ServerPlayNetworking.send(player, payload);
-        }
-    }
-
-    /**
-     * Syncs all rooms to a specific player.
-     */
-    public static void syncRoomsToPlayer(ServerPlayerEntity player) {
-        RoomManager manager = RoomManager.get(player.getServer());
-        RoomSyncPayload payload = RoomSyncPayload.fromRooms(manager.getAllRooms());
-        ServerPlayNetworking.send(player, payload);
-    }
-
-    /**
-     * Syncs all rooms to all players on the server.
-     */
-    public static void syncRoomsToAll(net.minecraft.server.MinecraftServer server) {
-        RoomManager manager = RoomManager.get(server);
-        RoomSyncPayload payload = RoomSyncPayload.fromRooms(manager.getAllRooms());
-        for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
-            ServerPlayNetworking.send(player, payload);
-        }
-    }
-
-    /**
-     * Syncs the current room selection to a specific player.
-     */
-    public static void syncRoomSelectionToPlayer(ServerPlayerEntity player, RoomSelection selection) {
-        ServerPlayNetworking.send(player, RoomSelectionSyncPayload.fromSelection(selection));
-    }
-
-    public static void syncGlobalRainToPlayer(ServerPlayerEntity player,
-                                              float intensity,
-                                              float rainDirection,
-                                              float bulletRainDensity,
-                                              float rumbleSound,
-                                              float screenShake,
-                                              float microScreenShake) {
-        ServerPlayNetworking.send(
-                player,
-                new GlobalRainSyncPayload(
-                        intensity,
-                        rainDirection,
-                        bulletRainDensity,
-                        rumbleSound,
-                        screenShake,
-                        microScreenShake
-                )
-        );
-    }
-
-    public static void syncGlobalRainToAll(net.minecraft.server.MinecraftServer server,
-                                           float intensity,
-                                           float rainDirection,
-                                           float bulletRainDensity,
-                                           float rumbleSound,
-                                           float screenShake,
-                                           float microScreenShake) {
-        GlobalRainSyncPayload payload = new GlobalRainSyncPayload(
-                intensity,
-                rainDirection,
-                bulletRainDensity,
-                rumbleSound,
-                screenShake,
-                microScreenShake
-        );
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             ServerPlayNetworking.send(player, payload);
         }

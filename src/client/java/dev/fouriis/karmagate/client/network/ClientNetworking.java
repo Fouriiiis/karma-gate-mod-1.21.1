@@ -5,15 +5,9 @@ import dev.fouriis.karmagate.client.gridproject.GridProjectRenderer;
 import dev.fouriis.karmagate.client.gridproject.StarMatrixPatternManager;
 import dev.fouriis.karmagate.client.hose.FuelHoseClientState;
 import dev.fouriis.karmagate.client.hose.FuelHoseConfigScreen;
-import dev.fouriis.karmagate.client.room.RoomClientState;
-import dev.fouriis.karmagate.client.room.RoomSelectionClientState;
-import dev.fouriis.karmagate.client.weather.GlobalRainClientState;
 import dev.fouriis.karmagate.network.FuelHoseSyncPayload;
 import dev.fouriis.karmagate.network.OpenFuelHoseConfigPayload;
-import dev.fouriis.karmagate.network.GlobalRainSyncPayload;
 import dev.fouriis.karmagate.network.ProjectionZoneSyncPayload;
-import dev.fouriis.karmagate.network.RoomSelectionSyncPayload;
-import dev.fouriis.karmagate.network.RoomSyncPayload;
 import dev.fouriis.karmagate.network.StarMatrixSyncPayload;
 import dev.fouriis.karmagate.network.UpdateBarrierPlatformPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
@@ -49,33 +43,7 @@ public class ClientNetworking {
             )
         );
 
-        ClientPlayNetworking.registerGlobalReceiver(
-            RoomSyncPayload.ID,
-            (payload, context) -> context.client().execute(() ->
-                RoomClientState.applySync(payload)
-            )
-        );
-
-        ClientPlayNetworking.registerGlobalReceiver(
-            RoomSelectionSyncPayload.ID,
-            (payload, context) -> context.client().execute(() ->
-                RoomSelectionClientState.applySync(payload)
-            )
-        );
-
-        ClientPlayNetworking.registerGlobalReceiver(
-            GlobalRainSyncPayload.ID,
-            (payload, context) -> context.client().execute(() ->
-                    GlobalRainClientState.applySync(
-                            payload.intensity(),
-                            payload.rainDirection(),
-                            payload.bulletRainDensity(),
-                            payload.rumbleSound(),
-                            payload.screenShake(),
-                            payload.microScreenShake()
-                    )
-            )
-        );
+        
 
                 ClientPlayNetworking.registerGlobalReceiver(
                     OpenFuelHoseConfigPayload.ID,

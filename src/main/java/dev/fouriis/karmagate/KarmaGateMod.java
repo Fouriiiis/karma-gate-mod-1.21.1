@@ -3,7 +3,6 @@ package dev.fouriis.karmagate;
 import dev.fouriis.karmagate.block.ModBlocks;
 import dev.fouriis.karmagate.command.CoralNeuronCommands;
 import dev.fouriis.karmagate.command.ProjectionZoneCommands;
-import dev.fouriis.karmagate.command.RoomCommands;
 import dev.fouriis.karmagate.command.StarMatrixCommands;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
@@ -26,9 +25,6 @@ import dev.fouriis.karmagate.hose.FuelHoseSessionManager;
 import dev.fouriis.karmagate.network.ModNetworking;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.ModSounds;
-import dev.fouriis.karmagate.rain.RainCycle;
-import dev.fouriis.karmagate.room.RoomSelection;
-import dev.fouriis.karmagate.room.RoomSelectionManager;
 import net.brickcraftdream.librainworldmc.tool.api.SelectionToolRegistry;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -225,32 +221,14 @@ public class KarmaGateMod implements ModInitializer {
             ProjectionZoneCommands.register(dispatcher);
             StarMatrixCommands.register(dispatcher);
             CoralNeuronCommands.register(dispatcher);
-                        RoomCommands.register(dispatcher);
                         
         });
 
-                ServerTickEvents.END_SERVER_TICK.register(server -> RainCycle.get(server).tick(server));
 
         // Wormgrass server-side grab / bury tick
         ServerTickEvents.END_WORLD_TICK.register(world ->
                 dev.fouriis.karmagate.block.WormGrassManager.tick(world));
 
-                // Room tool: left-click sets corner A
-                AttackBlockCallback.EVENT.register((player, world, hand, pos, direction) -> {
-                        if (world.isClient) {
-                                return ActionResult.PASS;
-                        }
-                        if (!player.getStackInHand(hand).isOf(ModItems.ROOM_TOOL)) {
-                                return ActionResult.PASS;
-                        }
-                        if (!(player instanceof ServerPlayerEntity serverPlayer)) {
-                                return ActionResult.PASS;
-                        }
-                        RoomSelection selection = RoomSelectionManager.setCorner1(serverPlayer, pos);
-                        ModNetworking.syncRoomSelectionToPlayer(serverPlayer, selection);
-                        serverPlayer.sendMessage(Text.literal("Room corner A set to " + pos.getX() + ", " + pos.getY() + ", " + pos.getZ()), true);
-                        return ActionResult.SUCCESS;
-                });
 
         AttackBlockCallback.EVENT.register((player, world, hand, pos, direction) -> {
                 if (world.isClient) {
