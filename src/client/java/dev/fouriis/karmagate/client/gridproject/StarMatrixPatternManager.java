@@ -26,6 +26,10 @@ public final class StarMatrixPatternManager {
 
     private static final StarMatrixPatternManager INSTANCE = new StarMatrixPatternManager();
     private static final float TAU = (float) (Math.PI * 2.0);
+    private static final float PIXELS_PER_BLOCK = 20.0f;
+    private static final float STAR_DOT_RADIUS_PIXELS = 2.5f;
+    private static final float STAR_RING_BASE_RADIUS_PIXELS = 8.0f;
+    private static final float STAR_RING_RADIUS_STEP_PIXELS = 5.0f;
 
     private final Map<String, List<Definition>> definitionsByZone = new HashMap<>();
     private final Map<String, RuntimeMatrix> runtimesByName = new HashMap<>();
@@ -254,18 +258,19 @@ public final class StarMatrixPatternManager {
                     int base = packed.dotCount * 4;
                     packed.dots[base] = point.u;
                     packed.dots[base + 1] = point.y;
-                    packed.dots[base + 2] = 0.18f;
+                    packed.dots[base + 2] = pixelsToBlocks(STAR_DOT_RADIUS_PIXELS);
                     packed.dots[base + 3] = 1.0f;
                     packed.dotCount++;
                 }
 
                 StarNode star = stars.get(i);
                 for (int ring = 0; ring < star.ringCount && packed.ringCount < MAX_STAR_RINGS; ring++) {
+                    float ringRadiusPixels = STAR_RING_BASE_RADIUS_PIXELS + STAR_RING_RADIUS_STEP_PIXELS * ring;
                     int base = packed.ringCount * 4;
                     packed.rings[base] = point.u;
                     packed.rings[base + 1] = point.y;
-                    packed.rings[base + 2] = 0.42f + ring * 0.28f;
-                    packed.rings[base + 3] = Math.max(0.3f, 0.9f - ring * 0.18f);
+                    packed.rings[base + 2] = pixelsToBlocks(ringRadiusPixels);
+                    packed.rings[base + 3] = 2.0f / ringRadiusPixels;
                     packed.ringCount++;
                 }
             }
@@ -305,9 +310,9 @@ public final class StarMatrixPatternManager {
         private void initialize(ProjectionZone zone) {
             this.displayRadius = MathHelper.clamp(zone.getRadiusf() * 0.14f + 2.0f, 4.0f, 9.0f);
 
-            float syntheticRad = (float) (displayRadius * 9.0);
-            float densityRad = Math.max(0f, MathHelper.lerp(0.3f, syntheticRad, 500f));
-            int starCount = MathHelper.clamp((int) ((densityRad * densityRad * Math.PI) / 4000.0), 16, 40);
+            float ownerRadiusPixels = (float) (displayRadius * PIXELS_PER_BLOCK);
+            float densityRadiusPixels = Math.max(0f, MathHelper.lerp(0.3f, ownerRadiusPixels, 500f));
+            int starCount = Math.max(1, Math.min(MAX_STAR_DOTS, (int) ((densityRadiusPixels * densityRadiusPixels * Math.PI) / 4000.0)));
 
             stars.clear();
             for (int index = 0; index < starCount; index++) {
@@ -492,5 +497,9 @@ public final class StarMatrixPatternManager {
 
     private static int nextIntInclusive(Random random, int min, int max) {
         return min + random.nextInt(max - min + 1);
+    }
+
+    private static float pixelsToBlocks(float pixels) {
+        return pixels / PIXELS_PER_BLOCK;
     }
 }

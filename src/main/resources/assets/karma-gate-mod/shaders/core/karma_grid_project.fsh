@@ -40,7 +40,7 @@ uniform int uStarLineCount;
 uniform int uStarRingCount;
 uniform vec4 uStarDots[MAX_STAR_DOTS];   // [u, y, radius, alpha]
 uniform vec4 uStarLines[MAX_STAR_LINES]; // [u1, y1, u2, y2]
-uniform vec4 uStarRings[MAX_STAR_RINGS]; // [u, y, radius, alpha]
+uniform vec4 uStarRings[MAX_STAR_RINGS]; // [u, y, radius, vectorAlpha]
 
 // Draw toggle uniforms (0.0 = off, 1.0 = on)
 uniform float uDrawCircles;
@@ -64,6 +64,9 @@ float saturate(float x) { return clamp(x, 0.0, 1.0); }
 
 // Math constants
 const float PI = 3.14159265359;
+const float STAR_PIXELS_PER_BLOCK = 20.0;
+const float STAR_LINE_HALF_WIDTH = 0.75 / STAR_PIXELS_PER_BLOCK;
+const float STAR_MIN_AA = 0.02;
 
 // Deterministic unit random vector like Custom.RNV()
 vec2 rnv(float s) {
@@ -668,14 +671,14 @@ void main() {
         vec4 dotData = uStarDots[si];
         float dotU = dotData.x;
         float dotY = dotData.y;
-        float dotRad = max(dotData.z, 0.02);
+        float dotRad = max(dotData.z, 1.0 / STAR_PIXELS_PER_BLOCK);
         float dotAlpha = dotData.w;
 
         float du = shortestDelta(dotU, fragPosPerim.x, perim);
         float dy = fragPosPerim.y - dotY;
         float distToDot = length(vec2(du, dy));
-        float fwDot = max(fwidth(distToDot), 0.02);
-        float dotA = (1.0 - smoothstep(dotRad, dotRad + fwDot, distToDot)) * dotAlpha * baseOpacity;
+        float fwDot = max(fwidth(distToDot), STAR_MIN_AA);
+        float dotA = (1.0 - smoothstep(dotRad - fwDot, dotRad + fwDot, distToDot)) * dotAlpha * baseOpacity;
         starDotsA = max(starDotsA, dotA);
     }
 
@@ -685,16 +688,16 @@ void main() {
         vec4 ringData = uStarRings[ri];
         float ringU = ringData.x;
         float ringY = ringData.y;
-        float ringRad = max(ringData.z, 0.04);
-        float ringAlpha = ringData.w;
+        float ringRad = max(ringData.z, 1.0 / STAR_PIXELS_PER_BLOCK);
+        float vectorAlpha = ringData.w;
 
         float du = shortestDelta(ringU, fragPosPerim.x, perim);
         float dy = fragPosPerim.y - ringY;
         float distToRingCenter = length(vec2(du, dy));
         float ringDist = abs(distToRingCenter - ringRad);
-        float fwRing = max(fwidth(ringDist), 0.018);
-        float ringThickness = mix(0.035, 0.07, saturate(ringRad * 0.4));
-        float ringA = (1.0 - smoothstep(ringThickness, ringThickness + fwRing, ringDist)) * ringAlpha * baseOpacity;
+        float fwRing = max(fwidth(ringDist), STAR_MIN_AA);
+        float ringHalfThickness = max(0.5 * ringRad * vectorAlpha, 0.5 / STAR_PIXELS_PER_BLOCK);
+        float ringA = (1.0 - smoothstep(ringHalfThickness - fwRing, ringHalfThickness + fwRing, ringDist)) * baseOpacity;
         starRingsA = max(starRingsA, ringA);
     }
 
@@ -709,8 +712,8 @@ void main() {
         vec2 p = vec2(uFrag, fragPosPerim.y);
 
         float distToLine = distToSegment(p, a, b);
-        float fwLine = max(fwidth(distToLine), 0.02);
-        float lineA = (1.0 - smoothstep(0.028, 0.028 + fwLine, distToLine)) * baseOpacity * 0.75;
+        float fwLine = max(fwidth(distToLine), STAR_MIN_AA);
+        float lineA = (1.0 - smoothstep(STAR_LINE_HALF_WIDTH - fwLine, STAR_LINE_HALF_WIDTH + fwLine, distToLine)) * baseOpacity;
         starLinesA = max(starLinesA, lineA);
     }
 
