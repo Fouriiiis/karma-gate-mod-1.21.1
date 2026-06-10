@@ -4,6 +4,7 @@ import dev.fouriis.karmagate.block.ModBlocks;
 import dev.fouriis.karmagate.command.CoralNeuronCommands;
 import dev.fouriis.karmagate.command.ProjectionZoneCommands;
 import dev.fouriis.karmagate.command.RoomCommands;
+import dev.fouriis.karmagate.command.StarMatrixCommands;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
 import dev.fouriis.karmagate.entity.centipede.CentipedeBodyEntity;
@@ -222,6 +223,7 @@ public class KarmaGateMod implements ModInitializer {
         // Register commands
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
             ProjectionZoneCommands.register(dispatcher);
+            StarMatrixCommands.register(dispatcher);
             CoralNeuronCommands.register(dispatcher);
                         RoomCommands.register(dispatcher);
                         

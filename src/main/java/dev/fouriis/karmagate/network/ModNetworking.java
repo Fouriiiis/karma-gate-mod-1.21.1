@@ -7,6 +7,7 @@ import dev.fouriis.karmagate.coralneuron.CoralNeuronManager;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneData;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneManager;
+import dev.fouriis.karmagate.gridproject.StarMatrixManager;
 import dev.fouriis.karmagate.hose.FuelHoseData;
 import dev.fouriis.karmagate.hose.FuelHoseManager;
 import dev.fouriis.karmagate.hose.FuelHoseSessionManager;
@@ -39,6 +40,11 @@ public class ModNetworking {
         PayloadTypeRegistry.playS2C().register(
             ProjectionZoneSyncPayload.ID, 
             ProjectionZoneSyncPayload.CODEC
+        );
+
+        PayloadTypeRegistry.playS2C().register(
+            StarMatrixSyncPayload.ID,
+            StarMatrixSyncPayload.CODEC
         );
 
         PayloadTypeRegistry.playS2C().register(
@@ -155,6 +161,7 @@ public class ModNetworking {
         // Sync zones to players when they join
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             syncToPlayer(handler.getPlayer());
+            syncStarMatricesToPlayer(handler.getPlayer());
             syncRoomsToPlayer(handler.getPlayer());
             RoomSelection selection = RoomSelectionManager.getSelection(handler.getPlayer());
             syncRoomSelectionToPlayer(handler.getPlayer(), selection);
@@ -275,7 +282,9 @@ public class ModNetworking {
             context.server().execute(() -> {
                 ProjectionZoneManager manager = ProjectionZoneManager.get(context.server());
                 manager.removeZone(payload.name());
+                StarMatrixManager.get(context.server()).removeMatricesForZone(payload.name());
                 syncToAll(context.server());
+                syncStarMatricesToAll(context.server());
                 KarmaGateMod.LOGGER.info("Tool deleted ProjectionZone '{}' for player {}",
                         payload.name(), player.getName().getString());
             });
@@ -352,6 +361,19 @@ public class ModNetworking {
         ProjectionZoneManager manager = ProjectionZoneManager.get(server);
         ProjectionZoneSyncPayload payload = ProjectionZoneSyncPayload.fromZones(manager.getAllZones());
         
+        for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
+            ServerPlayNetworking.send(player, payload);
+        }
+    }
+
+    public static void syncStarMatricesToPlayer(ServerPlayerEntity player) {
+        StarMatrixManager manager = StarMatrixManager.get(player.getServer());
+        ServerPlayNetworking.send(player, StarMatrixSyncPayload.fromMatrices(manager.getAllMatrices()));
+    }
+
+    public static void syncStarMatricesToAll(net.minecraft.server.MinecraftServer server) {
+        StarMatrixManager manager = StarMatrixManager.get(server);
+        StarMatrixSyncPayload payload = StarMatrixSyncPayload.fromMatrices(manager.getAllMatrices());
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             ServerPlayNetworking.send(player, payload);
         }

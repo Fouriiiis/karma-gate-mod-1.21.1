@@ -204,6 +204,30 @@
       ]
     },
     {
+      "name": "uStarDotCount",
+      "type": "int",
+      "count": 1,
+      "values": [
+        0
+      ]
+    },
+    {
+      "name": "uStarLineCount",
+      "type": "int",
+      "count": 1,
+      "values": [
+        0
+      ]
+    },
+    {
+      "name": "uStarRingCount",
+      "type": "int",
+      "count": 1,
+      "values": [
+        0
+      ]
+    },
+    {
       "name": "uDrawCircles",
       "type": "float",
       "count": 1,

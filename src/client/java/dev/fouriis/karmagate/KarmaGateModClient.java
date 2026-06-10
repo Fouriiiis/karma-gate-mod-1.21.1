@@ -2,6 +2,7 @@ package dev.fouriis.karmagate;
 
 import dev.fouriis.karmagate.client.AtcSkyFabricAdapter;
 import dev.fouriis.karmagate.client.gridproject.CoralNeuronCircleManager;
+import dev.fouriis.karmagate.client.gridproject.StarMatrixPatternManager;
 import dev.fouriis.karmagate.client.network.ClientNetworking;
 import dev.fouriis.karmagate.client.rot.RotRenderCache;
 import dev.fouriis.karmagate.client.rot.RotWorldRenderer;
@@ -321,6 +322,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			NeuronSwarmerManager.getInstance().tick();
 			// Update coral neuron endpoint circles
 			CoralNeuronCircleManager.getInstance().tick();
+			StarMatrixPatternManager.getInstance().tick();
 		});
 
 		ROOM_MAP_KEY = KeyBindingHelper.registerKeyBinding(new KeyBinding(
@@ -346,6 +348,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			GlobalRainAudioController.clear();
 			NeuronSwarmerManager.getInstance().clear();
 			CoralNeuronCircleManager.getInstance().clear();
+			StarMatrixPatternManager.getInstance().clear();
 			GlobalRainClientState.clear();
 			RainCameraShakeController.INSTANCE.reset();
 			clampLoops.values().forEach(MultiSound.Handle::stop);
@@ -378,6 +381,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			GlobalRainAudioController.clear();
 			NeuronSwarmerManager.getInstance().clear();
 			CoralNeuronCircleManager.getInstance().clear();
+			StarMatrixPatternManager.getInstance().clear();
 			GlobalRainClientState.clear();
 			RainCameraShakeController.INSTANCE.reset();
 			clampLoops.values().forEach(MultiSound.Handle::stop);

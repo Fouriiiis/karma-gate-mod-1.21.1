@@ -27,6 +27,9 @@ public final class GridProjectRenderer {
     
     // Maximum circles that can be uploaded to shader
     private static final int MAX_CIRCLES = ProjectedCirclePatternManager.MAX_CIRCLES;
+    private static final int MAX_STAR_DOTS = StarMatrixPatternManager.MAX_STAR_DOTS;
+    private static final int MAX_STAR_LINES = StarMatrixPatternManager.MAX_STAR_LINES;
+    private static final int MAX_STAR_RINGS = StarMatrixPatternManager.MAX_STAR_RINGS;
 
     private static final int MAX_QUADS = 1_000_000;
     private static final float SURFACE_NUDGE = 0.00125f;
@@ -326,6 +329,7 @@ public final class GridProjectRenderer {
                 
                 // Upload circle data for this zone (now that shader is bound)
                 uploadCircleUniforms(program, zone.getName());
+                uploadStarMatrixUniforms(program, zone.getName());
 
                 BufferRenderer.resetCurrentVertexBuffer();
                 vb.bind();
@@ -395,6 +399,49 @@ public final class GridProjectRenderer {
         int extrasLoc = GL20.glGetUniformLocation(programId, "uCircleExtras");
         if (extrasLoc >= 0) {
             GL20.glUniform4fv(extrasLoc, data.extras);
+        }
+    }
+
+    private static void uploadStarMatrixUniforms(ShaderProgram program, String zoneName) {
+        if (program == null) return;
+
+        StarMatrixPatternManager.PackedStarMatrixData data =
+            StarMatrixPatternManager.getInstance().getPackedData(zoneName);
+
+        int dotCount = data != null ? data.dotCount : 0;
+        int lineCount = data != null ? data.lineCount : 0;
+        int ringCount = data != null ? data.ringCount : 0;
+
+        setUniform1i(program, "uStarDotCount", dotCount);
+        setUniform1i(program, "uStarLineCount", lineCount);
+        setUniform1i(program, "uStarRingCount", ringCount);
+
+        if (data == null) {
+            return;
+        }
+
+        int programId = program.getGlRef();
+        if (programId <= 0) return;
+
+        if (dotCount > 0) {
+            int dotsLoc = GL20.glGetUniformLocation(programId, "uStarDots");
+            if (dotsLoc >= 0) {
+                GL20.glUniform4fv(dotsLoc, data.dots);
+            }
+        }
+
+        if (lineCount > 0) {
+            int linesLoc = GL20.glGetUniformLocation(programId, "uStarLines");
+            if (linesLoc >= 0) {
+                GL20.glUniform4fv(linesLoc, data.lines);
+            }
+        }
+
+        if (ringCount > 0) {
+            int ringsLoc = GL20.glGetUniformLocation(programId, "uStarRings");
+            if (ringsLoc >= 0) {
+                GL20.glUniform4fv(ringsLoc, data.rings);
+            }
         }
     }
     

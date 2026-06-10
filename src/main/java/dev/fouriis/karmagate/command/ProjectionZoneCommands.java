@@ -8,6 +8,7 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneData;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneManager;
+import dev.fouriis.karmagate.gridproject.StarMatrixManager;
 import dev.fouriis.karmagate.network.ModNetworking;
 import net.minecraft.command.CommandSource;
 import net.minecraft.server.command.CommandManager;
@@ -180,8 +181,10 @@ public class ProjectionZoneCommands {
         Optional<ProjectionZoneData> removed = manager.removeZone(name);
         
         if (removed.isPresent()) {
+            StarMatrixManager.get(source.getServer()).removeMatricesForZone(name);
             // Sync to all clients
             ModNetworking.syncToAll(source.getServer());
+            ModNetworking.syncStarMatricesToAll(source.getServer());
             
             source.sendFeedback(
                 () -> Text.literal("Removed projection zone '")

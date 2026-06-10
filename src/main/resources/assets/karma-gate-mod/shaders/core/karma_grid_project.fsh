@@ -31,6 +31,17 @@ uniform int uCircleCount;
 uniform vec4 uCircles[MAX_CIRCLES];      // [u, y, radius, blink] per circle
 uniform vec4 uCircleExtras[MAX_CIRCLES]; // [rotationDeg, spokes, reserved, alphaScale] per circle
 
+// StarMatrix uniforms
+const int MAX_STAR_DOTS = 128;
+const int MAX_STAR_LINES = 160;
+const int MAX_STAR_RINGS = 96;
+uniform int uStarDotCount;
+uniform int uStarLineCount;
+uniform int uStarRingCount;
+uniform vec4 uStarDots[MAX_STAR_DOTS];   // [u, y, radius, alpha]
+uniform vec4 uStarLines[MAX_STAR_LINES]; // [u1, y1, u2, y2]
+uniform vec4 uStarRings[MAX_STAR_RINGS]; // [u, y, radius, alpha]
+
 // Draw toggle uniforms (0.0 = off, 1.0 = on)
 uniform float uDrawCircles;
 uniform float uDrawGrid;
@@ -645,6 +656,65 @@ void main() {
     }
 
     // ============================================================
+    // StarMatrix layer
+    // ============================================================
+    float starDotsA = 0.0;
+    float starLinesA = 0.0;
+    float starRingsA = 0.0;
+
+    for (int si = 0; si < MAX_STAR_DOTS; si++) {
+        if (si >= uStarDotCount) break;
+
+        vec4 dotData = uStarDots[si];
+        float dotU = dotData.x;
+        float dotY = dotData.y;
+        float dotRad = max(dotData.z, 0.02);
+        float dotAlpha = dotData.w;
+
+        float du = shortestDelta(dotU, fragPosPerim.x, perim);
+        float dy = fragPosPerim.y - dotY;
+        float distToDot = length(vec2(du, dy));
+        float fwDot = max(fwidth(distToDot), 0.02);
+        float dotA = (1.0 - smoothstep(dotRad, dotRad + fwDot, distToDot)) * dotAlpha * baseOpacity;
+        starDotsA = max(starDotsA, dotA);
+    }
+
+    for (int ri = 0; ri < MAX_STAR_RINGS; ri++) {
+        if (ri >= uStarRingCount) break;
+
+        vec4 ringData = uStarRings[ri];
+        float ringU = ringData.x;
+        float ringY = ringData.y;
+        float ringRad = max(ringData.z, 0.04);
+        float ringAlpha = ringData.w;
+
+        float du = shortestDelta(ringU, fragPosPerim.x, perim);
+        float dy = fragPosPerim.y - ringY;
+        float distToRingCenter = length(vec2(du, dy));
+        float ringDist = abs(distToRingCenter - ringRad);
+        float fwRing = max(fwidth(ringDist), 0.018);
+        float ringThickness = mix(0.035, 0.07, saturate(ringRad * 0.4));
+        float ringA = (1.0 - smoothstep(ringThickness, ringThickness + fwRing, ringDist)) * ringAlpha * baseOpacity;
+        starRingsA = max(starRingsA, ringA);
+    }
+
+    for (int li = 0; li < MAX_STAR_LINES; li++) {
+        if (li >= uStarLineCount) break;
+
+        vec4 lineData = uStarLines[li];
+        vec2 a = vec2(lineData.x, lineData.y);
+        float duAB = shortestDelta(a.x, lineData.z, perim);
+        vec2 b = vec2(a.x + duAB, lineData.w);
+        float uFrag = a.x + shortestDelta(a.x, fragPosPerim.x, perim);
+        vec2 p = vec2(uFrag, fragPosPerim.y);
+
+        float distToLine = distToSegment(p, a, b);
+        float fwLine = max(fwidth(distToLine), 0.02);
+        float lineA = (1.0 - smoothstep(0.028, 0.028 + fwLine, distToLine)) * baseOpacity * 0.75;
+        starLinesA = max(starLinesA, lineA);
+    }
+
+    // ============================================================
     // Compose
     // ============================================================
     vec3 baseCyan = vec3(0.55, 1.00, 0.90);
@@ -671,6 +741,9 @@ void main() {
     circlesA         *= circlesOn;
     circleLinesA     *= circlesOn;
     circlesHoleMask  *= circlesOn;
+    starDotsA        *= circlesOn;
+    starRingsA       *= circlesOn;
+    starLinesA       *= circlesOn;
 
     float outA = 0.0;
     vec3 outRGB = vec3(0.0);
@@ -696,6 +769,10 @@ void main() {
     float circlesBehindA = circlesA * (1.0 - foreMask);
 
     outRGB += baseCyan * circlesBehindA;  outA = max(outA, circlesBehindA);
+
+    float starMatrixA = max(max(starDotsA, starRingsA), starLinesA);
+    float starMatrixBehindA = starMatrixA * (1.0 - foreMask * 0.85);
+    outRGB += baseCyan * starMatrixBehindA;  outA = max(outA, starMatrixBehindA);
 
     // Now draw the neuron/grid content on top (same as before)
     outRGB += baseCyan * scanBandsFinal;  outA = max(outA, scanBandsFinal);
