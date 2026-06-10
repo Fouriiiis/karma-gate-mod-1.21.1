@@ -1,9 +1,14 @@
 package dev.fouriis.karmagate.client.network;
 
 import dev.fouriis.karmagate.client.gridproject.ProjectionZone;
-import dev.fouriis.karmagate.client.weather.GlobalRainClientState;
-import dev.fouriis.karmagate.network.GlobalRainSyncPayload;
+import dev.fouriis.karmagate.client.gridproject.GridProjectRenderer;
+import dev.fouriis.karmagate.client.gridproject.StarMatrixPatternManager;
+import dev.fouriis.karmagate.client.hose.FuelHoseClientState;
+import dev.fouriis.karmagate.client.hose.FuelHoseConfigScreen;
+import dev.fouriis.karmagate.network.FuelHoseSyncPayload;
+import dev.fouriis.karmagate.network.OpenFuelHoseConfigPayload;
 import dev.fouriis.karmagate.network.ProjectionZoneSyncPayload;
+import dev.fouriis.karmagate.network.StarMatrixSyncPayload;
 import dev.fouriis.karmagate.network.UpdateBarrierPlatformPayload;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.util.math.BlockPos;
@@ -32,18 +37,30 @@ public class ClientNetworking {
         );
 
         ClientPlayNetworking.registerGlobalReceiver(
-            GlobalRainSyncPayload.ID,
+            StarMatrixSyncPayload.ID,
             (payload, context) -> context.client().execute(() ->
-                    GlobalRainClientState.applySync(
-                            payload.intensity(),
-                            payload.rainDirection(),
-                            payload.bulletRainDensity(),
-                            payload.rumbleSound(),
-                            payload.screenShake(),
-                            payload.microScreenShake()
-                    )
+                StarMatrixPatternManager.getInstance().applySync(payload.matrices())
             )
         );
+
+        
+
+                ClientPlayNetworking.registerGlobalReceiver(
+                    OpenFuelHoseConfigPayload.ID,
+                    (payload, context) -> context.client().execute(() ->
+                        context.client().setScreen(new FuelHoseConfigScreen(
+                            context.client().currentScreen,
+                            payload.dimensionId(),
+                            new BlockPos(payload.startX(), payload.startY(), payload.startZ()),
+                            new BlockPos(payload.endX(), payload.endY(), payload.endZ())
+                        ))
+                    )
+                );
+
+                ClientPlayNetworking.registerGlobalReceiver(
+                    FuelHoseSyncPayload.ID,
+                    (payload, context) -> context.client().execute(() -> FuelHoseClientState.applySync(payload))
+                );
     }
     
     /**
@@ -52,6 +69,7 @@ public class ClientNetworking {
     private static void applyZoneSync(ProjectionZoneSyncPayload payload) {
         // Clear existing zones
         ProjectionZone.clearZones();
+        GridProjectRenderer.invalidateMeshes();
         
         // Add all zones from the server
         for (ProjectionZoneSyncPayload.ZoneEntry entry : payload.zones()) {

@@ -2,6 +2,7 @@ package dev.fouriis.karmagate.item;
 
 import dev.fouriis.karmagate.KarmaGateMod;
 import dev.fouriis.karmagate.entity.spider.SpiderSpawnEggItem;
+import dev.fouriis.karmagate.hose.FuelHoseToolItem;
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
 import net.minecraft.item.Item;
 import net.minecraft.item.SpawnEggItem;
@@ -15,6 +16,9 @@ public class ModItems {
     
     public static final Item GRAFFITI_PLACER = registerItem("graffiti_placer",
         new GraffitiItem(new Item.Settings().maxCount(64)));
+
+    public static final Item FUEL_HOSE_TOOL = registerItem("fuel_hose_tool",
+        new FuelHoseToolItem(new Item.Settings().maxCount(1)));
 
     public static final SpawnEggItem STOWAWAY_BUG_SPAWN_EGG = (SpawnEggItem) registerItem(
         "stowaway_bug_spawn_egg",
@@ -56,6 +60,7 @@ public class ModItems {
         
         ItemGroupEvents.modifyEntriesEvent(RegistryKey.of(RegistryKeys.ITEM_GROUP, Identifier.of("minecraft", "tools"))).register(entries -> {
             entries.add(GRAFFITI_PLACER);
+            entries.add(FUEL_HOSE_TOOL);
         });
 
         ItemGroupEvents.modifyEntriesEvent(RegistryKey.of(RegistryKeys.ITEM_GROUP, Identifier.of("minecraft", "spawn_eggs"))).register(entries -> {

@@ -3,5 +3,7 @@
   "entity.karma-gate-mod.stowaway_bug": "Stowaway",
   "entity.karma-gate-mod.daddy_long_legs": "Daddy Long Legs",
   "item.karma-gate-mod.stowaway_bug_spawn_egg": "Stowaway Spawn Egg",
-  "item.karma-gate-mod.daddy_long_legs_spawn_egg": "Daddy Long Legs Spawn Egg"
+  "item.karma-gate-mod.daddy_long_legs_spawn_egg": "Daddy Long Legs Spawn Egg",
+  "item.karma-gate-mod.room_tool": "Room Tool",
+  "key.karma-gate-mod.room_map": "Room Map"
 }

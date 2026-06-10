@@ -7,7 +7,11 @@ import dev.fouriis.karmagate.coralneuron.CoralNeuronManager;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneData;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneManager;
-import dev.fouriis.karmagate.rain.GlobalRain;
+import dev.fouriis.karmagate.gridproject.StarMatrixManager;
+import dev.fouriis.karmagate.hose.FuelHoseData;
+import dev.fouriis.karmagate.hose.FuelHoseManager;
+import dev.fouriis.karmagate.hose.FuelHoseSessionManager;
+import dev.fouriis.karmagate.hose.FuelHoseSimulation;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -35,9 +39,10 @@ public class ModNetworking {
         );
 
         PayloadTypeRegistry.playS2C().register(
-            GlobalRainSyncPayload.ID,
-            GlobalRainSyncPayload.CODEC
+            StarMatrixSyncPayload.ID,
+            StarMatrixSyncPayload.CODEC
         );
+
         
         // Register the graffiti spawn payload type (client -> server)
         PayloadTypeRegistry.playC2S().register(
@@ -78,6 +83,21 @@ public class ModNetworking {
         PayloadTypeRegistry.playC2S().register(
             UpdateBarrierPlatformPayload.ID,
             UpdateBarrierPlatformPayload.CODEC
+        );
+
+        PayloadTypeRegistry.playS2C().register(
+            OpenFuelHoseConfigPayload.ID,
+            OpenFuelHoseConfigPayload.CODEC
+        );
+
+        PayloadTypeRegistry.playC2S().register(
+            CreateFuelHosePayload.ID,
+            CreateFuelHosePayload.CODEC
+        );
+
+        PayloadTypeRegistry.playS2C().register(
+            FuelHoseSyncPayload.ID,
+            FuelHoseSyncPayload.CODEC
         );
 
         ServerPlayNetworking.registerGlobalReceiver(SpawnGraffitiPayload.ID, (payload, context) -> {
@@ -123,17 +143,13 @@ public class ModNetworking {
         // Sync zones to players when they join
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             syncToPlayer(handler.getPlayer());
-            GlobalRain rain = GlobalRain.get(server);
-            syncGlobalRainToPlayer(
-                    handler.getPlayer(),
-                    rain.getIntensity(),
-                    rain.getRainDirection(),
-                    rain.getBulletRainDensity(),
-                    rain.getRumbleSound(),
-                    rain.getScreenShake(),
-                    rain.getMicroScreenShake()
-            );
+            syncStarMatricesToPlayer(handler.getPlayer());
+            syncFuelHosesToPlayer(handler.getPlayer());
         });
+
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
+                FuelHoseSessionManager.clear(handler.getPlayer())
+        );
 
         ServerPlayNetworking.registerGlobalReceiver(DeleteGraffitiPayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
@@ -231,7 +247,9 @@ public class ModNetworking {
             context.server().execute(() -> {
                 ProjectionZoneManager manager = ProjectionZoneManager.get(context.server());
                 manager.removeZone(payload.name());
+                StarMatrixManager.get(context.server()).removeMatricesForZone(payload.name());
                 syncToAll(context.server());
+                syncStarMatricesToAll(context.server());
                 KarmaGateMod.LOGGER.info("Tool deleted ProjectionZone '{}' for player {}",
                         payload.name(), player.getName().getString());
             });
@@ -248,6 +266,46 @@ public class ModNetworking {
                         world.setBlockState(pos, net.minecraft.block.Blocks.BARRIER.getDefaultState(), 3);
                     }
                 }
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(CreateFuelHosePayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            context.server().execute(() -> {
+                var selection = FuelHoseSessionManager.get(player);
+                if (selection.isEmpty()) {
+                    player.sendMessage(net.minecraft.text.Text.literal("Select a hose start with left click first."), false);
+                    return;
+                }
+
+                FuelHoseSessionManager.Selection session = selection.get();
+                if (!session.dimension().equals(player.getWorld().getRegistryKey())) {
+                    player.sendMessage(net.minecraft.text.Text.literal("Fuel hose endpoints must be selected in the same dimension."), false);
+                    FuelHoseSessionManager.clear(player);
+                    return;
+                }
+
+                if (!session.start().equals(payload.startPos())) {
+                    player.sendMessage(net.minecraft.text.Text.literal("Fuel hose selection changed before confirm."), false);
+                    return;
+                }
+
+                FuelHoseData hose = FuelHoseData.create(
+                        java.util.UUID.randomUUID().toString(),
+                        session.dimension(),
+                        session.start(),
+                        payload.endPos(),
+                        payload.segmentCount(),
+                        payload.simulationTicks(),
+                        payload.gravity(),
+                        FuelHoseSimulation.simulate(session.start(), payload.endPos(), payload.segmentCount(), payload.simulationTicks(), payload.gravity())
+                );
+
+                FuelHoseManager manager = FuelHoseManager.get(context.server());
+                manager.addHose(hose);
+                syncFuelHosesToAll(context.server());
+                FuelHoseSessionManager.clear(player);
+                player.sendMessage(net.minecraft.text.Text.literal("Fuel hose stored."), false);
             });
         });
     }
@@ -273,41 +331,27 @@ public class ModNetworking {
         }
     }
 
-    public static void syncGlobalRainToPlayer(ServerPlayerEntity player,
-                                              float intensity,
-                                              float rainDirection,
-                                              float bulletRainDensity,
-                                              float rumbleSound,
-                                              float screenShake,
-                                              float microScreenShake) {
-        ServerPlayNetworking.send(
-                player,
-                new GlobalRainSyncPayload(
-                        intensity,
-                        rainDirection,
-                        bulletRainDensity,
-                        rumbleSound,
-                        screenShake,
-                        microScreenShake
-                )
-        );
+    public static void syncStarMatricesToPlayer(ServerPlayerEntity player) {
+        StarMatrixManager manager = StarMatrixManager.get(player.getServer());
+        ServerPlayNetworking.send(player, StarMatrixSyncPayload.fromMatrices(manager.getAllMatrices()));
     }
 
-    public static void syncGlobalRainToAll(net.minecraft.server.MinecraftServer server,
-                                           float intensity,
-                                           float rainDirection,
-                                           float bulletRainDensity,
-                                           float rumbleSound,
-                                           float screenShake,
-                                           float microScreenShake) {
-        GlobalRainSyncPayload payload = new GlobalRainSyncPayload(
-                intensity,
-                rainDirection,
-                bulletRainDensity,
-                rumbleSound,
-                screenShake,
-                microScreenShake
-        );
+    public static void syncStarMatricesToAll(net.minecraft.server.MinecraftServer server) {
+        StarMatrixManager manager = StarMatrixManager.get(server);
+        StarMatrixSyncPayload payload = StarMatrixSyncPayload.fromMatrices(manager.getAllMatrices());
+        for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
+            ServerPlayNetworking.send(player, payload);
+        }
+    }
+
+    public static void syncFuelHosesToPlayer(ServerPlayerEntity player) {
+        FuelHoseManager manager = FuelHoseManager.get(player.getServer());
+        ServerPlayNetworking.send(player, FuelHoseSyncPayload.fromHoses(manager.getAllHoses()));
+    }
+
+    public static void syncFuelHosesToAll(net.minecraft.server.MinecraftServer server) {
+        FuelHoseManager manager = FuelHoseManager.get(server);
+        FuelHoseSyncPayload payload = FuelHoseSyncPayload.fromHoses(manager.getAllHoses());
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             ServerPlayNetworking.send(player, payload);
         }
