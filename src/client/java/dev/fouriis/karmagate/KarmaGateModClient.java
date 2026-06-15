@@ -33,6 +33,8 @@ import dev.fouriis.karmagate.entity.client.WaterfallBlockRenderer;
 import dev.fouriis.karmagate.entity.daddy.DaddyLongLegsRenderer;
 import dev.fouriis.karmagate.entity.garbworm.GarbageWormRenderer;
 import dev.fouriis.karmagate.entity.karmagate.WaterStreamBlockEntity;
+import dev.fouriis.karmagate.entity.lizard.GreenLizardRenderer;
+import dev.fouriis.karmagate.entity.lizard.LizardPartRenderer;
 import dev.fouriis.karmagate.entity.spider.SpiderEntityRenderer;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugRenderer;
 import dev.fouriis.karmagate.hologram.HologramProjectorRenderer;
@@ -134,6 +136,10 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 		// Register daddy long legs renderer
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.DADDY_LONG_LEGS_ENTITY_TYPE, DaddyLongLegsRenderer::new);
+
+		// Register lizard debug renderers
+		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.GREEN_LIZARD_ENTITY_TYPE, GreenLizardRenderer::new);
+		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.LIZARD_PART_ENTITY_TYPE, LizardPartRenderer::new);
 
 		// --- Cube fold effect ---
 		UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
