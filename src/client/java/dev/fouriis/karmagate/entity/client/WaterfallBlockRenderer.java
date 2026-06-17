@@ -23,24 +23,15 @@ import net.minecraft.fluid.FluidState;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.world.World;
 import org.joml.Matrix4f;
 
 public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements BlockEntityRenderer<T> {
-
-    private static final int MAX_BLOCKS_DOWN = 128;
-
-    // X exactly inside a 1x1 block footprint.
     private static final float HALF_EXTENT = 0.5f;
     private static final float DEPTH_NUDGE = 0.002f;
-
-    private static final float FLOW_VISIBLE_THRESHOLD = 0.02f;
-
-    // Surface scale fixed at 1 for now.
     private static final float WATERFALL_SURFACE_SCALE = 1.0f;
+    private static final float VISUAL_DENSITY_THRESHOLD = 0.02f;
 
     private static final Identifier LEVEL_TEXTURE =
             Identifier.of("librainworldmc", "grabtex");
@@ -70,32 +61,20 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
 
         BlockPos pos = be.getPos();
 
-        // Only render the topmost block in a stacked waterfall column.
-        if (world.getBlockState(pos.up()).isOf(be.getCachedState().getBlock())) {
+        if (world.getBlockEntity(pos.up()) instanceof WaterfallBlockEntity) {
             return;
         }
 
-        float blocksDown = findWaterfallLength(world, pos);
-        if (blocksDown <= 0.01f) {
-            return;
-        }
+        float blocksDown = WaterfallBlockEntity.measureFallDistance(world, pos, WaterfallBlockEntity.MAX_BLOCKS_DOWN);
+        float impactY = -blocksDown;
+        be.ensureClientVisualState(impactY);
 
         handleParticles(be, tickDelta, blocksDown);
 
-        double clientTime = world.getTime() + tickDelta;
-
-        float sourceFlow = MathHelper.clamp(be.getEffectiveFlow(clientTime, 0.0), 0.0f, 1.0f);
-        if (sourceFlow <= FLOW_VISIBLE_THRESHOLD) {
-            return;
-        }
-
-        float topY = 1.0f;
-        float bottomY = -blocksDown;
-
-        float visualDensity = sampleAverageFlow(be, clientTime, blocksDown);
-        visualDensity = MathHelper.clamp(visualDensity, 0.0f, 1.0f);
-
-        if (visualDensity <= 0.001f) {
+        float topY = be.getInterpolatedTopLocalY(tickDelta);
+        float bottomY = be.getInterpolatedBottomLocalY(tickDelta);
+        float visualDensity = MathHelper.clamp(be.getVisualDensity(tickDelta), 0.0f, 1.0f);
+        if (visualDensity <= VISUAL_DENSITY_THRESHOLD || bottomY >= topY - 0.001f) {
             return;
         }
 
@@ -120,25 +99,23 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
             float visualDensity
     ) {
         try {
-            float[] spriteRect = new float[]{0f, 0f, 1f, 1f};
-
-            // If your library binder has the newer scale-aware overload, use that one instead:
-            // CoreShaderRenderer.bindShader$WaterFall(spriteRect, WATERFALL_SURFACE_SCALE, LEVEL_TEXTURE, NOISE_TEXTURE, MINECRAFT_WATER_FLOW, null, null, false);
-            //public static void bindShader$WaterFall(float surfaceScale, Identifier sampler1_LevelTex, Identifier sampler2_MainTex, Identifier sampler4_PalTex, Identifier sampler9_GameplayRippleMask, Identifier sampler10_GameplayRipplePalTex, boolean RIPPLE) {
             CoreShaderRenderer.bindShader$WaterFall(
                     WATERFALL_SURFACE_SCALE,
                     LEVEL_TEXTURE,
-                    Identifier.of("librainworldmc", "textures/rainworld/palettes/noise.png"),
+                    NOISE_TEXTURE,
                     Identifier.ofVanilla("textures/misc/underwater.png"),
                     null,
                     null,
                     false
             );
 
-            // Remove edge thinning: keep full density in R and full edge values in G/B.
+            float impactY = Math.min(bottomY, -0.001f);
+            float topEdge = edgeValue(1.0f, impactY, topY);
+            float bottomEdge = edgeValue(impactY, 1.0f, bottomY);
+
             int r = MathHelper.clamp((int) (visualDensity * 255.0f), 0, 255);
-            int g = 255;
-            int b = 255;
+            int g = MathHelper.clamp((int) (topEdge * 255.0f), 0, 255);
+            int b = MathHelper.clamp((int) (bottomEdge * 255.0f), 0, 255);
             int a = 255;
 
             RenderSystem.enableBlend();
@@ -241,14 +218,6 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
                 .normal(nx, ny, nz);
     }
 
-    private static float sampleAverageFlow(WaterfallBlockEntity be, double clientTime, float blocksDown) {
-        float f0 = be.getEffectiveFlow(clientTime, 0.25f);
-        float f1 = be.getEffectiveFlow(clientTime, Math.max(0.25f, blocksDown * 0.33f));
-        float f2 = be.getEffectiveFlow(clientTime, Math.max(0.25f, blocksDown * 0.66f));
-        float f3 = be.getEffectiveFlow(clientTime, Math.max(0.25f, blocksDown - 0.25f));
-        return MathHelper.clamp((f0 + f1 + f2 + f3) * 0.25f, 0.0f, 1.0f);
-    }
-
     @Override
     public boolean rendersOutsideBoundingBox(T blockEntity) {
         return true;
@@ -259,36 +228,17 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
         return 256;
     }
 
-    private static float findWaterfallLength(World world, BlockPos origin) {
-        int bottomY = world.getBottomY();
-        int y = origin.getY() - 1;
-        int blocks = 0;
+    private static float edgeValue(float start, float end, float value) {
+        float progress = inverseLerpClamped(start, end, value);
+        return 1.0f / MathHelper.lerp(progress, 100.0f, 2.0f);
+    }
 
-        BlockPos.Mutable p = new BlockPos.Mutable();
-        p.setX(origin.getX());
-        p.setZ(origin.getZ());
-
-        while (y >= bottomY && blocks < MAX_BLOCKS_DOWN) {
-            p.setY(y);
-            BlockState state = world.getBlockState(p);
-            FluidState fluid = world.getFluidState(p);
-
-            if (!fluid.isEmpty()) {
-                float fluidHeight = fluid.getHeight(world, p);
-                return blocks + (1.0f - fluidHeight);
-            }
-
-            if (state.isOpaqueFullCube(world, p)) {
-                VoxelShape shape = state.getCollisionShape(world, p);
-                double maxY = shape.isEmpty() ? 0.0 : shape.getMax(Direction.Axis.Y);
-                return blocks + (1.0f - (float) maxY);
-            }
-
-            blocks++;
-            y--;
+    private static float inverseLerpClamped(float a, float b, float value) {
+        if (Math.abs(b - a) <= 1.0e-5f) {
+            return 0.0f;
         }
 
-        return blocks;
+        return MathHelper.clamp((value - a) / (b - a), 0.0f, 1.0f);
     }
 
     private void handleParticles(T be, float tickDelta, float blocksDown) {
@@ -333,12 +283,9 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
                 float flow = be.getEffectiveFlow(clientTime, i - 0.5f);
 
                 if (flow > 0.05f) {
-                    float chance = flow * 0.5f;
+                    float chance = flow * 0.35f;
                     if (world.random.nextFloat() < chance) {
-                        double px = hitPos.getX() + 0.5 + (world.random.nextDouble() - 0.5) * 0.5;
-                        double py = hitPos.getY() + 1.0;
-                        double pz = hitPos.getZ() + 0.5 + (world.random.nextDouble() - 0.5) * 0.5;
-                        world.addParticle(ParticleTypes.SPLASH, px, py, pz, 0, 0, 0);
+                        spawnTerrainDrip(world, pos, hitPos, flow);
                     }
                 }
             }
@@ -378,6 +325,27 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
                     );
                 }
             }
+        }
+    }
+
+    private static void spawnTerrainDrip(World world, BlockPos sourcePos, BlockPos hitPos, float flow) {
+        double px = hitPos.getX() + 0.5 + (world.random.nextDouble() - 0.5) * 0.6;
+        double py = hitPos.getY() + world.random.nextDouble();
+        double pz = hitPos.getZ() + 0.5 + (world.random.nextDouble() - 0.5) * 0.6;
+
+        double vx = (world.random.nextDouble() - 0.5) * 0.1;
+        double vz = (world.random.nextDouble() - 0.5) * 0.1;
+        double vy = -0.04 - flow * 0.08;
+
+        if (Math.abs(sourcePos.getX() - hitPos.getX()) > Math.abs(sourcePos.getZ() - hitPos.getZ())) {
+            vx += Math.signum(hitPos.getX() - sourcePos.getX()) * (0.04 + flow * 0.05);
+        } else if (sourcePos.getZ() != hitPos.getZ()) {
+            vz += Math.signum(hitPos.getZ() - sourcePos.getZ()) * (0.04 + flow * 0.05);
+        }
+
+        world.addParticle(ParticleTypes.FALLING_WATER, px, py, pz, vx, vy, vz);
+        if (world.random.nextFloat() < flow * 0.4f) {
+            world.addParticle(ParticleTypes.SPLASH, px, py, pz, vx * 0.5, 0.02, vz * 0.5);
         }
     }
 }

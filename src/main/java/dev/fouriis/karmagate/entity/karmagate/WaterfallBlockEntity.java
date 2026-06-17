@@ -3,17 +3,36 @@ package dev.fouriis.karmagate.entity.karmagate;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.fluid.FluidState;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.network.listener.ClientPlayPacketListener;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.s2c.play.BlockEntityUpdateS2CPacket;
 import net.minecraft.registry.RegistryWrapper;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.world.World;
 
 public class WaterfallBlockEntity extends BlockEntity {
+    public static final int MAX_BLOCKS_DOWN = 128;
+    private static final float SOURCE_TOP_Y = 1.0f;
+    private static final float FALL_ACCEL_BLOCKS = 0.9f / 20.0f;
+    private static final float FLOW_EPSILON = 1.0e-4f;
+
     private float flow = 1.0f;
+    private float lastRenderedFlow = 1.0f;
+    private float renderedFlow = 1.0f;
+    private float visualDensity = 1.0f;
+    private float lastVisualDensity = 1.0f;
+    private float topPos = SOURCE_TOP_Y;
+    private float prevTopPos = SOURCE_TOP_Y;
+    private float topVelocity = 0.0f;
+    private float bottomPos = SOURCE_TOP_Y;
+    private float prevBottomPos = SOURCE_TOP_Y;
+    private float bottomVelocity = 0.0f;
+    private boolean clientStateInitialized = false;
 
     public WaterfallBlockEntity(BlockPos pos, BlockState state) {
         this(ModBlockEntities.WATERFALL_BLOCK_ENTITY, pos, state);
@@ -24,7 +43,11 @@ public class WaterfallBlockEntity extends BlockEntity {
     }
 
     public static <T extends BlockEntity> void clientTick(World world, BlockPos pos, BlockState state, T blockEntity) {
-        // No client keyframe propagation.
+        if (!world.isClient || !(blockEntity instanceof WaterfallBlockEntity waterfall)) {
+            return;
+        }
+
+        waterfall.tickClient(world, pos);
     }
 
     public float getFlow() {
@@ -49,11 +72,162 @@ public class WaterfallBlockEntity extends BlockEntity {
     }
 
     public float getEffectiveFlow(double clientTimeTicks, double distanceBlocks) {
-        return flow;
+        float yAtDistance = SOURCE_TOP_Y - (float) distanceBlocks;
+        if (yAtDistance > topPos + FLOW_EPSILON || yAtDistance < bottomPos - FLOW_EPSILON) {
+            return 0.0f;
+        }
+
+        return renderedFlow;
+    }
+
+    public float getVisualDensity(float tickDelta) {
+        return lerp(lastVisualDensity, visualDensity, tickDelta);
+    }
+
+    public float getInterpolatedTopLocalY(float tickDelta) {
+        return lerp(prevTopPos, topPos, tickDelta);
+    }
+
+    public float getInterpolatedBottomLocalY(float tickDelta) {
+        return lerp(prevBottomPos, bottomPos, tickDelta);
+    }
+
+    public void ensureClientVisualState(float impactY) {
+        if (clientStateInitialized) {
+            return;
+        }
+
+        clientStateInitialized = true;
+        lastRenderedFlow = flow;
+        renderedFlow = flow;
+        topVelocity = 0.0f;
+        bottomVelocity = 0.0f;
+
+        if (flow <= FLOW_EPSILON) {
+            visualDensity = 0.0f;
+            lastVisualDensity = 0.0f;
+            topPos = impactY;
+            prevTopPos = impactY;
+            bottomPos = impactY;
+            prevBottomPos = impactY;
+            return;
+        }
+
+        visualDensity = flow;
+        lastVisualDensity = flow;
+        topPos = SOURCE_TOP_Y;
+        prevTopPos = SOURCE_TOP_Y;
+        bottomPos = impactY;
+        prevBottomPos = impactY;
+    }
+
+    public static float measureFallDistance(World world, BlockPos origin, int maxBlocksDown) {
+        int bottomY = world.getBottomY();
+        int y = origin.getY() - 1;
+        int blocks = 0;
+
+        BlockPos.Mutable p = new BlockPos.Mutable();
+        p.setX(origin.getX());
+        p.setZ(origin.getZ());
+
+        while (y >= bottomY && blocks < maxBlocksDown) {
+            p.setY(y);
+            BlockState state = world.getBlockState(p);
+            FluidState fluid = world.getFluidState(p);
+
+            if (!fluid.isEmpty()) {
+                float fluidHeight = fluid.getHeight(world, p);
+                return blocks + (1.0f - fluidHeight);
+            }
+
+            if (state.isOpaqueFullCube(world, p)) {
+                VoxelShape shape = state.getCollisionShape(world, p);
+                double maxY = shape.isEmpty() ? 0.0 : shape.getMax(Direction.Axis.Y);
+                return blocks + (1.0f - (float) maxY);
+            }
+
+            blocks++;
+            y--;
+        }
+
+        return blocks;
     }
 
     private static float clamp01(float v) {
         return Math.max(0f, Math.min(1f, v));
+    }
+
+    private void tickClient(World world, BlockPos pos) {
+        float blocksDown = measureFallDistance(world, pos, MAX_BLOCKS_DOWN);
+        float impactY = -blocksDown;
+        ensureClientVisualState(impactY);
+
+        lastRenderedFlow = renderedFlow;
+        lastVisualDensity = visualDensity;
+
+        if (isAtSourceTop(topPos)) {
+            visualDensity = lerp(visualDensity, flow, 0.1f);
+        }
+
+        if (isAtSourceTop(topPos) || isAtImpact(bottomPos, impactY)) {
+            renderedFlow = flow;
+        }
+
+        prevBottomPos = bottomPos;
+        bottomPos += bottomVelocity;
+        bottomVelocity -= FALL_ACCEL_BLOCKS;
+        if (bottomPos < impactY) {
+            bottomPos = impactY;
+            bottomVelocity = 0.0f;
+        }
+
+        if (renderedFlow <= FLOW_EPSILON) {
+            prevTopPos = topPos;
+            topPos += topVelocity;
+            topVelocity -= FALL_ACCEL_BLOCKS;
+            if (topPos < impactY) {
+                topPos = impactY;
+                topVelocity = 0.0f;
+                visualDensity = 0.0f;
+            }
+        } else {
+            topPos = SOURCE_TOP_Y;
+            prevTopPos = SOURCE_TOP_Y;
+            topVelocity = 0.0f;
+
+            if (lastRenderedFlow <= FLOW_EPSILON) {
+                bottomPos = SOURCE_TOP_Y;
+                prevBottomPos = SOURCE_TOP_Y;
+                bottomVelocity = 0.0f;
+            }
+        }
+    }
+
+    protected final void setInitialFlow(float initialFlow) {
+        flow = clamp01(initialFlow);
+        lastRenderedFlow = flow;
+        renderedFlow = flow;
+        visualDensity = flow;
+        lastVisualDensity = flow;
+        topPos = SOURCE_TOP_Y;
+        prevTopPos = SOURCE_TOP_Y;
+        bottomPos = SOURCE_TOP_Y;
+        prevBottomPos = SOURCE_TOP_Y;
+        topVelocity = 0.0f;
+        bottomVelocity = 0.0f;
+        clientStateInitialized = false;
+    }
+
+    private static boolean isAtSourceTop(float y) {
+        return Math.abs(y - SOURCE_TOP_Y) <= FLOW_EPSILON;
+    }
+
+    private static boolean isAtImpact(float y, float impactY) {
+        return Math.abs(y - impactY) <= FLOW_EPSILON;
+    }
+
+    private static float lerp(float a, float b, float t) {
+        return a + (b - a) * t;
     }
 
     @Override
@@ -66,7 +240,12 @@ public class WaterfallBlockEntity extends BlockEntity {
     public void readNbt(NbtCompound nbt, RegistryWrapper.WrapperLookup lookup) {
         super.readNbt(nbt, lookup);
         if (nbt.contains("flow")) {
-            flow = clamp01(nbt.getFloat("flow"));
+            float syncedFlow = clamp01(nbt.getFloat("flow"));
+            if (world != null && world.isClient && clientStateInitialized) {
+                flow = syncedFlow;
+            } else {
+                setInitialFlow(syncedFlow);
+            }
         }
     }
 
