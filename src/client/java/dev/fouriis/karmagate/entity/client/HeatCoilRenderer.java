@@ -155,7 +155,7 @@ public class HeatCoilRenderer extends GeoBlockRenderer<HeatCoilBlockEntity> {
             RenderUtils.drawCameraFacingBillboardFitBoxNoScaleLargest(
                     () -> {
                         float[] spriteRect = new float[]{0f, 0f, 1f, 1f};
-                        CoreShaderRenderer.bindShader$HeatDistortion(Identifier.of("librainworldmc", "textures/rainworld/palettes/noise-hq.png"), GRAB_TEXTURE);
+                        CoreShaderRenderer.bindShader$HeatDistortion(Identifier.of("librainworldmc", "textures/rainworld/palettes/noise-hq.png"), GRAB_TEXTURE, false);
                         RenderSystem.setShaderColor(1, 1, 1, alpha);
                     },
                     blockCenter.x, blockCenter.y - 1, blockCenter.z,
