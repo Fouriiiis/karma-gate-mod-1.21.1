@@ -106,6 +106,7 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
                     Identifier.ofVanilla("textures/misc/underwater.png"),
                     null,
                     null,
+                    false,
                     false
             );
 

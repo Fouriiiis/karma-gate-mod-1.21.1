@@ -78,7 +78,7 @@ public class WaterfallBlock extends BlockWithEntity {
 
         float cur = wf.getFlow();
         float next;
-        if (player.isInSneakingPose()) {
+        if (player.isSneaking()) {
             next = cur - FLOW_STEP;
         } else {
             next = cur + FLOW_STEP;
