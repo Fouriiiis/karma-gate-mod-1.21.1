@@ -37,7 +37,7 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
             Identifier.of("librainworldmc", "grabtex");
 
     private static final Identifier NOISE_TEXTURE =
-            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise.png");
+            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise-hq.png");
 
     private static final Identifier MINECRAFT_WATER_FLOW =
             Identifier.of("minecraft", "textures/block/water_flow.png");

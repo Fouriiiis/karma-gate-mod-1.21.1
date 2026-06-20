@@ -20,12 +20,13 @@ public class WaterfallBlockEntity extends BlockEntity {
     private static final float SOURCE_TOP_Y = 1.0f;
     private static final float FALL_ACCEL_BLOCKS = 0.9f / 20.0f;
     private static final float FLOW_EPSILON = 1.0e-4f;
+    private static final float MAX_FLOW = 0.5f;
 
-    private float flow = 1.0f;
-    private float lastRenderedFlow = 1.0f;
-    private float renderedFlow = 1.0f;
-    private float visualDensity = 1.0f;
-    private float lastVisualDensity = 1.0f;
+    private float flow = MAX_FLOW;
+    private float lastRenderedFlow = MAX_FLOW;
+    private float renderedFlow = MAX_FLOW;
+    private float visualDensity = MAX_FLOW;
+    private float lastVisualDensity = MAX_FLOW;
     private float topPos = SOURCE_TOP_Y;
     private float prevTopPos = SOURCE_TOP_Y;
     private float topVelocity = 0.0f;
@@ -55,7 +56,7 @@ public class WaterfallBlockEntity extends BlockEntity {
     }
 
     public void setFlow(float next) {
-        float clamped = clamp01(next);
+        float clamped = clampFlow(next);
         if (Math.abs(clamped - this.flow) <= 1e-4f) {
             return;
         }
@@ -153,8 +154,8 @@ public class WaterfallBlockEntity extends BlockEntity {
         return blocks;
     }
 
-    private static float clamp01(float v) {
-        return Math.max(0f, Math.min(1f, v));
+    private static float clampFlow(float v) {
+        return Math.max(0f, Math.min(MAX_FLOW, v));
     }
 
     private void tickClient(World world, BlockPos pos) {
@@ -204,7 +205,7 @@ public class WaterfallBlockEntity extends BlockEntity {
     }
 
     protected final void setInitialFlow(float initialFlow) {
-        flow = clamp01(initialFlow);
+        flow = clampFlow(initialFlow);
         lastRenderedFlow = flow;
         renderedFlow = flow;
         visualDensity = flow;
@@ -240,7 +241,7 @@ public class WaterfallBlockEntity extends BlockEntity {
     public void readNbt(NbtCompound nbt, RegistryWrapper.WrapperLookup lookup) {
         super.readNbt(nbt, lookup);
         if (nbt.contains("flow")) {
-            float syncedFlow = clamp01(nbt.getFloat("flow"));
+            float syncedFlow = clampFlow(nbt.getFloat("flow"));
             if (world != null && world.isClient && clientStateInitialized) {
                 flow = syncedFlow;
             } else {
