@@ -16,6 +16,7 @@ import dev.fouriis.karmagate.entity.centipede.SmallCentipedeEntity;
 import dev.fouriis.karmagate.entity.centipede.SmallCentiwingEntity;
 import dev.fouriis.karmagate.entity.daddy.DaddyLongLegsEntity;
 import dev.fouriis.karmagate.entity.garbworm.GarbageWormEntity;
+import dev.fouriis.karmagate.entity.overseer.YellowOverseerEntity;
 import dev.fouriis.karmagate.entity.spider.SpiderEntity;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugEntity;
 import dev.fouriis.karmagate.item.ModItems;
@@ -186,6 +187,16 @@ public class KarmaGateMod implements ModInitializer {
                     .build()
     );
 
+    public static final EntityType<YellowOverseerEntity> YELLOW_OVERSEER_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "yellow_overseer"),
+            FabricEntityTypeBuilder.<YellowOverseerEntity>create(SpawnGroup.CREATURE, YellowOverseerEntity::new)
+                    .dimensions(EntityDimensions.fixed(0.6f, 0.65f))
+                    .trackRangeBlocks(96)
+                    .trackedUpdateRate(2)
+                    .build()
+    );
+
 
     @Override
     public void onInitialize() {
@@ -212,6 +223,7 @@ public class KarmaGateMod implements ModInitializer {
         FabricDefaultAttributeRegistry.register(SPIDER_ENTITY_TYPE, SpiderEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(GARBAGE_WORM_ENTITY_TYPE, GarbageWormEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(DADDY_LONG_LEGS_ENTITY_TYPE, DaddyLongLegsEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(YELLOW_OVERSEER_ENTITY_TYPE, YellowOverseerEntity.createAttributes());
 
         // Register networking
         ModNetworking.register();

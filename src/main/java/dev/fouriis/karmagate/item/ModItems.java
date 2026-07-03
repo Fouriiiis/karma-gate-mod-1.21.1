@@ -51,6 +51,16 @@ public class ModItems {
         )
     );
 
+    public static final SpawnEggItem YELLOW_OVERSEER_SPAWN_EGG = (SpawnEggItem) registerItem(
+        "yellow_overseer_spawn_egg",
+        new SpawnEggItem(
+            KarmaGateMod.YELLOW_OVERSEER_ENTITY_TYPE,
+            0xFFE84A,
+            0x3A3210,
+            new Item.Settings().maxCount(64)
+        )
+    );
+
     private static Item registerItem(String name, Item item) {
         return Registry.register(Registries.ITEM, Identifier.of(KarmaGateMod.MOD_ID, name), item);
     }
@@ -67,6 +77,7 @@ public class ModItems {
             entries.add(STOWAWAY_BUG_SPAWN_EGG);
             entries.add(SPIDER_SPAWN_EGG);
             entries.add(DADDY_LONG_LEGS_SPAWN_EGG);
+            entries.add(YELLOW_OVERSEER_SPAWN_EGG);
         });
     }
 }

@@ -1,7 +1,7 @@
 package dev.fouriis.karmagate.entity.centipede;
 
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
-import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
+import net.brickcraftdream.librainworldmc.client.atlas.AtlasSpriteModel;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
 import net.minecraft.client.render.VertexConsumer;
@@ -27,8 +27,8 @@ import org.joml.Matrix4f;
  */
 public final class CentipedeLegRenderer {
 
-    private static FAtlasElement legASprite = null;
-    private static FAtlasElement legBSprite = null;
+    private static AtlasSpriteModel legAModel = null;
+    private static AtlasSpriteModel legBModel = null;
 
     // 1 RW pixel -> MC blocks
     private static final float PX = 0.05f;
@@ -36,9 +36,7 @@ public final class CentipedeLegRenderer {
     // Approx body radius used for leg attachment offset
     private static final float BODY_RADIUS = 5f * PX;
 
-    // Native sprite width / native sprite height
-    private static final float ASPECT_A = 0.22f; // LegA
-    private static final float ASPECT_B = 0.24f; // LegB
+    private static final float LEG_MODEL_DEPTH_PIXELS = 1.0f;
 
     // Colors
     private static final int UPPER_R = 9, UPPER_G = 7, UPPER_B = 6;
@@ -51,13 +49,13 @@ public final class CentipedeLegRenderer {
 
     public static void renderLegs(CentipedeSegmentEntity entity, MatrixStack matrices,
                                   VertexConsumerProvider vcProvider, int light, float tickDelta) {
-        if (legASprite == null) {
-            legASprite = LibrainworldmcClient.getAtlasManager().getElementWithName("CentipedeLegA");
-            if (legASprite == null) return;
+        if (legAModel == null) {
+            legAModel = LibrainworldmcClient.getAtlasManager().getModelWithName("CentipedeLegA", LEG_MODEL_DEPTH_PIXELS);
+            if (legAModel == null) return;
         }
-        if (legBSprite == null) {
-            legBSprite = LibrainworldmcClient.getAtlasManager().getElementWithName("CentipedeLegB");
-            if (legBSprite == null) return;
+        if (legBModel == null) {
+            legBModel = LibrainworldmcClient.getAtlasManager().getModelWithName("CentipedeLegB", LEG_MODEL_DEPTH_PIXELS);
+            if (legBModel == null) return;
         }
 
         CentipedeController parent = entity.getParentCentipede();
@@ -130,25 +128,25 @@ public final class CentipedeLegRenderer {
             double lowerLen = footLocal.subtract(kneeLocal).length();
             float legScale = parent.getLegScale();
 
-            float halfWidthA = (float) (upperLen * ASPECT_A * 0.5f) * legScale;
-            float halfWidthB = (float) (lowerLen * ASPECT_B * 0.5f) * legScale;
+            float halfWidthA = modelHalfWidth(upperLen, legAModel, legScale);
+            float halfWidthB = modelHalfWidth(lowerLen, legBModel, legScale);
 
             int secColor = parent.getSecondaryShellColorRGB();
             int lowerTopR = (secColor >> 16) & 0xFF;
             int lowerTopG = (secColor >> 8) & 0xFF;
             int lowerTopB = secColor & 0xFF;
 
-            renderLegSprite(
+            renderLegModel(
                     matrices, vcProvider, light,
-                    attachLocal, kneeLocal, halfWidthA, legASprite,
+                    attachLocal, kneeLocal, halfWidthA, legAModel,
                     surfaceNormal,
                     UPPER_R, UPPER_G, UPPER_B,
                     UPPER_R, UPPER_G, UPPER_B
             );
 
-            renderLegSprite(
+            renderLegModel(
                     matrices, vcProvider, light,
-                    kneeLocal, footLocal, halfWidthB, legBSprite,
+                    kneeLocal, footLocal, halfWidthB, legBModel,
                     surfaceNormal,
                     lowerTopR, lowerTopG, lowerTopB,
                     LOWER_BOT_R, LOWER_BOT_G, LOWER_BOT_B
@@ -582,18 +580,23 @@ public final class CentipedeLegRenderer {
     }
 
     // =========================================================================
-    // Quad rendering
+    // Sprite model rendering
     // =========================================================================
 
-    private static void renderLegSprite(MatrixStack matrices, VertexConsumerProvider vcProvider, int light,
-                                        Vec3d startLocal, Vec3d endLocal, float halfWidth,
-                                        FAtlasElement sprite,
-                                        Vec3d faceHint,
-                                        int topR, int topG, int topB,
-                                        int botR, int botG, int botB) {
+    private static float modelHalfWidth(double limbLen, AtlasSpriteModel model, float legScale) {
+        float modelHeight = Math.max(model.height(), 1f);
+        return (float) (limbLen * (model.width() / modelHeight) * 0.5f) * legScale;
+    }
+
+    private static void renderLegModel(MatrixStack matrices, VertexConsumerProvider vcProvider, int light,
+                                       Vec3d startLocal, Vec3d endLocal, float halfWidth,
+                                       AtlasSpriteModel model,
+                                       Vec3d faceHint,
+                                       int topR, int topG, int topB,
+                                       int botR, int botG, int botB) {
         Vec3d limbDir = endLocal.subtract(startLocal);
         double limbLen = limbDir.length();
-        if (limbLen < 0.001) return;
+        if (limbLen < 0.001 || model.element().textureIdentifier == null) return;
 
         Vec3d tangent = limbDir.normalize();
 
@@ -610,51 +613,63 @@ public final class CentipedeLegRenderer {
         if (widthDir.lengthSquared() < 0.001) widthDir = face;
         else widthDir = widthDir.normalize();
 
-        float nfx = (float) face.x, nfy = (float) face.y, nfz = (float) face.z;
-
-        float wdx = (float) (widthDir.x * halfWidth);
-        float wdy = (float) (widthDir.y * halfWidth);
-        float wdz = (float) (widthDir.z * halfWidth);
-
-        float s0x = (float) startLocal.x, s0y = (float) startLocal.y, s0z = (float) startLocal.z;
-        float s1x = (float) endLocal.x,   s1y = (float) endLocal.y,   s1z = (float) endLocal.z;
-
-        float blX = s0x - wdx, blY = s0y - wdy, blZ = s0z - wdz;
-        float brX = s0x + wdx, brY = s0y + wdy, brZ = s0z + wdz;
-        float trX = s1x + wdx, trY = s1y + wdy, trZ = s1z + wdz;
-        float tlX = s1x - wdx, tlY = s1y - wdy, tlZ = s1z - wdz;
+        float modelWidth = Math.max(model.width(), 1f);
+        float modelHeight = Math.max(model.height(), 1f);
+        float xScale = (halfWidth * 2f) / modelWidth;
+        float yScale = (float) (limbLen / modelHeight);
+        float zScale = xScale;
 
         Matrix4f mat = matrices.peek().getPositionMatrix();
-        VertexConsumer vc = vcProvider.getBuffer(
-                RenderLayer.getEntityCutoutNoCull(sprite.textureIdentifier)
-        );
+        VertexConsumer vc = vcProvider.getBuffer(RenderLayer.getEntityCutoutNoCull(model.element().textureIdentifier));
 
-        vc.vertex(mat, blX, blY, blZ)
-                .color(botR, botG, botB, 255)
-                .texture(0f, 1f)
+        for (AtlasSpriteModel.Quad quad : model.quads()) {
+            Vec3d normal = transformNormal(widthDir, tangent, face, quad.normalX(), quad.normalY(), quad.normalZ());
+            emitModelVertex(mat, vc, light, modelWidth, modelHeight, xScale, yScale, zScale,
+                    startLocal, widthDir, tangent, face, normal, quad.a(), topR, topG, topB, botR, botG, botB);
+            emitModelVertex(mat, vc, light, modelWidth, modelHeight, xScale, yScale, zScale,
+                    startLocal, widthDir, tangent, face, normal, quad.b(), topR, topG, topB, botR, botG, botB);
+            emitModelVertex(mat, vc, light, modelWidth, modelHeight, xScale, yScale, zScale,
+                    startLocal, widthDir, tangent, face, normal, quad.c(), topR, topG, topB, botR, botG, botB);
+            emitModelVertex(mat, vc, light, modelWidth, modelHeight, xScale, yScale, zScale,
+                    startLocal, widthDir, tangent, face, normal, quad.d(), topR, topG, topB, botR, botG, botB);
+        }
+    }
+
+    private static Vec3d transformNormal(Vec3d widthDir, Vec3d tangent, Vec3d face,
+                                         float normalX, float normalY, float normalZ) {
+        Vec3d normal = widthDir.multiply(normalX)
+                .add(tangent.multiply(normalY))
+                .add(face.multiply(normalZ));
+        if (normal.lengthSquared() < 0.001) return face;
+        return normal.normalize();
+    }
+
+    private static void emitModelVertex(Matrix4f mat, VertexConsumer vc, int light,
+                                        float modelWidth, float modelHeight,
+                                        float xScale, float yScale, float zScale,
+                                        Vec3d startLocal, Vec3d widthDir, Vec3d tangent, Vec3d face, Vec3d normal,
+                                        AtlasSpriteModel.Vertex vertex,
+                                        int topR, int topG, int topB,
+                                        int botR, int botG, int botB) {
+        float x = (vertex.x() - modelWidth * 0.5f) * xScale;
+        float y = vertex.y() * yScale;
+        float z = vertex.z() * zScale;
+
+        Vec3d pos = startLocal
+                .add(widthDir.multiply(x))
+                .add(tangent.multiply(y))
+                .add(face.multiply(z));
+
+        float colorT = MathHelper.clamp(vertex.y() / modelHeight, 0f, 1f);
+        int r = MathHelper.lerp(colorT, botR, topR);
+        int g = MathHelper.lerp(colorT, botG, topG);
+        int b = MathHelper.lerp(colorT, botB, topB);
+
+        vc.vertex(mat, (float) pos.x, (float) pos.y, (float) pos.z)
+                .color(r, g, b, 255)
+                .texture(vertex.u(), vertex.v())
                 .overlay(OverlayTexture.DEFAULT_UV)
                 .light(light)
-                .normal(nfx, nfy, nfz);
-
-        vc.vertex(mat, brX, brY, brZ)
-                .color(botR, botG, botB, 255)
-                .texture(1f, 1f)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(nfx, nfy, nfz);
-
-        vc.vertex(mat, trX, trY, trZ)
-                .color(topR, topG, topB, 255)
-                .texture(1f, 0f)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(nfx, nfy, nfz);
-
-        vc.vertex(mat, tlX, tlY, tlZ)
-                .color(topR, topG, topB, 255)
-                .texture(0f, 0f)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(nfx, nfy, nfz);
+                .normal((float) normal.x, (float) normal.y, (float) normal.z);
     }
 }

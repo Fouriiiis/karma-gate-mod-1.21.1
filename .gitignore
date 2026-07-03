@@ -40,5 +40,6 @@ replay_*.log
 *.hprof
 *.jfr
 
+libs/librainworldmc-*.jar
 librainworldmc
 .tmp_librw_src/
