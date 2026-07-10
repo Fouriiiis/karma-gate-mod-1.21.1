@@ -1,5 +1,6 @@
 package dev.fouriis.karmagate.mixin.client;
 
+import dev.fouriis.karmagate.client.AtcCloudVolumeRenderer;
 import dev.fouriis.karmagate.client.DistantStructuresRenderer;
 import dev.fouriis.karmagate.client.cubefold.CubeFoldEffect;
 import dev.fouriis.karmagate.client.gridproject.GridProjectRenderer;
@@ -32,6 +33,7 @@ public class GameRendererMixin {
         
         float tickDelta = tickCounter.getTickDelta(true);
         DistantStructuresRenderer.renderLate(tickDelta, camera);
+        AtcCloudVolumeRenderer.renderLate(tickDelta, camera);
         GridProjectRenderer.renderLate(tickDelta, camera);
     }
 }

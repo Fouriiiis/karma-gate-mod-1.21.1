@@ -20,6 +20,7 @@
 		],
 		"client": [
 			"dev.fouriis.karmagate.KarmaGateModClient",
+			"dev.fouriis.karmagate.client.AtcCloudShaders",
 			"dev.fouriis.karmagate.client.gridproject.GridProjectShaders",
 			"dev.fouriis.karmagate.client.hologram.HologramShaders",
 			"dev.fouriis.karmagate.client.waterfall.WaterfallShaders",
