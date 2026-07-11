@@ -28,6 +28,12 @@ public final class AtcSkyRenderer {
     private static final Identifier DAY   = Identifier.of("karma-gate-mod", "sky/atc_sky.png");
     private static final Identifier NIGHT = Identifier.of("karma-gate-mod", "sky/atc_nightsky.png");
     private static final Identifier DUSK  = Identifier.of("karma-gate-mod", "sky/atc_dusksky.png");
+    private static final Vector3f CLOUD_ATMOSPHERE_DAY = new Vector3f(0.16078432f, 0.23137255f, 27f / 85f);
+    private static final Vector3f CLOUD_ATMOSPHERE_DUSK = new Vector3f(44f / 85f, 0.3254902f, 0.40784314f);
+    private static final Vector3f CLOUD_ATMOSPHERE_NIGHT = new Vector3f(0.04882353f, 0.0527451f, 0.06843138f);
+    private static final Vector3f CLOUD_MULTIPLY_DAY = new Vector3f(1.0f, 1.0f, 1.0f);
+    private static final Vector3f CLOUD_MULTIPLY_DUSK = new Vector3f(1.0f, 0.79f, 0.47f);
+    private static final Vector3f CLOUD_MULTIPLY_NIGHT = new Vector3f(4f / 51f, 12f / 85f, 18f / 85f);
 
     private static final int GRID = 64;
     @SuppressWarnings("unused")
@@ -54,16 +60,10 @@ public final class AtcSkyRenderer {
         float heightVis = smooth01(remapClamp(camY, SKY_BOTTOM_Y, SKY_TOP_Y));
         if (heightVis <= 0.001f) return; // entirely hidden
 
-        // ---- time-based weights (unchanged) ----
-        float angle = mc.world.getSkyAngle(tickDelta);
-        float sunHeight = MathHelper.cos(angle * ((float)Math.PI * 2f));
-        float dayRamp   = smooth01(remapClamp(sunHeight,  0.00f, 0.35f));
-        float nightRamp = smooth01(remapClamp(-sunHeight, 0.00f, 0.35f));
-        float duskCore  = smooth01(1f - Math.max(dayRamp, nightRamp));
-        float sum = dayRamp + nightRamp + duskCore;
-        float wDay = sum > 0f ? dayRamp   / sum : 0f;
-        float wNg  = sum > 0f ? nightRamp / sum : 0f;
-        float wDk  = sum > 0f ? duskCore  / sum : 0f;
+        SkyWeights weights = skyWeights(mc, tickDelta);
+        float wDay = weights.day();
+        float wNg = weights.night();
+        float wDk = weights.dusk();
 
         // Clear potential black sky fog before drawing our full-screen mesh
         BackgroundRenderer.clearFog();
@@ -201,6 +201,58 @@ public final class AtcSkyRenderer {
         return MathHelper.clamp(t, 0f, 1f);
     }
     private static float smooth01(float t) { return t * t * (3f - 2f * t); }
+
+    public static CloudPalette cloudPalette(float tickDelta) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.world == null) {
+            return new CloudPalette(new Vector3f(CLOUD_ATMOSPHERE_DAY), new Vector3f(CLOUD_MULTIPLY_DAY));
+        }
+
+        SkyWeights weights = skyWeights(mc, tickDelta);
+        Vector3f atmosphere = blendCloudColor(
+                CLOUD_ATMOSPHERE_DAY,
+                CLOUD_ATMOSPHERE_DUSK,
+                CLOUD_ATMOSPHERE_NIGHT,
+                weights.day(),
+                weights.dusk(),
+                weights.night()
+        );
+        Vector3f multiply = blendCloudColor(
+                CLOUD_MULTIPLY_DAY,
+                CLOUD_MULTIPLY_DUSK,
+                CLOUD_MULTIPLY_NIGHT,
+                weights.day(),
+                weights.dusk(),
+                weights.night()
+        );
+        return new CloudPalette(atmosphere, multiply);
+    }
+
+    private static SkyWeights skyWeights(MinecraftClient mc, float tickDelta) {
+        float angle = mc.world.getSkyAngle(tickDelta);
+        float sunHeight = MathHelper.cos(angle * ((float)Math.PI * 2f));
+        float dayRamp = smooth01(remapClamp(sunHeight, 0.00f, 0.35f));
+        float nightRamp = smooth01(remapClamp(-sunHeight, 0.00f, 0.35f));
+        float duskCore = smooth01(1f - Math.max(dayRamp, nightRamp));
+        float sum = dayRamp + nightRamp + duskCore;
+        if (sum <= 0.0f) {
+            return new SkyWeights(0.0f, 1.0f, 0.0f);
+        }
+        return new SkyWeights(dayRamp / sum, duskCore / sum, nightRamp / sum);
+    }
+
+    private static Vector3f blendCloudColor(Vector3f day, Vector3f dusk, Vector3f night,
+                                            float wDay, float wDusk, float wNight) {
+        return new Vector3f(
+                day.x * wDay + dusk.x * wDusk + night.x * wNight,
+                day.y * wDay + dusk.y * wDusk + night.y * wNight,
+                day.z * wDay + dusk.z * wDusk + night.z * wNight
+        );
+    }
+
+    public record CloudPalette(Vector3f atmosphere, Vector3f multiply) {}
+
+    private record SkyWeights(float day, float dusk, float night) {}
 
     private static final class Vec2 { float x, y; Vec2(float x, float y){this.x=x; this.y=y;} }
 }

@@ -127,6 +127,30 @@
       "type": "float",
       "count": 1,
       "values": [0.0]
+    },
+    {
+      "name": "uStepCount",
+      "type": "float",
+      "count": 1,
+      "values": [8.0]
+    },
+    {
+      "name": "uDensityScale",
+      "type": "float",
+      "count": 1,
+      "values": [1.0]
+    },
+    {
+      "name": "uAtmosphereColor",
+      "type": "float",
+      "count": 3,
+      "values": [0.16078432, 0.23137255, 0.31764706]
+    },
+    {
+      "name": "uCloudMultiply",
+      "type": "float",
+      "count": 3,
+      "values": [1.0, 1.0, 1.0]
     }
   ]
 }

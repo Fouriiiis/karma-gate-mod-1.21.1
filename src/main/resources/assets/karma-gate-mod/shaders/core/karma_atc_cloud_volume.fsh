@@ -17,6 +17,10 @@ uniform float uAlphaScale;
 uniform float uLight;
 uniform float uLayerDepth;
 uniform float uDistanceTint;
+uniform float uStepCount;
+uniform float uDensityScale;
+uniform vec3 uAtmosphereColor;
+uniform vec3 uCloudMultiply;
 
 in vec3 vWorldPos;
 in vec4 vColor;
@@ -28,29 +32,6 @@ float hash13(vec3 p) {
     p = fract(p * 0.1031);
     p += dot(p, p.yzx + 33.33);
     return fract((p.x + p.y) * p.z);
-}
-
-float valueNoise(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-
-    float n000 = hash13(i + vec3(0.0, 0.0, 0.0));
-    float n100 = hash13(i + vec3(1.0, 0.0, 0.0));
-    float n010 = hash13(i + vec3(0.0, 1.0, 0.0));
-    float n110 = hash13(i + vec3(1.0, 1.0, 0.0));
-    float n001 = hash13(i + vec3(0.0, 0.0, 1.0));
-    float n101 = hash13(i + vec3(1.0, 0.0, 1.0));
-    float n011 = hash13(i + vec3(0.0, 1.0, 1.0));
-    float n111 = hash13(i + vec3(1.0, 1.0, 1.0));
-
-    float nx00 = mix(n000, n100, f.x);
-    float nx10 = mix(n010, n110, f.x);
-    float nx01 = mix(n001, n101, f.x);
-    float nx11 = mix(n011, n111, f.x);
-    float nxy0 = mix(nx00, nx10, f.y);
-    float nxy1 = mix(nx01, nx11, f.y);
-    return mix(nxy0, nxy1, f.z);
 }
 
 float overlay(float a, float b) {
@@ -95,11 +76,9 @@ float volumeClumps(vec3 p, float u, float v, float d) {
     float zy = sampleDetail(local.zy * vec2(3.1, 2.2) + vec2(0.37, uSeed * 1.3) - drift * 0.7);
     float xz = texture(Sampler1, fract(p.xz * 0.00135 + vec2(uSeed * 0.41, uSeed * 0.17))).r;
     float fine = sampleDetail((local.xz + local.yy * 0.23) * 6.7 + vec2(uSeed * 2.1, 0.73));
-    float n3d = valueNoise(vec3(u * 4.2 + uSeed * 13.0, v * 2.7, d * 5.6 - uTime * 0.018));
-    n3d = n3d * 0.58 + valueNoise(vec3(u * 9.4 - 3.7, v * 5.1 + uSeed * 5.0, d * 10.8 + 8.1)) * 0.30
-            + valueNoise(vec3(u * 18.0 + 19.0, v * 10.0, d * 20.0 - uSeed * 7.0)) * 0.12;
+    float cheap3d = hash13(floor(vec3(u * 10.0 + uSeed * 17.0, v * 5.0, d * 12.0)));
 
-    float clump = xy * 0.24 + zy * 0.22 + xz * 0.16 + fine * 0.10 + n3d * 0.28;
+    float clump = xy * 0.30 + zy * 0.27 + xz * 0.19 + fine * 0.14 + cheap3d * 0.10;
     float puffs = smoothstep(0.24, 0.74, clump);
 
     vec2 cell = abs(local.xz - 0.5);
@@ -117,12 +96,12 @@ vec4 profileSample(vec3 p, out float profileDepth, out float clds) {
     profileDepth = clamp(0.5 + dot(toPoint, forward) / (halfSize.z * 2.0), 0.0, 1.0);
 
     float profileV = clamp(0.5 - (p.y - uProfileCenter.y) / (halfSize.y * 2.0), 0.0, 0.999);
-    vec2 sampleCoord = vec2(fract(uSeed + profileU - 0.025 * uTime * (1.0 - uLayerDepth)), profileV);
+    vec2 sampleCoord = vec2(profileU, profileV);
     vec2 profileOffset = vec2(0.5 - profileU, 0.6666667 - profileV);
     profileOffset.y *= 0.5;
 
-    float h2Noise = texture(Sampler1, fract(vec2(sampleCoord.x * 1.5, sampleCoord.y * 0.75 + uSeed))).r;
-    float h2 = 0.5 - sin((0.07 * uTime + h2Noise * 2.0) * 6.2831853) * 0.5;
+    float h2Noise = texture(Sampler1, fract(vec2(sampleCoord.x * 1.5, sampleCoord.y * 0.75))).r;
+    float h2 = 0.5 - sin(h2Noise * 6.2831853) * 0.5;
     vec4 baseTex = texture(Sampler0, sampleCoord + profileOffset * 0.05 * h2 + vec2(0.0, mix(-1.0, 1.0, h2) * 0.01));
     float keyMask = cloudGreenKeyMask(baseTex);
     float redDepth = baseTex.r * keyMask;
@@ -131,12 +110,11 @@ vec4 profileSample(vec3 p, out float profileDepth, out float clds) {
     dp = pow(max(dp - 0.15, 0.0), mix(0.2, 0.35, h2 * h2));
     dp = min(1.0, dp + max(0.0, ((1.0 - profileV) - 0.9) * 15.0));
 
-    float clds1 = texture(Sampler2, fract(vec2(sampleCoord.x * 5.0 * (1.0 / max(0.25, 1.0 - uLayerDepth * 0.5)),
-                                            sampleCoord.y * 1.5 + uTime * 0.025)
+    float clds1 = texture(Sampler2, fract(vec2(sampleCoord.x * 5.0,
+                                            sampleCoord.y * 1.5)
                                       + profileOffset * 0.11 * dp)).r;
-    float clds2 = texture(Sampler2, fract(vec2(sampleCoord.x * 8.0 * (1.0 / max(0.25, 1.0 - uLayerDepth * 0.5)),
-                                            sampleCoord.y * 2.5 + uTime * 0.018)
-                                      * mix(2.0, 1.0, sin(uLayerDepth * 3.1415927))
+    float clds2 = texture(Sampler2, fract(vec2(sampleCoord.x * 8.0,
+                                            sampleCoord.y * 2.5)
                                       + profileOffset * mix(0.1, 0.2, clds1) * dp)).r;
 
     clds = overlay(clds1, clds2);
@@ -192,18 +170,27 @@ float densityAt(vec3 p, out float tone) {
     dp = clamp(dp, 0.0, 1.0);
 
     float depthFeather = redDepthMask * mix(0.50, 1.0, roundedDepth);
-    float sideFeather = 1.0;
+    float localX = orientedU * 2.0 - 1.0;
+    float localZ = orientedDepth * 2.0 - 1.0;
+    float localY = (p.y - uProfileCenter.y) / max(uProfileHalfSize.y, 0.001);
+    float fadeX = 1.0 - smoothstep(0.65, 1.0, abs(localX));
+    float fadeZ = 1.0 - smoothstep(0.35, 1.0, abs(localZ));
+    float fadeTop = 1.0 - smoothstep(0.88, 1.0, localY);
+    float edgeFeather = fadeX * fadeZ * fadeTop;
     float verticalFeather = smoothstep(0.0, 0.05, q.y) * (1.0 - smoothstep(0.96, 1.0, q.y));
 
     float body = pow(clamp(dp, 0.0, 1.0), mix(1.16, 0.08, clds));
     float alphaShape = body * 1.18 - (1.0 - clds) * 0.22;
     alphaShape = clamp(alphaShape * mix(0.72, 1.16, clumpMask), 0.0, 1.0);
+    float mistNoise = texture(Sampler2, fract(p.xz * 0.003 + vec2(uTime * 0.010, -uTime * 0.006))).r;
+    float topMist = smoothstep(0.25, 0.85, mistNoise) * smoothstep(0.54, 0.92, q.y) * edgeFeather * 0.16;
+    alphaShape = max(alphaShape * edgeFeather, topMist);
 
     float greenTone = profile.g * clamp((dp - 0.3) * 6.0, 0.48, 1.0);
     tone = clamp(overlay(greenTone, mix(clds, clumpMask, 0.18)) * 1.34, 0.0, 1.0);
 
     float brokenEdges = mix(0.30, 1.06, smoothstep(0.06, 0.74, coverage));
-    return alphaShape * depthFeather * sideFeather * verticalFeather * brokenEdges * gapMask;
+    return alphaShape * depthFeather * verticalFeather * brokenEdges * gapMask;
 }
 
 void main() {
@@ -236,14 +223,18 @@ void main() {
 
     float alpha = 0.0;
     float toneAccum = 0.0;
-    const int STEPS = 24;
+    const int MAX_STEPS = 8;
+    int steps = int(clamp(floor(uStepCount + 0.5), 3.0, float(MAX_STEPS)));
     float jitter = hash13(vec3(gl_FragCoord.xy, uSeed + uTime * 0.013));
-    for (int i = 0; i < STEPS; i++) {
-        float fi = (float(i) + jitter) / float(STEPS);
+    for (int i = 0; i < MAX_STEPS; i++) {
+        if (i >= steps || alpha > 0.92) {
+            break;
+        }
+        float fi = (float(i) + jitter) / float(steps);
         vec3 p = rayStart + dir * (tEnter + span * fi);
         float tone;
         float d = densityAt(p, tone);
-        float sampleAlpha = clamp(d * span * 0.00165 * uAlphaScale, 0.0, 0.22);
+        float sampleAlpha = clamp(d * span * 0.0032 * uDensityScale * uAlphaScale, 0.0, 0.42);
         toneAccum += (1.0 - alpha) * sampleAlpha * tone;
         alpha += (1.0 - alpha) * sampleAlpha;
     }
@@ -257,9 +248,10 @@ void main() {
 
     vec3 cloudDark = vec3(0.42, 0.48, 0.56);
     vec3 cloudLight = vec3(0.76, 0.80, 0.86);
-    vec3 atmosphere = vec3(0.16078432, 0.23137255, 0.31764706);
+    vec3 atmosphere = uAtmosphereColor;
 
     vec3 cloudColor = pow(mix(cloudDark, cloudLight, tone), vec3(mix(1.55, 0.55, tone)));
+    cloudColor *= mix(vec3(1.0), uCloudMultiply, 0.78);
     float cSharpLayerBlend = mix(0.18, 0.92, clamp(uLayerDepth, 0.0, 1.0));
     float distanceBlend = clamp(cSharpLayerBlend + uDistanceTint * 0.24, 0.0, 0.96);
     vec3 color = mix(cloudColor, atmosphere, distanceBlend);

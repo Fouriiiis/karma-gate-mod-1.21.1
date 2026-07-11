@@ -18,6 +18,7 @@ import net.minecraft.util.math.RotationAxis;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.LightType;
 import org.joml.Matrix4f;
+import org.joml.Vector3f;
 
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -51,6 +52,8 @@ public final class DistantStructuresRenderer {
     private static final Identifier LIGHT2 = Identifier.of("karma-gate-mod", "structures/atc_light2.png");
     private static final Identifier LIGHT3 = Identifier.of("karma-gate-mod", "structures/atc_light3.png");
     private static final Identifier LIGHTP = Identifier.of("karma-gate-mod", "structures/atc_fivepebbleslight.png");
+    private static final Identifier CLOUD_EDGE = Identifier.of("karma-gate-mod", "clouds/distantclouds.png");
+    private static final int CLOUD_EDGE_SEGMENTS = 28;
 
     // Per-entry lightning state (RW-like)
     private static final Map<Entry, Lightning> LIGHTNING = new ConcurrentHashMap<>();
@@ -59,6 +62,10 @@ public final class DistantStructuresRenderer {
     private static final Map<Identifier, int[]> TEX_SIZE = new ConcurrentHashMap<>();
 
     private static final float GLOW_Z_PUSH = -0.0025f; // render just behind the base
+    private static NativeImage cloudEdgeImage;
+    private static int cloudEdgeW;
+    private static int cloudEdgeH;
+    private static boolean triedCloudEdgeLoad;
 
     /** Billboard entry in world space (units = blocks). */
     public record Entry(
@@ -84,6 +91,8 @@ public final class DistantStructuresRenderer {
         float camY = (float) camera.getPos().y;
         float heightVis = smoothstep(STRUCT_BOTTOM_Y, STRUCT_TOP_Y, camY);
         if (heightVis <= 0.001f) return; // entirely hidden
+        AtcSkyRenderer.CloudPalette cloudPalette = AtcSkyRenderer.cloudPalette(tickDelta);
+        Vector3f atmosphere = cloudPalette.atmosphere();
 
         // Build VIEW = R^{-1} * T(-camPos)
         Vec3d camPos = camera.getPos();
@@ -174,6 +183,14 @@ public final class DistantStructuresRenderer {
             float yawRad = (float) Math.atan2(-rel.x, -rel.z);
             if (Float.isNaN(yawRad)) yawRad = 0f;
 
+            float dist = (float) rel.length();
+            float structureFog = smoothstep(5_000.0f, 42_000.0f, dist);
+            float colorFog = structureFog * 0.68f;
+            int sr = lerpByte(cr, MathHelper.clamp((int) (atmosphere.x * 255.0f) + 36, 0, 255), colorFog);
+            int sg = lerpByte(cg, MathHelper.clamp((int) (atmosphere.y * 255.0f) + 34, 0, 255), colorFog);
+            int sb = lerpByte(cb, MathHelper.clamp((int) (atmosphere.z * 255.0f) + 30, 0, 255), colorFog);
+            float alphaFog = MathHelper.lerp(structureFog, 0.92f, 0.48f);
+
             matrices.push();
             matrices.translate((float) place.x, (float) place.y, (float) place.z);
             matrices.multiply(RotationAxis.POSITIVE_Y.rotation(yawRad));
@@ -194,8 +211,11 @@ public final class DistantStructuresRenderer {
             } else {
                 packedLight = LightmapTextureManager.pack(0, 0);
             }
-            int baseA = MathHelper.clamp((int)(255f * heightVis), 0, 255);
-            renderQuad(vcBase, matrices, 1f, 1f, packedLight, cr, cg, cb, baseA);
+            int baseA = MathHelper.clamp((int)(255f * heightVis * alphaFog), 0, 255);
+            float cutY = (AtcCloudVolumeRenderer.distantStructureCloudCutY() - (float) place.y) / e.height;
+            float cloudEdgePhase = edgePhase(nowTicks, tickDelta, e);
+            float cloudFadeHeight = cloudEdgeFadeHeight(e.height);
+            renderQuadAbove(vcBase, matrices, 1f, 1f, cutY, packedLight, sr, sg, sb, baseA, cloudEdgePhase, cloudFadeHeight);
             matrices.pop(); // base scale
 
             // ---- Emissive lightning overlay ----
@@ -213,7 +233,7 @@ public final class DistantStructuresRenderer {
                     float sx = ratio[0];
                     float sy = ratio[1];
 
-                    int ia = MathHelper.clamp((int)(alpha * 255f), 0, 255);
+                    int ia = MathHelper.clamp((int)(alpha * 255f * MathHelper.lerp(structureFog, 1.0f, 0.55f)), 0, 255);
                     int fullbright = LightmapTextureManager.pack(15, 15);
 
                     matrices.push();
@@ -222,7 +242,9 @@ public final class DistantStructuresRenderer {
                     matrices.scale(e.width * sx, e.height * sy, 1f);
 
                     VertexConsumer vcGlow = immediate.getBuffer(glowLayer(lightTex));
-                    renderQuad(vcGlow, matrices, 1f, 1f, fullbright, 255, 255, 255, ia);
+                    float glowCutY = (AtcCloudVolumeRenderer.distantStructureCloudCutY() - ((float) place.y + yOffset)) / (e.height * sy);
+                    renderQuadAbove(vcGlow, matrices, 1f, 1f, glowCutY, fullbright, 255, 255, 255, ia,
+                            cloudEdgePhase, cloudEdgeFadeHeight(e.height * sy));
                     matrices.pop();
                 }
             }
@@ -422,16 +444,59 @@ public final class DistantStructuresRenderer {
        ---------------------------------------------------------------------- */
     private static void renderQuad(VertexConsumer vc, MatrixStack matrices, float width, float height,
                                    int light, int r, int g, int b, int a) {
+        renderQuadAbove(vc, matrices, width, height, 0.0f, light, r, g, b, a, 0.0f, 0.0f);
+    }
+
+    private static void renderQuadAbove(VertexConsumer vc, MatrixStack matrices, float width, float height,
+                                        float cutY, int light, int r, int g, int b, int a,
+                                        float edgePhase, float fadeHeight) {
+        if (cutY >= 1.0f) {
+            return;
+        }
+
         MatrixStack.Entry me = matrices.peek();
         Matrix4f model = me.getPositionMatrix();
 
         float halfW = width * 0.5f;
-        float bottom = 0f;
+        if (fadeHeight <= 0.0001f || cutY <= 0.0f || !ensureCloudEdgeImage()) {
+            float bottom = MathHelper.clamp(cutY, 0.0f, 1.0f) * height;
+            float bottomV = 1.0f - bottom / Math.max(height, 0.0001f);
 
-        vc.vertex(model, -halfW, bottom + height, 0).color(r, g, b, a).texture(0f, 0f).light(light);
-        vc.vertex(model,  halfW, bottom + height, 0).color(r, g, b, a).texture(1f, 0f).light(light);
-        vc.vertex(model,  halfW, bottom,          0).color(r, g, b, a).texture(1f, 1f).light(light);
-        vc.vertex(model, -halfW, bottom,          0).color(r, g, b, a).texture(0f, 1f).light(light);
+            vc.vertex(model, -halfW, height, 0).color(r, g, b, a).texture(0f, 0f).light(light);
+            vc.vertex(model,  halfW, height, 0).color(r, g, b, a).texture(1f, 0f).light(light);
+            vc.vertex(model,  halfW, bottom,          0).color(r, g, b, a).texture(1f, bottomV).light(light);
+            vc.vertex(model, -halfW, bottom,          0).color(r, g, b, a).texture(0f, bottomV).light(light);
+            return;
+        }
+
+        float baseBottom = MathHelper.clamp(cutY, 0.0f, 1.0f) * height;
+        float fadeTop = MathHelper.clamp(baseBottom + fadeHeight * height, baseBottom, height);
+        float fadeTopV = 1.0f - fadeTop / Math.max(height, 0.0001f);
+        int topAlpha = a;
+
+        for (int i = 0; i < CLOUD_EDGE_SEGMENTS; i++) {
+            float u0 = i / (float) CLOUD_EDGE_SEGMENTS;
+            float u1 = (i + 1) / (float) CLOUD_EDGE_SEGMENTS;
+            float x0 = MathHelper.lerp(u0, -halfW, halfW);
+            float x1 = MathHelper.lerp(u1, -halfW, halfW);
+            float cloud0 = sampleCloudEdge(u0 + edgePhase);
+            float cloud1 = sampleCloudEdge(u1 + edgePhase);
+            int bottomA0 = MathHelper.clamp((int) (a * MathHelper.lerp(smoothstep(0.18f, 0.92f, cloud0), 0.10f, 0.42f)), 0, 255);
+            int bottomA1 = MathHelper.clamp((int) (a * MathHelper.lerp(smoothstep(0.18f, 0.92f, cloud1), 0.10f, 0.42f)), 0, 255);
+
+            if (fadeTop < height - 0.0001f) {
+                vc.vertex(model, x0, height, 0).color(r, g, b, topAlpha).texture(u0, 0f).light(light);
+                vc.vertex(model, x1, height, 0).color(r, g, b, topAlpha).texture(u1, 0f).light(light);
+                vc.vertex(model, x1, fadeTop, 0).color(r, g, b, topAlpha).texture(u1, fadeTopV).light(light);
+                vc.vertex(model, x0, fadeTop, 0).color(r, g, b, topAlpha).texture(u0, fadeTopV).light(light);
+            }
+
+            float bottomV = 1.0f - baseBottom / Math.max(height, 0.0001f);
+            vc.vertex(model, x0, fadeTop,   0).color(r, g, b, topAlpha).texture(u0, fadeTopV).light(light);
+            vc.vertex(model, x1, fadeTop,   0).color(r, g, b, topAlpha).texture(u1, fadeTopV).light(light);
+            vc.vertex(model, x1, baseBottom, 0).color(r, g, b, bottomA1).texture(u1, bottomV).light(light);
+            vc.vertex(model, x0, baseBottom, 0).color(r, g, b, bottomA0).texture(u0, bottomV).light(light);
+        }
     }
 
     private static RenderLayer baseLayer(Identifier texture) {
@@ -443,7 +508,7 @@ public final class DistantStructuresRenderer {
                 false,
                 true,
                 RenderLayer.MultiPhaseParameters.builder()
-                        .program(POSITION_COLOR_TEXTURE_LIGHTMAP_PROGRAM)
+                        .program(AtcCloudShaders.structurePhase())
                         .texture(new Texture(texture, false, true))
                         .transparency(TRANSLUCENT_TRANSPARENCY)
                         .cull(DISABLE_CULLING)
@@ -537,8 +602,77 @@ public final class DistantStructuresRenderer {
     /* ----------------------------------------------------------------------
        small math helpers
        ---------------------------------------------------------------------- */
+    private static float edgePhase(long ticks, float tickDelta, Entry e) {
+        float time = (ticks + tickDelta) * 0.0016f;
+        float position = (float) (e.x * 0.000021 + e.z * 0.000037);
+        return time + position;
+    }
+
+    private static float cloudEdgeFadeHeight(float spriteHeightBlocks) {
+        return MathHelper.clamp(120.0f / Math.max(spriteHeightBlocks, 1.0f), 0.045f, 0.15f);
+    }
+
+    private static boolean ensureCloudEdgeImage() {
+        if (cloudEdgeImage != null && cloudEdgeW > 0 && cloudEdgeH > 0) {
+            return true;
+        }
+        if (triedCloudEdgeLoad) {
+            return false;
+        }
+        triedCloudEdgeLoad = true;
+        try {
+            ResourceManager rm = MinecraftClient.getInstance().getResourceManager();
+            var opt = rm.getResource(CLOUD_EDGE);
+            if (opt.isEmpty()) {
+                return false;
+            }
+            Resource res = opt.get();
+            try (InputStream in = res.getInputStream()) {
+                cloudEdgeImage = NativeImage.read(in);
+                cloudEdgeW = cloudEdgeImage.getWidth();
+                cloudEdgeH = cloudEdgeImage.getHeight();
+                return cloudEdgeW > 0 && cloudEdgeH > 0;
+            }
+        } catch (Throwable ignored) {
+            cloudEdgeImage = null;
+            cloudEdgeW = 0;
+            cloudEdgeH = 0;
+            return false;
+        }
+    }
+
+    private static float sampleCloudEdge(float u) {
+        if (cloudEdgeImage == null || cloudEdgeW <= 0 || cloudEdgeH <= 0) {
+            return 0.5f;
+        }
+        float wrappedU = u - (float) Math.floor(u);
+        int x0 = Math.floorMod((int) Math.floor(wrappedU * cloudEdgeW), cloudEdgeW);
+        int x1 = Math.floorMod(x0 + 9, cloudEdgeW);
+        int y0 = MathHelper.clamp((int) (cloudEdgeH * 0.42f), 0, cloudEdgeH - 1);
+        int y1 = MathHelper.clamp((int) (cloudEdgeH * 0.62f), 0, cloudEdgeH - 1);
+        int y2 = MathHelper.clamp((int) (cloudEdgeH * 0.78f), 0, cloudEdgeH - 1);
+        float a = sampleCloudEdgePixel(x0, y0);
+        float b = sampleCloudEdgePixel(x1, y1);
+        float c = sampleCloudEdgePixel(x0, y2);
+        return MathHelper.clamp(a * 0.52f + b * 0.32f + c * 0.16f, 0.0f, 1.0f);
+    }
+
+    private static float sampleCloudEdgePixel(int x, int y) {
+        int argb = cloudEdgeImage.getColor(x, y);
+        int a = (argb >>> 24) & 0xFF;
+        int r = (argb >>> 16) & 0xFF;
+        int g = (argb >>> 8) & 0xFF;
+        int b = argb & 0xFF;
+        float luma = (r * 0.2126f + g * 0.7152f + b * 0.0722f) / 255.0f;
+        return luma * (a / 255.0f);
+    }
+
     private static float smoothstep(float edge0, float edge1, float x) {
         float t = MathHelper.clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
         return t * t * (3f - 2f * t);
+    }
+
+    private static int lerpByte(int from, int to, float t) {
+        return MathHelper.clamp((int) MathHelper.lerp(MathHelper.clamp(t, 0.0f, 1.0f), from, to), 0, 255);
     }
 }

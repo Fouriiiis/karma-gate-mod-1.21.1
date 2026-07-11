@@ -1,0 +1,54 @@
+{
+  "blend": {
+    "func": "add",
+    "srcrgb": "src_alpha",
+    "dstrgb": "one_minus_src_alpha"
+  },
+  "vertex": "karma-gate-mod:karma_atc_cloud_distant",
+  "fragment": "karma-gate-mod:karma_atc_cloud_distant",
+  "attributes": [
+    "Position",
+    "Color",
+    "UV0"
+  ],
+  "samplers": [
+    {
+      "name": "Sampler0",
+      "wrap": "repeat",
+      "minfilter": "linear",
+      "magfilter": "linear"
+    }
+  ],
+  "uniforms": [
+    {
+      "name": "ModelViewMat",
+      "type": "matrix4x4",
+      "count": 16,
+      "values": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    },
+    {
+      "name": "ProjMat",
+      "type": "matrix4x4",
+      "count": 16,
+      "values": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    },
+    {
+      "name": "uViewMat",
+      "type": "matrix4x4",
+      "count": 16,
+      "values": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    },
+    {
+      "name": "uAtmosphereColor",
+      "type": "float",
+      "count": 3,
+      "values": [0.16078432, 0.23137255, 0.31764706]
+    },
+    {
+      "name": "uCloudMultiply",
+      "type": "float",
+      "count": 3,
+      "values": [1.0, 1.0, 1.0]
+    }
+  ]
+}
