@@ -43,16 +43,6 @@ public final class AtcSkyRenderer {
     @SuppressWarnings("unused")
     private static final int FULLBRIGHT = LightmapTextureManager.pack(15, 15);
 
-    // ---- Height fade thresholds (camera Y) ----
-    private static float SKY_BOTTOM_Y = 930f;  // not visible below this Y
-    private static float SKY_TOP_Y    = 950f;  // fully visible at/above this Y
-
-    /** Optionally call to adjust at runtime. */
-    public static void setSkyHeightFade(float bottomY, float topY) {
-        SKY_BOTTOM_Y = bottomY;
-        SKY_TOP_Y = topY;
-    }
-
     private AtcSkyRenderer() {}
 
     public static void renderSkybox(Matrix4f modelView, Matrix4f projection, float tickDelta, Camera camera) {
@@ -61,7 +51,7 @@ public final class AtcSkyRenderer {
 
         // ---- height-based visibility from camera Y ----
         float camY = (float) camera.getPos().y;
-        float heightVis = smooth01(remapClamp(camY, SKY_BOTTOM_Y, SKY_TOP_Y));
+        float heightVis = AtcCloudVolumeRenderer.aboveCloudsVisibility(camY);
         if (heightVis <= 0.001f) return; // entirely hidden
 
         SkyWeights weights = skyWeights(mc, tickDelta);

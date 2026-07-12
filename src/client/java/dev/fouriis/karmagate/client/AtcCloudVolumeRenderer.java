@@ -55,8 +55,8 @@ public final class AtcCloudVolumeRenderer {
 
     private static final int FULL_BRIGHT = LightmapTextureManager.pack(15, 15);
 
-    public static final TuningValue CLOUD_BOTTOM_Y = new TuningValue("Cloud Bottom Y", 927.0f, 400.0f, 1800.0f, false);
-    public static final TuningValue CLOUD_TOP_Y = new TuningValue("Cloud Top Y", 1250.0f, 500.0f, 2200.0f, false);
+    public static final TuningValue CLOUD_BOTTOM_Y = new TuningValue("Cloud Bottom Y", 957.0f, 400.0f, 1800.0f, false);
+    public static final TuningValue CLOUD_TOP_Y = new TuningValue("Cloud Top Y", 1350.0f, 500.0f, 2200.0f, false);
     public static final TuningValue DISTANT_DECK_OFFSET = new TuningValue("Distant Deck Offset", -4.0f, -200.0f, 200.0f, false);
 //
     public static final TuningValue BAND_ROW_RADIUS = new TuningValue("Band Row Radius", 30.0f, 1.0f, 80.0f, true);
@@ -119,8 +119,20 @@ public final class AtcCloudVolumeRenderer {
         return TUNING_VALUES;
     }
 
-    private static float cloudBottomY() {
+    public static float cloudBottomY() {
         return CLOUD_BOTTOM_Y.value();
+    }
+
+    public static float aboveCloudsVisibility(float cameraY) {
+        return smoothstep(cloudBottomY(), cloudBottomY() + 20.0f, cameraY);
+    }
+
+    public static float cloudLayerVisibility(float cameraY) {
+        return smoothstep(cloudBottomY() - 20.0f, cloudBottomY(), cameraY);
+    }
+
+    public static float closeCloudVolumeVisibility(float cameraY) {
+        return cloudLayerVisibility(cameraY);
     }
 
     private static float cloudHeight() {
@@ -166,7 +178,7 @@ public final class AtcCloudVolumeRenderer {
         Matrix4f savedModelView = new Matrix4f(mvStack);
         mvStack.identity();
         RenderSystem.applyModelViewMatrix();
-        RenderSystem.setProjectionMatrix(extendedProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
+        RenderSystem.setProjectionMatrix(cloudProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
 
         MatrixStack bobStack = new MatrixStack();
         if (mc.options.getBobView().getValue()) {
@@ -177,13 +189,14 @@ public final class AtcCloudVolumeRenderer {
 
         float light = dayLight(mc, camPos, tickDelta);
         float worldTime = cloudAnimationTime(mc, tickDelta);
+        float altitudeVisibility = cloudLayerVisibility((float) camPos.y);
         AtcSkyRenderer.CloudPalette palette = AtcSkyRenderer.cloudPalette(tickDelta);
         VertexConsumerProvider.Immediate immediate = mc.getBufferBuilders().getEntityVertexConsumers();
 
         RenderSystem.enableBlend();
         RenderSystem.depthMask(false);
         try {
-            renderDistantClouds(immediate, camPos, view, worldTime, light, palette);
+            renderDistantClouds(immediate, camPos, view, worldTime, light, palette, altitudeVisibility);
         } finally {
             mvStack.set(savedModelView);
             mvStack.popMatrix();
@@ -202,13 +215,17 @@ public final class AtcCloudVolumeRenderer {
         }
 
         Vec3d camPos = camera.getPos();
+        float volumeVisibility = closeCloudVolumeVisibility((float) camPos.y);
+        if (volumeVisibility <= 0.003f) {
+            return;
+        }
         Matrix4f savedProj = new Matrix4f(RenderSystem.getProjectionMatrix());
         Matrix4fStack mvStack = RenderSystem.getModelViewStack();
         mvStack.pushMatrix();
         Matrix4f savedModelView = new Matrix4f(mvStack);
         mvStack.identity();
         RenderSystem.applyModelViewMatrix();
-        RenderSystem.setProjectionMatrix(extendedProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
+        RenderSystem.setProjectionMatrix(cloudProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
 
         MatrixStack bobStack = new MatrixStack();
         if (mc.options.getBobView().getValue()) {
@@ -230,7 +247,7 @@ public final class AtcCloudVolumeRenderer {
         RenderSystem.enableBlend();
         RenderSystem.depthMask(false);
         try {
-            renderVolumeCloudBanks(immediate, mc, banks, camPos, view, worldTime, light, palette);
+            renderVolumeCloudBanks(immediate, mc, banks, camPos, view, worldTime, light, palette, volumeVisibility);
         } finally {
             mvStack.set(savedModelView);
             mvStack.popMatrix();
@@ -255,7 +272,7 @@ public final class AtcCloudVolumeRenderer {
         Matrix4f savedModelView = new Matrix4f(mvStack);
         mvStack.identity();
         RenderSystem.applyModelViewMatrix();
-        RenderSystem.setProjectionMatrix(extendedProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
+        RenderSystem.setProjectionMatrix(cloudProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
 
         MatrixStack bobStack = new MatrixStack();
         if (mc.options.getBobView().getValue()) {
@@ -266,9 +283,11 @@ public final class AtcCloudVolumeRenderer {
 
         float worldTime = cloudAnimationTime(mc, tickDelta);
         float light = dayLight(mc, camPos, tickDelta);
+        float distantVisibility = cloudLayerVisibility((float) camPos.y);
+        float volumeVisibility = closeCloudVolumeVisibility((float) camPos.y);
         AtcSkyRenderer.CloudPalette palette = AtcSkyRenderer.cloudPalette(tickDelta);
 
-        List<CloudBank> banks = buildVisibleBanks(camPos);
+        List<CloudBank> banks = volumeVisibility <= 0.003f ? List.of() : buildVisibleBanks(camPos);
         if (banks.size() > 1) {
             banks.sort(Comparator.<CloudBank>comparingDouble(bank -> bank.distanceSq(camPos)).reversed());
         }
@@ -277,8 +296,8 @@ public final class AtcCloudVolumeRenderer {
         RenderSystem.enableBlend();
         RenderSystem.depthMask(false);
         try {
-            renderDistantClouds(immediate, camPos, view, worldTime, light, palette);
-            renderVolumeCloudBanks(immediate, mc, banks, camPos, view, worldTime, light, palette);
+            renderDistantClouds(immediate, camPos, view, worldTime, light, palette, distantVisibility);
+            renderVolumeCloudBanks(immediate, mc, banks, camPos, view, worldTime, light, palette, volumeVisibility);
         } finally {
             mvStack.set(savedModelView);
             mvStack.popMatrix();
@@ -295,7 +314,11 @@ public final class AtcCloudVolumeRenderer {
                                                Matrix4f view,
                                                float worldTime,
                                                float light,
-                                               AtcSkyRenderer.CloudPalette palette) {
+                                               AtcSkyRenderer.CloudPalette palette,
+                                               float altitudeVisibility) {
+        if (altitudeVisibility <= 0.003f) {
+            return;
+        }
         ShaderProgram volumeProgram = AtcCloudShaders.PROGRAM;
         RenderSystem.setShaderTexture(1, DISTRIBUTION_NOISE);
         RenderSystem.setShaderTexture(2, CLOUD_DETAIL);
@@ -306,8 +329,13 @@ public final class AtcCloudVolumeRenderer {
             uploadBankUniforms(volumeProgram, bank, camPos, view, worldTime, light, palette);
 
             int color = MathHelper.clamp((int) (255.0f * light), 120, 255);
+            int alpha = bank.alphaByte();
+            alpha = MathHelper.clamp((int) (alpha * altitudeVisibility), 0, 255);
+            if (alpha <= 0) {
+                continue;
+            }
             VertexConsumer vc = immediate.getBuffer(CLOUD_LAYERS[bank.textureIndex]);
-            emitBox(vc, bank, color, bank.alphaByte());
+            emitBox(vc, bank, color, alpha);
             immediate.draw(CLOUD_LAYERS[bank.textureIndex]);
         }
     }
@@ -445,16 +473,20 @@ public final class AtcCloudVolumeRenderer {
                                             Matrix4f view,
                                             float worldTime,
                                             float light,
-                                            AtcSkyRenderer.CloudPalette palette) {
+                                            AtcSkyRenderer.CloudPalette palette,
+                                            float altitudeVisibility) {
         if (AtcCloudShaders.DISTANT_PROGRAM == null) return;
+        if (altitudeVisibility <= 0.003f) return;
 
         int color = MathHelper.clamp((int) (225.0f * light), 112, 220);
+        int deckAlpha = MathHelper.clamp((int) (255.0f * altitudeVisibility), 0, 255);
+        int horizonAlpha = MathHelper.clamp((int) (118.0f * altitudeVisibility), 0, 255);
         AtcCloudShaders.DISTANT_PROGRAM.bind();
         setUniformMat4(AtcCloudShaders.DISTANT_PROGRAM, "uViewMat", view);
         uploadPaletteUniforms(AtcCloudShaders.DISTANT_PROGRAM, palette);
 
         VertexConsumer deckVc = immediate.getBuffer(DISTANT_DECK_LAYER);
-        emitDistantDeck(deckVc, camPos, worldTime, color, 255);
+        emitDistantDeck(deckVc, camPos, worldTime, color, deckAlpha);
         immediate.draw(DISTANT_DECK_LAYER);
 
         AtcCloudShaders.DISTANT_PROGRAM.bind();
@@ -462,7 +494,7 @@ public final class AtcCloudVolumeRenderer {
         uploadPaletteUniforms(AtcCloudShaders.DISTANT_PROGRAM, palette);
 
         VertexConsumer horizonVc = immediate.getBuffer(DISTANT_HORIZON_LAYER);
-        emitDistantHorizonRibbons(horizonVc, camPos, color, 118);
+        emitDistantHorizonRibbons(horizonVc, camPos, color, horizonAlpha);
         immediate.draw(DISTANT_HORIZON_LAYER);
     }
 
@@ -521,6 +553,9 @@ public final class AtcCloudVolumeRenderer {
             float y0 = cloudBottomY();
             float y1 = cloudBottomY() + height;
             int alpha = MathHelper.clamp((int) (baseAlpha * MathHelper.lerp(t, 0.85f, 0.35f)), 0, 255);
+            if (alpha <= 0) {
+                continue;
+            }
             float uRepeats = MathHelper.lerp(t, 10.0f, 24.0f);
             float uOffset = hash01(layer, 91) * 10.0f;
 
@@ -671,11 +706,11 @@ public final class AtcCloudVolumeRenderer {
                 .translate((float) -camPos.x, (float) -camPos.y, (float) -camPos.z);
     }
 
-    private static Matrix4f extendedProjection(MinecraftClient mc, Camera camera, float tickDelta) {
+    private static Matrix4f cloudProjection(MinecraftClient mc, Camera camera, float tickDelta) {
         double dynFovDeg = ((GameRendererAccessor) mc.gameRenderer).karmaGate$invokeGetFov(camera, tickDelta, true);
         float fovRad = (float) Math.toRadians(dynFovDeg);
         float aspect = (float) mc.getWindow().getFramebufferWidth() / Math.max(1, mc.getWindow().getFramebufferHeight());
-        float far = (float) (mc.options.getClampedViewDistance() * 16.0 * 100.0);
+        float far = Math.max(128.0f, (float) mc.options.getClampedViewDistance() * 16.0f) * 100.0f;
         return new Matrix4f().setPerspective(fovRad, aspect, 0.0001f, far);
     }
 

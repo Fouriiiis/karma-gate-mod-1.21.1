@@ -38,16 +38,6 @@ public final class DistantStructuresRenderer {
     private static final List<Entry> ENTRIES = new ArrayList<>();
     private static boolean loaded = false;
 
-    // ---- Height fade thresholds (camera Y) ----
-    private static float STRUCT_BOTTOM_Y = 930f;  // not visible below this Y
-    private static float STRUCT_TOP_Y    = 950f;  // fully visible at/above this Y
-
-    /** Optionally call to adjust at runtime. */
-    public static void setStructureHeightFade(float bottomY, float topY) {
-        STRUCT_BOTTOM_Y = bottomY;
-        STRUCT_TOP_Y = topY;
-    }
-
     // Emissive overlay textures for the “lightning” glow
     private static final Identifier LIGHT1 = Identifier.of("karma-gate-mod", "structures/atc_light1.png");
     private static final Identifier LIGHT2 = Identifier.of("karma-gate-mod", "structures/atc_light2.png");
@@ -99,7 +89,7 @@ public final class DistantStructuresRenderer {
 
         // --- Height-based visibility (camera Y) ---
         float camY = (float) camera.getPos().y;
-        float heightVis = smoothstep(STRUCT_BOTTOM_Y, STRUCT_TOP_Y, camY);
+        float heightVis = AtcCloudVolumeRenderer.aboveCloudsVisibility(camY);
         if (heightVis <= 0.001f) return; // entirely hidden
         AtcSkyRenderer.CloudPalette cloudPalette = AtcSkyRenderer.cloudPalette(tickDelta);
         Vector3f atmosphere = cloudPalette.atmosphere();
