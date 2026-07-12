@@ -18,6 +18,7 @@ import net.minecraft.util.math.RotationAxis;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.LightType;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fStack;
 import org.joml.Vector3f;
 
 import java.io.InputStream;
@@ -38,8 +39,8 @@ public final class DistantStructuresRenderer {
     private static boolean loaded = false;
 
     // ---- Height fade thresholds (camera Y) ----
-    private static float STRUCT_BOTTOM_Y = 1185f;  // not visible below this Y
-    private static float STRUCT_TOP_Y    = 1350f;  // fully visible at/above this Y
+    private static float STRUCT_BOTTOM_Y = 930f;  // not visible below this Y
+    private static float STRUCT_TOP_Y    = 950f;  // fully visible at/above this Y
 
     /** Optionally call to adjust at runtime. */
     public static void setStructureHeightFade(float bottomY, float topY) {
@@ -54,6 +55,7 @@ public final class DistantStructuresRenderer {
     private static final Identifier LIGHTP = Identifier.of("karma-gate-mod", "structures/atc_fivepebbleslight.png");
     private static final Identifier CLOUD_EDGE = Identifier.of("karma-gate-mod", "clouds/distantclouds.png");
     private static final int CLOUD_EDGE_SEGMENTS = 28;
+    private static final long CLOUD_EDGE_TIME_WRAP_TICKS = 24_000L;
 
     // Per-entry lightning state (RW-like)
     private static final Map<Entry, Lightning> LIGHTNING = new ConcurrentHashMap<>();
@@ -82,6 +84,14 @@ public final class DistantStructuresRenderer {
        PUBLIC: late render entry (call from WorldRenderer mixin @At("RETURN"))
        ---------------------------------------------------------------------- */
     public static void renderLate(float tickDelta, Camera camera) {
+        renderLate(tickDelta, camera, true, false);
+    }
+
+    public static void renderLightningLate(float tickDelta, Camera camera) {
+        renderLate(tickDelta, camera, false, true);
+    }
+
+    private static void renderLate(float tickDelta, Camera camera, boolean renderBase, boolean renderGlow) {
         ensureLoaded();
         if (ENTRIES.isEmpty() || camera == null) return;
 
@@ -120,6 +130,11 @@ public final class DistantStructuresRenderer {
         Matrix4f extendedProj = new Matrix4f().setPerspective(fovRad, aspect, near, far);
 
         Matrix4f savedProj = new Matrix4f(RenderSystem.getProjectionMatrix());
+        Matrix4fStack mvStack = RenderSystem.getModelViewStack();
+        mvStack.pushMatrix();
+        Matrix4f savedModelView = new Matrix4f(mvStack);
+        mvStack.identity();
+        RenderSystem.applyModelViewMatrix();
         RenderSystem.setProjectionMatrix(extendedProj, VertexSorter.BY_DISTANCE);
 
         VertexConsumerProvider.Immediate immediate = mc.getBufferBuilders().getEntityVertexConsumers();
@@ -195,32 +210,34 @@ public final class DistantStructuresRenderer {
             matrices.translate((float) place.x, (float) place.y, (float) place.z);
             matrices.multiply(RotationAxis.POSITIVE_Y.rotation(yawRad));
 
-            // ---- Base, non-emissive pass ----
-            matrices.push();
-            matrices.scale(e.width, e.height, 1f);
-            VertexConsumer vcBase = immediate.getBuffer(baseLayer(e.texture()));
-            int packedLight;
-            var world = mc.world;
-            if (world != null) {
-                int bx = MathHelper.floor(place.x);
-                int by = MathHelper.floor(place.y);
-                int bz = MathHelper.floor(place.z);
-                int block = world.getLightLevel(LightType.BLOCK, new BlockPos(bx, by, bz));
-                int sky   = world.getLightLevel(LightType.SKY,   new BlockPos(bx, by, bz));
-                packedLight = LightmapTextureManager.pack(block, sky);
-            } else {
-                packedLight = LightmapTextureManager.pack(0, 0);
-            }
-            int baseA = MathHelper.clamp((int)(255f * heightVis * alphaFog), 0, 255);
-            float cutY = (AtcCloudVolumeRenderer.distantStructureCloudCutY() - (float) place.y) / e.height;
             float cloudEdgePhase = edgePhase(nowTicks, tickDelta, e);
-            float cloudFadeHeight = cloudEdgeFadeHeight(e.height);
-            renderQuadAbove(vcBase, matrices, 1f, 1f, cutY, packedLight, sr, sg, sb, baseA, cloudEdgePhase, cloudFadeHeight);
-            matrices.pop(); // base scale
+            if (renderBase) {
+                // ---- Base, non-emissive pass ----
+                matrices.push();
+                matrices.scale(e.width, e.height, 1f);
+                VertexConsumer vcBase = immediate.getBuffer(baseLayer(e.texture()));
+                int packedLight;
+                var world = mc.world;
+                if (world != null) {
+                    int bx = MathHelper.floor(place.x);
+                    int by = MathHelper.floor(place.y);
+                    int bz = MathHelper.floor(place.z);
+                    int block = world.getLightLevel(LightType.BLOCK, new BlockPos(bx, by, bz));
+                    int sky   = world.getLightLevel(LightType.SKY,   new BlockPos(bx, by, bz));
+                    packedLight = LightmapTextureManager.pack(block, sky);
+                } else {
+                    packedLight = LightmapTextureManager.pack(0, 0);
+                }
+                int baseA = MathHelper.clamp((int)(255f * heightVis * alphaFog), 0, 255);
+                float cutY = (AtcCloudVolumeRenderer.distantStructureCloudCutY() - (float) place.y) / e.height;
+                float cloudFadeHeight = cloudEdgeFadeHeight(e.height);
+                renderQuadAbove(vcBase, matrices, 1f, 1f, cutY, packedLight, sr, sg, sb, baseA, cloudEdgePhase, cloudFadeHeight);
+                matrices.pop(); // base scale
+            }
 
             // ---- Emissive lightning overlay ----
             Identifier lightTex = overlayFor(e.texture());
-            if (lightTex != null && mc.world != null) {
+            if (renderGlow && lightTex != null && mc.world != null) {
                 Lightning L = LIGHTNING.computeIfAbsent(e, DistantStructuresRenderer::makeLightning);
                 L.updateTo(nowTicks);
 
@@ -242,9 +259,7 @@ public final class DistantStructuresRenderer {
                     matrices.scale(e.width * sx, e.height * sy, 1f);
 
                     VertexConsumer vcGlow = immediate.getBuffer(glowLayer(lightTex));
-                    float glowCutY = (AtcCloudVolumeRenderer.distantStructureCloudCutY() - ((float) place.y + yOffset)) / (e.height * sy);
-                    renderQuadAbove(vcGlow, matrices, 1f, 1f, glowCutY, fullbright, 255, 255, 255, ia,
-                            cloudEdgePhase, cloudEdgeFadeHeight(e.height * sy));
+                    renderQuad(vcGlow, matrices, 1f, 1f, fullbright, 255, 255, 255, ia);
                     matrices.pop();
                 }
             }
@@ -253,6 +268,9 @@ public final class DistantStructuresRenderer {
         }
 
         immediate.draw();
+        mvStack.set(savedModelView);
+        mvStack.popMatrix();
+        RenderSystem.applyModelViewMatrix();
         RenderSystem.setProjectionMatrix(savedProj, VertexSorter.BY_DISTANCE);
     }
 
@@ -603,7 +621,8 @@ public final class DistantStructuresRenderer {
        small math helpers
        ---------------------------------------------------------------------- */
     private static float edgePhase(long ticks, float tickDelta, Entry e) {
-        float time = (ticks + tickDelta) * 0.0016f;
+        long wrappedTicks = Math.floorMod(ticks, CLOUD_EDGE_TIME_WRAP_TICKS);
+        float time = (wrappedTicks + tickDelta) * 0.0016f;
         float position = (float) (e.x * 0.000021 + e.z * 0.000037);
         return time + position;
     }

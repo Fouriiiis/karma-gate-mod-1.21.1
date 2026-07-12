@@ -34,6 +34,7 @@ public class GameRendererMixin {
         float tickDelta = tickCounter.getTickDelta(true);
         AtcCloudVolumeRenderer.renderDistantCloudLayer(tickDelta, camera);
         DistantStructuresRenderer.renderLate(tickDelta, camera);
+        DistantStructuresRenderer.renderLightningLate(tickDelta, camera);
         AtcCloudVolumeRenderer.renderVolumeClouds(tickDelta, camera);
         GridProjectRenderer.renderLate(tickDelta, camera);
     }

@@ -14,9 +14,12 @@ import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.render.VertexFormat;
 import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.biome.Biome;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fStack;
 import org.joml.Vector3f;
@@ -34,14 +37,15 @@ public final class AtcSkyRenderer {
     private static final Vector3f CLOUD_MULTIPLY_DAY = new Vector3f(1.0f, 1.0f, 1.0f);
     private static final Vector3f CLOUD_MULTIPLY_DUSK = new Vector3f(1.0f, 0.79f, 0.47f);
     private static final Vector3f CLOUD_MULTIPLY_NIGHT = new Vector3f(4f / 51f, 12f / 85f, 18f / 85f);
+    private static final Vector3f DEFAULT_FOG_COLOR = new Vector3f(0.55f, 0.66f, 0.78f);
 
     private static final int GRID = 64;
     @SuppressWarnings("unused")
     private static final int FULLBRIGHT = LightmapTextureManager.pack(15, 15);
 
     // ---- Height fade thresholds (camera Y) ----
-    private static float SKY_BOTTOM_Y = 1185f;  // not visible below this Y
-    private static float SKY_TOP_Y    = 1350f;  // fully visible at/above this Y
+    private static float SKY_BOTTOM_Y = 930f;  // not visible below this Y
+    private static float SKY_TOP_Y    = 950f;  // fully visible at/above this Y
 
     /** Optionally call to adjust at runtime. */
     public static void setSkyHeightFade(float bottomY, float topY) {
@@ -217,6 +221,10 @@ public final class AtcSkyRenderer {
                 weights.dusk(),
                 weights.night()
         );
+        Vector3f fogColor = biomeFogColor(mc, tickDelta);
+        float fogInfluence = MathHelper.clamp(0.46f + weights.night() * 0.16f - weights.dusk() * 0.08f, 0.34f, 0.62f);
+        atmosphere = mixCloudColor(atmosphere, fogColor, fogInfluence);
+
         Vector3f multiply = blendCloudColor(
                 CLOUD_MULTIPLY_DAY,
                 CLOUD_MULTIPLY_DUSK,
@@ -226,6 +234,31 @@ public final class AtcSkyRenderer {
                 weights.night()
         );
         return new CloudPalette(atmosphere, multiply);
+    }
+
+    private static Vector3f biomeFogColor(MinecraftClient mc, float tickDelta) {
+        if (mc.world == null) {
+            return new Vector3f(DEFAULT_FOG_COLOR);
+        }
+        Vec3d pos = mc.gameRenderer.getCamera().getPos();
+        RegistryEntry<Biome> biome = mc.world.getBiome(BlockPos.ofFloored(pos));
+        int fog = biome.value().getEffects().getFogColor();
+        Vector3f biomeFog = colorFromRgb(fog);
+        Vec3d sky = mc.world.getSkyColor(pos, tickDelta);
+        Vector3f skyFog = new Vector3f(
+                MathHelper.clamp((float) sky.x, 0.0f, 1.0f),
+                MathHelper.clamp((float) sky.y, 0.0f, 1.0f),
+                MathHelper.clamp((float) sky.z, 0.0f, 1.0f)
+        );
+        return mixCloudColor(biomeFog, skyFog, 0.28f);
+    }
+
+    private static Vector3f colorFromRgb(int rgb) {
+        return new Vector3f(
+                ((rgb >> 16) & 255) / 255.0f,
+                ((rgb >> 8) & 255) / 255.0f,
+                (rgb & 255) / 255.0f
+        );
     }
 
     private static SkyWeights skyWeights(MinecraftClient mc, float tickDelta) {
@@ -247,6 +280,14 @@ public final class AtcSkyRenderer {
                 day.x * wDay + dusk.x * wDusk + night.x * wNight,
                 day.y * wDay + dusk.y * wDusk + night.y * wNight,
                 day.z * wDay + dusk.z * wDusk + night.z * wNight
+        );
+    }
+
+    private static Vector3f mixCloudColor(Vector3f a, Vector3f b, float t) {
+        return new Vector3f(
+                MathHelper.lerp(t, a.x, b.x),
+                MathHelper.lerp(t, a.y, b.y),
+                MathHelper.lerp(t, a.z, b.z)
         );
     }
 

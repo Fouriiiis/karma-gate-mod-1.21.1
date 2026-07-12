@@ -19,6 +19,7 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fStack;
 import org.joml.Vector3f;
 
 import java.util.ArrayList;
@@ -42,7 +43,7 @@ public final class AtcCloudVolumeRenderer {
     private static final Identifier CLOUD_2 = Identifier.of("karma-gate-mod", "clouds/clouds2.png");
     private static final Identifier CLOUD_3 = Identifier.of("karma-gate-mod", "clouds/clouds3.png");
     private static final Identifier DISTANT_CLOUDS = Identifier.of("karma-gate-mod", "clouds/distantclouds.png");
-    private static final Identifier DISTRIBUTION_NOISE = Identifier.of("librainworldmc", "textures/rainworld/palettes/noise-hq.png");
+    private static final Identifier DISTRIBUTION_NOISE = Identifier.of("karma-gate-mod", "textures/hologram/noise.png");
     private static final Identifier CLOUD_DETAIL = Identifier.of("karma-gate-mod", "clouds/cloudstexture.png");
 
     private static final RenderLayer CLOUD_1_LAYER = layer("karma_atc_cloud_volume_1", CLOUD_1, 256);
@@ -54,45 +55,59 @@ public final class AtcCloudVolumeRenderer {
 
     private static final int FULL_BRIGHT = LightmapTextureManager.pack(15, 15);
 
-    private static final float CLOUD_BOTTOM_Y = 840.0f;
-    private static final float CLOUD_TOP_Y = 1078.0f;
-    private static final float CLOUD_HEIGHT = CLOUD_TOP_Y - CLOUD_BOTTOM_Y;
-    private static final float DISTANT_DECK_Y = CLOUD_BOTTOM_Y - 4.0f;
-//1078
-    private static final int BAND_ROW_RADIUS = 30;
-    private static final int BAND_TILE_RADIUS_NEAR = 5;
-    private static final int BAND_TILE_RADIUS_MID = 3;
-    private static final int BAND_TILE_RADIUS_FAR = 2;
-    private static final int IN_CLOUD_ROW_RADIUS = 3;
-    private static final int IN_CLOUD_TILE_RADIUS_NEAR = 1;
+    public static final TuningValue CLOUD_BOTTOM_Y = new TuningValue("Cloud Bottom Y", 927.0f, 400.0f, 1800.0f, false);
+    public static final TuningValue CLOUD_TOP_Y = new TuningValue("Cloud Top Y", 1250.0f, 500.0f, 2200.0f, false);
+    public static final TuningValue DISTANT_DECK_OFFSET = new TuningValue("Distant Deck Offset", -4.0f, -200.0f, 200.0f, false);
+//
+    public static final TuningValue BAND_ROW_RADIUS = new TuningValue("Band Row Radius", 30.0f, 1.0f, 80.0f, true);
+    public static final TuningValue BAND_TILE_RADIUS_NEAR = new TuningValue("Tile Radius Near", 5.0f, 0.0f, 16.0f, true);
+    public static final TuningValue BAND_TILE_RADIUS_MID = new TuningValue("Tile Radius Mid", 3.0f, 0.0f, 12.0f, true);
+    public static final TuningValue BAND_TILE_RADIUS_FAR = new TuningValue("Tile Radius Far", 2.0f, 0.0f, 8.0f, true);
+    public static final TuningValue IN_CLOUD_ROW_RADIUS = new TuningValue("Inside Row Radius", 3.0f, 1.0f, 16.0f, true);
+    public static final TuningValue IN_CLOUD_TILE_RADIUS_NEAR = new TuningValue("Inside Tile Near", 1.0f, 0.0f, 8.0f, true);
     private static final int IN_CLOUD_TILE_RADIUS_MID = 0;
     private static final int IN_CLOUD_TILE_RADIUS_FAR = 0;
     private static final float CLOUD_PROFILE_ASPECT = 700.0f / 150.0f;
-    private static final float BAND_TILE_LENGTH = CLOUD_HEIGHT * CLOUD_PROFILE_ASPECT;
-    private static final float BAND_TILE_SPACING = BAND_TILE_LENGTH * 0.70f;
-    private static final float BAND_TILE_RENDER_LENGTH = BAND_TILE_LENGTH * 1.35f;
-    private static final float BAND_ROW_SPACING = 70.0f;
-    private static final float BAND_WIDTH = 220.0f;
-    private static final float CLOUD_Y_RATIO = 0.75f; 
+    public static final TuningValue BAND_TILE_SPACING_SCALE = new TuningValue("Tile Spacing Scale", 0.70f, 0.20f, 2.00f, false);
+    public static final TuningValue BAND_TILE_RENDER_SCALE = new TuningValue("Tile Render Scale", 1.35f, 0.40f, 3.00f, false);
+    public static final TuningValue BAND_ROW_SPACING = new TuningValue("Band Row Spacing", 70.0f, 10.0f, 400.0f, false);
+    public static final TuningValue BAND_WIDTH = new TuningValue("Band Width", 220.0f, 20.0f, 800.0f, false);
+    public static final TuningValue CLOUD_Y_RATIO = new TuningValue("Cloud Y Ratio", 0.75f, 0.10f, 1.50f, false); 
     private static final float CLOUD_DETAIL_ASPECT = 397.0f / 212.0f;
-    private static final float DISTANT_DECK_UV_SCALE = 0.0015f;
+    public static final TuningValue DISTANT_DECK_UV_SCALE = new TuningValue("Distant Deck UV Scale", 0.0015f, 0.0001f, 0.0100f, false);
     private static final float DISTANT_DECK_UV_STRETCH = CLOUD_PROFILE_ASPECT / CLOUD_DETAIL_ASPECT;
-    private static final float DISTANT_DECK_UV_LONG_AXIS = DISTANT_DECK_UV_SCALE / DISTANT_DECK_UV_STRETCH;
-    private static final float DISTANT_DECK_UV_SHORT_AXIS = DISTANT_DECK_UV_SCALE * 0.86f;
 
-    private static final float DISTANT_START = 1000.0f;
-    private static final float DISTANT_FADE_START = 850.0f;
-    private static final float DISTANT_FADE_END = 1300.0f;
-    private static final float NEAR_VOLUME_FADE_START = 650.0f;
-    private static final float NEAR_VOLUME_FADE_END = 2000.0f;
-    private static final float IN_CLOUD_FADE_START = 220.0f;
-    private static final float IN_CLOUD_FADE_END = 520.0f;
-    private static final float DISTANT_END = 140000.0f;
-    private static final int DISTANT_DECK_RINGS = 12;
-    private static final int DISTANT_RING_SEGMENTS = 96;
-    private static final int DISTANT_HORIZON_LAYERS = 6;
-    private static final float DISTANT_HORIZON_MIN_RADIUS = 1400.0f;
-    private static final float DISTANT_HORIZON_MAX_RADIUS = 12000.0f;
+    public static final TuningValue DISTANT_START = new TuningValue("Distant Start", 1000.0f, 0.0f, 10000.0f, false);
+    public static final TuningValue DISTANT_FADE_START = new TuningValue("Distant Fade Start", 850.0f, 0.0f, 10000.0f, false);
+    public static final TuningValue DISTANT_FADE_END = new TuningValue("Distant Fade End", 1300.0f, 0.0f, 20000.0f, false);
+    public static final TuningValue NEAR_VOLUME_FADE_START = new TuningValue("Near Fade Start", 650.0f, 0.0f, 5000.0f, false);
+    public static final TuningValue NEAR_VOLUME_FADE_END = new TuningValue("Near Fade End", 2000.0f, 100.0f, 12000.0f, false);
+    public static final TuningValue IN_CLOUD_FADE_START = new TuningValue("Inside Fade Start", 220.0f, 0.0f, 3000.0f, false);
+    public static final TuningValue IN_CLOUD_FADE_END = new TuningValue("Inside Fade End", 520.0f, 0.0f, 5000.0f, false);
+    public static final TuningValue DISTANT_END = new TuningValue("Distant End", 140000.0f, 2000.0f, 200000.0f, false);
+    public static final TuningValue DISTANT_DECK_RINGS = new TuningValue("Distant Deck Rings", 12.0f, 1.0f, 32.0f, true);
+    public static final TuningValue DISTANT_RING_SEGMENTS = new TuningValue("Distant Ring Segments", 96.0f, 8.0f, 256.0f, true);
+    public static final TuningValue DISTANT_HORIZON_LAYERS = new TuningValue("Horizon Layers", 6.0f, 1.0f, 16.0f, true);
+    public static final TuningValue DISTANT_HORIZON_MIN_RADIUS = new TuningValue("Horizon Min Radius", 1400.0f, 100.0f, 20000.0f, false);
+    public static final TuningValue DISTANT_HORIZON_MAX_RADIUS = new TuningValue("Horizon Max Radius", 12000.0f, 100.0f, 80000.0f, false);
+    private static final long CLOUD_TIME_WRAP_TICKS = 24_000L;
+    public static final TuningValue CLOSE_CLOUD_MOTION_SCALE = new TuningValue("Close Motion Scale", 0.01f, 0.0f, 1.0f, false);
+    public static final TuningValue DISTANT_DECK_MOTION_SCALE = new TuningValue("Deck Motion Scale", 0.10f, 0.0f, 2.0f, false);
+    public static final TuningValue DISTANT_DECK_U_DRIFT = new TuningValue("Deck U Drift", 0.0009f, -0.0200f, 0.0200f, false);
+    public static final TuningValue DISTANT_DECK_V_DRIFT = new TuningValue("Deck V Drift", -0.00045f, -0.0200f, 0.0200f, false);
+
+    private static final List<TuningValue> TUNING_VALUES = List.of(
+            CLOUD_BOTTOM_Y, CLOUD_TOP_Y, DISTANT_DECK_OFFSET,
+            CLOUD_Y_RATIO, BAND_ROW_SPACING, BAND_WIDTH,
+            BAND_TILE_SPACING_SCALE, BAND_TILE_RENDER_SCALE,
+            BAND_ROW_RADIUS, BAND_TILE_RADIUS_NEAR, BAND_TILE_RADIUS_MID, BAND_TILE_RADIUS_FAR,
+            IN_CLOUD_ROW_RADIUS, IN_CLOUD_TILE_RADIUS_NEAR,
+            NEAR_VOLUME_FADE_START, NEAR_VOLUME_FADE_END, IN_CLOUD_FADE_START, IN_CLOUD_FADE_END,
+            DISTANT_START, DISTANT_FADE_START, DISTANT_FADE_END, DISTANT_END,
+            DISTANT_DECK_RINGS, DISTANT_RING_SEGMENTS, DISTANT_HORIZON_LAYERS,
+            DISTANT_HORIZON_MIN_RADIUS, DISTANT_HORIZON_MAX_RADIUS, DISTANT_DECK_UV_SCALE,
+            CLOSE_CLOUD_MOTION_SCALE, DISTANT_DECK_MOTION_SCALE, DISTANT_DECK_U_DRIFT, DISTANT_DECK_V_DRIFT
+    );
 
     private static Object anchoredWorld;
     private static float anchoredBandCenterZ = Float.NaN;
@@ -100,8 +115,44 @@ public final class AtcCloudVolumeRenderer {
 //1372
     private AtcCloudVolumeRenderer() {}
 
+    public static List<TuningValue> tuningValues() {
+        return TUNING_VALUES;
+    }
+
+    private static float cloudBottomY() {
+        return CLOUD_BOTTOM_Y.value();
+    }
+
+    private static float cloudHeight() {
+        return Math.max(1.0f, CLOUD_TOP_Y.value() - CLOUD_BOTTOM_Y.value());
+    }
+
+    private static float distantDeckY() {
+        return CLOUD_BOTTOM_Y.value() + DISTANT_DECK_OFFSET.value();
+    }
+
+    private static float bandTileLength() {
+        return cloudHeight() * CLOUD_PROFILE_ASPECT;
+    }
+
+    private static float bandTileSpacing() {
+        return bandTileLength() * BAND_TILE_SPACING_SCALE.value();
+    }
+
+    private static float bandTileRenderLength() {
+        return bandTileLength() * BAND_TILE_RENDER_SCALE.value();
+    }
+
+    private static float distantDeckUvLongAxis() {
+        return DISTANT_DECK_UV_SCALE.value() / DISTANT_DECK_UV_STRETCH;
+    }
+
+    private static float distantDeckUvShortAxis() {
+        return DISTANT_DECK_UV_SCALE.value() * 0.86f;
+    }
+
     public static float distantStructureCloudCutY() {
-        return DISTANT_DECK_Y;
+        return distantDeckY();
     }
 
     public static void renderDistantCloudLayer(float tickDelta, Camera camera) {
@@ -110,6 +161,11 @@ public final class AtcCloudVolumeRenderer {
 
         Vec3d camPos = camera.getPos();
         Matrix4f savedProj = new Matrix4f(RenderSystem.getProjectionMatrix());
+        Matrix4fStack mvStack = RenderSystem.getModelViewStack();
+        mvStack.pushMatrix();
+        Matrix4f savedModelView = new Matrix4f(mvStack);
+        mvStack.identity();
+        RenderSystem.applyModelViewMatrix();
         RenderSystem.setProjectionMatrix(extendedProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
 
         MatrixStack bobStack = new MatrixStack();
@@ -120,14 +176,18 @@ public final class AtcCloudVolumeRenderer {
         Matrix4f view = new Matrix4f(bobStack.peek().getPositionMatrix());
 
         float light = dayLight(mc, camPos, tickDelta);
+        float worldTime = cloudAnimationTime(mc, tickDelta);
         AtcSkyRenderer.CloudPalette palette = AtcSkyRenderer.cloudPalette(tickDelta);
         VertexConsumerProvider.Immediate immediate = mc.getBufferBuilders().getEntityVertexConsumers();
 
         RenderSystem.enableBlend();
         RenderSystem.depthMask(false);
         try {
-            renderDistantClouds(immediate, camPos, view, light, palette);
+            renderDistantClouds(immediate, camPos, view, worldTime, light, palette);
         } finally {
+            mvStack.set(savedModelView);
+            mvStack.popMatrix();
+            RenderSystem.applyModelViewMatrix();
             RenderSystem.depthMask(true);
             RenderSystem.setProjectionMatrix(savedProj, VertexSorter.BY_DISTANCE);
         }
@@ -143,6 +203,11 @@ public final class AtcCloudVolumeRenderer {
 
         Vec3d camPos = camera.getPos();
         Matrix4f savedProj = new Matrix4f(RenderSystem.getProjectionMatrix());
+        Matrix4fStack mvStack = RenderSystem.getModelViewStack();
+        mvStack.pushMatrix();
+        Matrix4f savedModelView = new Matrix4f(mvStack);
+        mvStack.identity();
+        RenderSystem.applyModelViewMatrix();
         RenderSystem.setProjectionMatrix(extendedProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
 
         MatrixStack bobStack = new MatrixStack();
@@ -152,7 +217,7 @@ public final class AtcCloudVolumeRenderer {
         bobStack.peek().getPositionMatrix().mul(viewMatrix(camera));
         Matrix4f view = new Matrix4f(bobStack.peek().getPositionMatrix());
 
-        float worldTime = (mc.world.getTime() + tickDelta) * 0.0125f;
+        float worldTime = cloudAnimationTime(mc, tickDelta);
         float light = dayLight(mc, camPos, tickDelta);
         AtcSkyRenderer.CloudPalette palette = AtcSkyRenderer.cloudPalette(tickDelta);
 
@@ -167,6 +232,9 @@ public final class AtcCloudVolumeRenderer {
         try {
             renderVolumeCloudBanks(immediate, mc, banks, camPos, view, worldTime, light, palette);
         } finally {
+            mvStack.set(savedModelView);
+            mvStack.popMatrix();
+            RenderSystem.applyModelViewMatrix();
             RenderSystem.depthMask(true);
             RenderSystem.setProjectionMatrix(savedProj, VertexSorter.BY_DISTANCE);
         }
@@ -182,6 +250,11 @@ public final class AtcCloudVolumeRenderer {
 
         Vec3d camPos = camera.getPos();
         Matrix4f savedProj = new Matrix4f(RenderSystem.getProjectionMatrix());
+        Matrix4fStack mvStack = RenderSystem.getModelViewStack();
+        mvStack.pushMatrix();
+        Matrix4f savedModelView = new Matrix4f(mvStack);
+        mvStack.identity();
+        RenderSystem.applyModelViewMatrix();
         RenderSystem.setProjectionMatrix(extendedProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
 
         MatrixStack bobStack = new MatrixStack();
@@ -191,7 +264,7 @@ public final class AtcCloudVolumeRenderer {
         bobStack.peek().getPositionMatrix().mul(viewMatrix(camera));
         Matrix4f view = new Matrix4f(bobStack.peek().getPositionMatrix());
 
-        float worldTime = (mc.world.getTime() + tickDelta) * 0.0125f;
+        float worldTime = cloudAnimationTime(mc, tickDelta);
         float light = dayLight(mc, camPos, tickDelta);
         AtcSkyRenderer.CloudPalette palette = AtcSkyRenderer.cloudPalette(tickDelta);
 
@@ -204,9 +277,12 @@ public final class AtcCloudVolumeRenderer {
         RenderSystem.enableBlend();
         RenderSystem.depthMask(false);
         try {
-            renderDistantClouds(immediate, camPos, view, light, palette);
+            renderDistantClouds(immediate, camPos, view, worldTime, light, palette);
             renderVolumeCloudBanks(immediate, mc, banks, camPos, view, worldTime, light, palette);
         } finally {
+            mvStack.set(savedModelView);
+            mvStack.popMatrix();
+            RenderSystem.applyModelViewMatrix();
             RenderSystem.depthMask(true);
             RenderSystem.setProjectionMatrix(savedProj, VertexSorter.BY_DISTANCE);
         }
@@ -221,6 +297,8 @@ public final class AtcCloudVolumeRenderer {
                                                float light,
                                                AtcSkyRenderer.CloudPalette palette) {
         ShaderProgram volumeProgram = AtcCloudShaders.PROGRAM;
+        RenderSystem.setShaderTexture(1, DISTRIBUTION_NOISE);
+        RenderSystem.setShaderTexture(2, CLOUD_DETAIL);
         volumeProgram.addSampler("Sampler1", mc.getTextureManager().getTexture(DISTRIBUTION_NOISE));
         volumeProgram.addSampler("Sampler2", mc.getTextureManager().getTexture(CLOUD_DETAIL));
         for (CloudBank bank : banks) {
@@ -236,50 +314,53 @@ public final class AtcCloudVolumeRenderer {
 
     private static List<CloudBank> buildVisibleBanks(Vec3d camPos) {
         boolean inCloudLayer = false;
-        int rowRadius = inCloudLayer ? IN_CLOUD_ROW_RADIUS : BAND_ROW_RADIUS;
-        float fadeStart = inCloudLayer ? IN_CLOUD_FADE_START : NEAR_VOLUME_FADE_START;
-        float fadeEnd = inCloudLayer ? IN_CLOUD_FADE_END : NEAR_VOLUME_FADE_END;
+        int rowRadius = inCloudLayer ? IN_CLOUD_ROW_RADIUS.intValue() : BAND_ROW_RADIUS.intValue();
+        float fadeStart = inCloudLayer ? IN_CLOUD_FADE_START.value() : NEAR_VOLUME_FADE_START.value();
+        float fadeEnd = inCloudLayer ? IN_CLOUD_FADE_END.value() : NEAR_VOLUME_FADE_END.value();
         float alphaScale = inCloudLayer ? 0.54f : 0.62f;
         List<CloudBank> banks = VISIBLE_BANKS;
         banks.clear();
-        float visualCloudHeight = CLOUD_HEIGHT * CLOUD_Y_RATIO;
+        float visualCloudHeight = cloudHeight() * CLOUD_Y_RATIO.value();
 
-        float halfWidth = BAND_TILE_RENDER_LENGTH * 0.5f;
+        float halfWidth = bandTileRenderLength() * 0.5f;
         float halfHeight = visualCloudHeight * 0.5f;
-        float halfDepth = BAND_WIDTH * 0.5f;
+        float halfDepth = BAND_WIDTH.value() * 0.5f;
 
         // Bottom-anchored version: cloud base stays at CLOUD_BOTTOM_Y
         if (Float.isNaN(anchoredBandCenterZ)) {
-            anchoredBandCenterZ = MathHelper.floor(camPos.z / BAND_ROW_SPACING) * BAND_ROW_SPACING;
+            anchoredBandCenterZ = MathHelper.floor(camPos.z / BAND_ROW_SPACING.value()) * BAND_ROW_SPACING.value();
         }
 
-        int centerRow = MathHelper.floor(((float) camPos.z - anchoredBandCenterZ) / BAND_ROW_SPACING);
+        int centerRow = MathHelper.floor(((float) camPos.z - anchoredBandCenterZ) / BAND_ROW_SPACING.value());
         for (int row = centerRow - rowRadius; row <= centerRow + rowRadius; row++) {
-            float rowCenterZ = anchoredBandCenterZ + row * BAND_ROW_SPACING;
+            float rowCenterZ = anchoredBandCenterZ + row * BAND_ROW_SPACING.value();
             float rowDistance = Math.abs(rowCenterZ - (float) camPos.z);
             if (rowDistance - halfDepth * 1.25f > fadeEnd) {
                 continue;
             }
             int tileRadius = tileRadiusForDistance(rowDistance, inCloudLayer);
-            float rowOffset = (hash01(row, 17) - 0.5f) * BAND_TILE_SPACING;
-            int centerTile = MathHelper.floor(((float) camPos.x - rowOffset) / BAND_TILE_SPACING);
+            float tileSpacing = bandTileSpacing();
+            float rowOffset = (hash01(row, 17) - 0.5f) * tileSpacing;
+            int centerTile = MathHelper.floor(((float) camPos.x - rowOffset) / tileSpacing);
 
             for (int tile = centerTile - tileRadius; tile <= centerTile + tileRadius; tile++) {
                 float seed = hash01(tile, row);
-                float jitterX = (hash01(tile, row * 13) - 0.5f) * BAND_TILE_SPACING * 0.35f;
-                float jitterZ = (hash01(row, tile * 19) - 0.5f) * BAND_ROW_SPACING * 0.75f;
+                float jitterX = (hash01(tile, row * 13) - 0.5f) * tileSpacing * 0.35f;
+                float jitterZ = (hash01(row, tile * 19) - 0.5f) * BAND_ROW_SPACING.value() * 0.75f;
                 float jitterY = (hash01(tile * 7, row * 11) - 0.5f) * 10.0f;
                 float heightScale = MathHelper.lerp(hash01(tile * 3, row * 5), 0.88f, 1.12f);
                 float widthScale = MathHelper.lerp(hash01(tile * 5, row * 3), 0.90f, 1.20f);
                 float depthScale = MathHelper.lerp(hash01(tile * 11, row * 7), 0.85f, 1.25f);
+                float motionScale = 1.0f;
+                float motionOffset = 0.0f;
                 float inCloudBulk = inCloudLayer ? 1.35f : 1.0f;
                 float localHalfWidth = halfWidth * widthScale * inCloudBulk;
                 float localHalfHeight = halfHeight * heightScale;
                 float localHalfDepth = halfDepth * depthScale * (inCloudLayer ? 1.55f : 1.0f);
-                float centerX = rowOffset + (tile + 0.5f) * BAND_TILE_SPACING + jitterX;
-                float centerY = CLOUD_BOTTOM_Y + localHalfHeight + jitterY;
+                float centerX = rowOffset + (tile + 0.5f) * tileSpacing + jitterX;
+                float centerY = cloudBottomY() + localHalfHeight + jitterY;
                 float centerZ = rowCenterZ + jitterZ;
-                float rowLod = MathHelper.clamp(Math.abs(centerZ - (float) camPos.z) / (rowRadius * BAND_ROW_SPACING), 0.0f, 1.0f);
+                float rowLod = MathHelper.clamp(Math.abs(centerZ - (float) camPos.z) / (rowRadius * BAND_ROW_SPACING.value()), 0.0f, 1.0f);
                 float horizontalDist = horizontalDistanceToBox(camPos, centerX, centerZ, localHalfWidth, localHalfDepth);
                 float nearFade = 1.0f - smoothstep(fadeStart, fadeEnd, horizontalDist);
                 if (nearFade <= 0.01f) {
@@ -311,7 +392,9 @@ public final class AtcCloudVolumeRenderer {
                         rowLod,
                         alpha,
                         stepCount,
-                        densityScale
+                        densityScale,
+                        motionScale,
+                        motionOffset
                 ));
             }
         }
@@ -320,13 +403,13 @@ public final class AtcCloudVolumeRenderer {
 
     private static int tileRadiusForDistance(float rowDistance, boolean inCloudLayer) {
         if (inCloudLayer) {
-            if (rowDistance <= BAND_ROW_SPACING * 2.0f) return IN_CLOUD_TILE_RADIUS_NEAR;
-            if (rowDistance <= BAND_ROW_SPACING * 4.0f) return IN_CLOUD_TILE_RADIUS_MID;
+            if (rowDistance <= BAND_ROW_SPACING.value() * 2.0f) return IN_CLOUD_TILE_RADIUS_NEAR.intValue();
+            if (rowDistance <= BAND_ROW_SPACING.value() * 4.0f) return IN_CLOUD_TILE_RADIUS_MID;
             return IN_CLOUD_TILE_RADIUS_FAR;
         }
-        if (rowDistance <= BAND_ROW_SPACING * 3.5f) return BAND_TILE_RADIUS_NEAR;
-        if (rowDistance <= BAND_ROW_SPACING * 8.5f) return BAND_TILE_RADIUS_MID;
-        return BAND_TILE_RADIUS_FAR;
+        if (rowDistance <= BAND_ROW_SPACING.value() * 3.5f) return BAND_TILE_RADIUS_NEAR.intValue();
+        if (rowDistance <= BAND_ROW_SPACING.value() * 8.5f) return BAND_TILE_RADIUS_MID.intValue();
+        return BAND_TILE_RADIUS_FAR.intValue();
     }
 
     private static int stepCountForDistance(float horizontalDistance, boolean inCloudLayer) {
@@ -360,6 +443,7 @@ public final class AtcCloudVolumeRenderer {
     private static void renderDistantClouds(VertexConsumerProvider.Immediate immediate,
                                             Vec3d camPos,
                                             Matrix4f view,
+                                            float worldTime,
                                             float light,
                                             AtcSkyRenderer.CloudPalette palette) {
         if (AtcCloudShaders.DISTANT_PROGRAM == null) return;
@@ -370,7 +454,7 @@ public final class AtcCloudVolumeRenderer {
         uploadPaletteUniforms(AtcCloudShaders.DISTANT_PROGRAM, palette);
 
         VertexConsumer deckVc = immediate.getBuffer(DISTANT_DECK_LAYER);
-        emitDistantDeck(deckVc, camPos, color, 255);
+        emitDistantDeck(deckVc, camPos, worldTime, color, 255);
         immediate.draw(DISTANT_DECK_LAYER);
 
         AtcCloudShaders.DISTANT_PROGRAM.bind();
@@ -382,20 +466,22 @@ public final class AtcCloudVolumeRenderer {
         immediate.draw(DISTANT_HORIZON_LAYER);
     }
 
-    private static void emitDistantDeck(VertexConsumer vc, Vec3d camPos, int color, int alpha) {
+    private static void emitDistantDeck(VertexConsumer vc, Vec3d camPos, float worldTime, int color, int alpha) {
         float centerX = (float) camPos.x;
         float centerZ = (float) camPos.z;
-        float y = DISTANT_DECK_Y;
+        float y = distantDeckY();
 
-        for (int ring = 0; ring < DISTANT_DECK_RINGS; ring++) {
-            float t0 = ring / (float) DISTANT_DECK_RINGS;
-            float t1 = (ring + 1) / (float) DISTANT_DECK_RINGS;
-            float r0 = MathHelper.lerp(t0 * t0, DISTANT_START, DISTANT_END);
-            float r1 = MathHelper.lerp(t1 * t1, DISTANT_START, DISTANT_END);
+        int ringCount = Math.max(1, DISTANT_DECK_RINGS.intValue());
+        int segmentCount = Math.max(8, DISTANT_RING_SEGMENTS.intValue());
+        for (int ring = 0; ring < ringCount; ring++) {
+            float t0 = ring / (float) ringCount;
+            float t1 = (ring + 1) / (float) ringCount;
+            float r0 = MathHelper.lerp(t0 * t0, DISTANT_START.value(), DISTANT_END.value());
+            float r1 = MathHelper.lerp(t1 * t1, DISTANT_START.value(), DISTANT_END.value());
 
-            for (int seg = 0; seg < DISTANT_RING_SEGMENTS; seg++) {
-                float a0 = (float) (seg * Math.PI * 2.0 / DISTANT_RING_SEGMENTS);
-                float a1 = (float) ((seg + 1) * Math.PI * 2.0 / DISTANT_RING_SEGMENTS);
+            for (int seg = 0; seg < segmentCount; seg++) {
+                float a0 = (float) (seg * Math.PI * 2.0 / segmentCount);
+                float a1 = (float) ((seg + 1) * Math.PI * 2.0 / segmentCount);
 
                 float x00 = centerX + MathHelper.cos(a0) * r0;
                 float z00 = centerZ + MathHelper.sin(a0) * r0;
@@ -415,7 +501,8 @@ public final class AtcCloudVolumeRenderer {
                         x10, y, z10,
                         color,
                         alpha0,
-                        alpha1);
+                        alpha1,
+                        worldTime);
             }
         }
     }
@@ -424,26 +511,28 @@ public final class AtcCloudVolumeRenderer {
         float centerX = (float) camPos.x;
         float centerZ = (float) camPos.z;
 
-        for (int layer = DISTANT_HORIZON_LAYERS - 1; layer >= 0; layer--) {
-            float t = layer / (float) (DISTANT_HORIZON_LAYERS - 1);
-            float radius = MathHelper.lerp((float) Math.pow(t, 1.5f), DISTANT_HORIZON_MIN_RADIUS, DISTANT_HORIZON_MAX_RADIUS);
+        int layerCount = Math.max(1, DISTANT_HORIZON_LAYERS.intValue());
+        int segmentCount = Math.max(8, DISTANT_RING_SEGMENTS.intValue());
+        for (int layer = layerCount - 1; layer >= 0; layer--) {
+            float t = layerCount <= 1 ? 0.0f : layer / (float) (layerCount - 1);
+            float radius = MathHelper.lerp((float) Math.pow(t, 1.5f), DISTANT_HORIZON_MIN_RADIUS.value(), DISTANT_HORIZON_MAX_RADIUS.value());
             float yRatio = MathHelper.lerp(t, 0.30f, 0.01f);
-            float height = CLOUD_HEIGHT * yRatio;
-            float y0 = CLOUD_BOTTOM_Y;
-            float y1 = CLOUD_BOTTOM_Y + height;
+            float height = cloudHeight() * yRatio;
+            float y0 = cloudBottomY();
+            float y1 = cloudBottomY() + height;
             int alpha = MathHelper.clamp((int) (baseAlpha * MathHelper.lerp(t, 0.85f, 0.35f)), 0, 255);
             float uRepeats = MathHelper.lerp(t, 10.0f, 24.0f);
             float uOffset = hash01(layer, 91) * 10.0f;
 
-            for (int seg = 0; seg < DISTANT_RING_SEGMENTS; seg++) {
-                float a0 = (float) (seg * Math.PI * 2.0 / DISTANT_RING_SEGMENTS);
-                float a1 = (float) ((seg + 1) * Math.PI * 2.0 / DISTANT_RING_SEGMENTS);
+            for (int seg = 0; seg < segmentCount; seg++) {
+                float a0 = (float) (seg * Math.PI * 2.0 / segmentCount);
+                float a1 = (float) ((seg + 1) * Math.PI * 2.0 / segmentCount);
                 float x0 = centerX + MathHelper.cos(a0) * radius;
                 float z0 = centerZ + MathHelper.sin(a0) * radius;
                 float x1 = centerX + MathHelper.cos(a1) * radius;
                 float z1 = centerZ + MathHelper.sin(a1) * radius;
-                float u0 = uOffset + (seg / (float) DISTANT_RING_SEGMENTS) * uRepeats;
-                float u1 = uOffset + ((seg + 1) / (float) DISTANT_RING_SEGMENTS) * uRepeats;
+                float u0 = uOffset + (seg / (float) segmentCount) * uRepeats;
+                float u1 = uOffset + ((seg + 1) / (float) segmentCount) * uRepeats;
 
                 emitVerticalQuadUv(vc,
                         x0, y0, z0,
@@ -458,8 +547,8 @@ public final class AtcCloudVolumeRenderer {
     }
 
     private static int distantDeckAlpha(int alpha, float radius) {
-        float fadeIn = smoothstep(DISTANT_FADE_START, DISTANT_FADE_END, radius);
-        float fadeOut = 1.0f - smoothstep(DISTANT_END * 0.75f, DISTANT_END, radius);
+        float fadeIn = smoothstep(DISTANT_FADE_START.value(), DISTANT_FADE_END.value(), radius);
+        float fadeOut = 1.0f - smoothstep(DISTANT_END.value() * 0.75f, DISTANT_END.value(), radius);
         return MathHelper.clamp((int) (alpha * fadeIn * Math.max(0.25f, fadeOut)), 0, 255);
     }
 
@@ -470,16 +559,18 @@ public final class AtcCloudVolumeRenderer {
                                              float x3, float y3, float z3,
                                              int color,
                                              int innerAlpha,
-                                             int outerAlpha) {
-        emitDeckVertex(vc, x0, y0, z0, color, innerAlpha);
-        emitDeckVertex(vc, x1, y1, z1, color, innerAlpha);
-        emitDeckVertex(vc, x2, y2, z2, color, outerAlpha);
-        emitDeckVertex(vc, x3, y3, z3, color, outerAlpha);
+                                             int outerAlpha,
+                                             float worldTime) {
+        emitDeckVertex(vc, x0, y0, z0, color, innerAlpha, worldTime);
+        emitDeckVertex(vc, x1, y1, z1, color, innerAlpha, worldTime);
+        emitDeckVertex(vc, x2, y2, z2, color, outerAlpha, worldTime);
+        emitDeckVertex(vc, x3, y3, z3, color, outerAlpha, worldTime);
     }
 
-    private static void emitDeckVertex(VertexConsumer vc, float x, float y, float z, int color, int alpha) {
-        float u = (x + z * 0.18f) * DISTANT_DECK_UV_LONG_AXIS;
-        float v = (z - x * 0.06f) * DISTANT_DECK_UV_SHORT_AXIS;
+    private static void emitDeckVertex(VertexConsumer vc, float x, float y, float z, int color, int alpha, float worldTime) {
+        float driftTime = worldTime * DISTANT_DECK_MOTION_SCALE.value();
+        float u = (x + z * 0.18f) * distantDeckUvLongAxis() + driftTime * DISTANT_DECK_U_DRIFT.value();
+        float v = (z - x * 0.06f) * distantDeckUvShortAxis() + driftTime * DISTANT_DECK_V_DRIFT.value();
         vc.vertex(x, y, z).color(color, color, color, alpha).texture(u, v).light(FULL_BRIGHT);
     }
 
@@ -539,7 +630,7 @@ public final class AtcCloudVolumeRenderer {
         setUniform3f(program, "uProfileHalfSize", bank.halfWidth, bank.halfHeight, bank.halfDepth);
         setUniform3f(program, "uProfileRight", bank.rightX, bank.rightZ, 0.0f);
         setUniform3f(program, "uProfileForward", bank.forwardX, bank.forwardZ, 0.0f);
-        setUniform1f(program, "uTime", worldTime);
+        setUniform1f(program, "uTime", worldTime * CLOSE_CLOUD_MOTION_SCALE.value() * bank.motionScale + bank.motionOffset);
         setUniform1f(program, "uSeed", bank.seed);
         setUniform1f(program, "uAlphaScale", bank.alpha);
         setUniform1f(program, "uLight", light);
@@ -598,6 +689,12 @@ public final class AtcCloudVolumeRenderer {
         return MathHelper.clamp(0.50f + 0.58f * luma, 0.50f, 1.0f);
     }
 
+    private static float cloudAnimationTime(MinecraftClient mc, float tickDelta) {
+        if (mc.world == null) return tickDelta;
+        long wrappedTicks = Math.floorMod(mc.world.getTime(), CLOUD_TIME_WRAP_TICKS);
+        return wrappedTicks + tickDelta;
+    }
+
     private static float distanceTint(CloudBank bank, Vec3d camPos) {
         return smoothstep(900_000.0f, 24_000_000.0f, (float) bank.distanceSq(camPos));
     }
@@ -651,6 +748,83 @@ public final class AtcCloudVolumeRenderer {
         );
     }
 
+    public static final class TuningValue {
+        private final String label;
+        private final float defaultValue;
+        private final float min;
+        private final float max;
+        private final boolean integer;
+        private float value;
+
+        private TuningValue(String label, float defaultValue, float min, float max, boolean integer) {
+            this.label = label;
+            this.defaultValue = defaultValue;
+            this.min = min;
+            this.max = max;
+            this.integer = integer;
+            this.value = defaultValue;
+        }
+
+        public String label() {
+            return label;
+        }
+
+        public float defaultValue() {
+            return defaultValue;
+        }
+
+        public float min() {
+            return min;
+        }
+
+        public float max() {
+            return max;
+        }
+
+        public boolean integer() {
+            return integer;
+        }
+
+        public float value() {
+            return value;
+        }
+
+        public int intValue() {
+            return MathHelper.clamp(Math.round(value), Math.round(min), Math.round(max));
+        }
+
+        public void set(float value) {
+            this.value = integer
+                    ? MathHelper.clamp(Math.round(value), Math.round(min), Math.round(max))
+                    : MathHelper.clamp(value, min, max);
+        }
+
+        public void reset() {
+            value = defaultValue;
+        }
+
+        public String formattedValue() {
+            return format(value);
+        }
+
+        public String formattedDefault() {
+            return format(defaultValue);
+        }
+
+        private String format(float value) {
+            if (integer) {
+                return Integer.toString(Math.round(value));
+            }
+            if (Math.abs(value) < 0.01f && value != 0.0f) {
+                return String.format(java.util.Locale.ROOT, "%.6f", value);
+            }
+            if (Math.abs(value) < 1.0f) {
+                return String.format(java.util.Locale.ROOT, "%.4f", value);
+            }
+            return String.format(java.util.Locale.ROOT, "%.2f", value);
+        }
+    }
+
     private record CloudBank(float minX,
                              float minY,
                              float minZ,
@@ -672,7 +846,9 @@ public final class AtcCloudVolumeRenderer {
                              float layerDepth,
                              float alpha,
                              int stepCount,
-                             float densityScale) {
+                             float densityScale,
+                             float motionScale,
+                             float motionOffset) {
         int alphaByte() {
             return MathHelper.clamp((int) (alpha * 255.0f), 0, 255);
         }

@@ -1,6 +1,7 @@
 package dev.fouriis.karmagate;
 
 import dev.fouriis.karmagate.client.AtcSkyFabricAdapter;
+import dev.fouriis.karmagate.client.AtcCloudConfigScreen;
 import dev.fouriis.karmagate.client.gridproject.CoralNeuronCircleManager;
 import dev.fouriis.karmagate.client.gridproject.StarMatrixPatternManager;
 import dev.fouriis.karmagate.client.network.ClientNetworking;
@@ -50,6 +51,8 @@ import dev.fouriis.karmagate.sound.MultiSound.Spec;
 import dev.fouriis.karmagate.sound.SteamAudioController;
 import net.brickcraftdream.librainworldmc.tool.api.SelectionToolRegistry;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
@@ -82,6 +85,7 @@ import java.util.Map;
 
 public class KarmaGateModClient implements ClientModInitializer {
 	private static KeyBinding ROOM_MAP_KEY;
+	private static boolean openAtcCloudConfigNextTick;
 
 	@Override
 	public void onInitializeClient() {
@@ -92,6 +96,8 @@ public class KarmaGateModClient implements ClientModInitializer {
 		// Register client networking
 		ClientNetworking.register();
 		FuelHoseWorldRenderer.register();
+		registerAtcCloudCommand();
+		ClientTickEvents.END_CLIENT_TICK.register(KarmaGateModClient::openPendingAtcCloudConfig);
 
 		// Register distant structure billboards
 		//dev.fouriis.karmagate.client.DistantStructuresRenderer.init();
@@ -371,5 +377,31 @@ public class KarmaGateModClient implements ClientModInitializer {
 			}
 		}
 		return GateAudioSpecs.ELEC_SCREW;
+	}
+
+	private static void registerAtcCloudCommand() {
+		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+			dispatcher.register(ClientCommandManager.literal("atcclouds")
+					.executes(context -> openAtcCloudConfig()));
+			dispatcher.register(ClientCommandManager.literal("atc_clouds")
+					.executes(context -> openAtcCloudConfig()));
+			dispatcher.register(ClientCommandManager.literal("atccloudconfig")
+					.executes(context -> openAtcCloudConfig()));
+			dispatcher.register(ClientCommandManager.literal("karmaClouds")
+					.executes(context -> openAtcCloudConfig()));
+		});
+	}
+
+	private static int openAtcCloudConfig() {
+		openAtcCloudConfigNextTick = true;
+		return 1;
+	}
+
+	private static void openPendingAtcCloudConfig(MinecraftClient client) {
+		if (!openAtcCloudConfigNextTick) {
+			return;
+		}
+		openAtcCloudConfigNextTick = false;
+		client.setScreen(new AtcCloudConfigScreen(client.currentScreen));
 	}
 }

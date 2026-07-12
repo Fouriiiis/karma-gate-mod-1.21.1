@@ -70,7 +70,7 @@ float sampleDetail(vec2 uv) {
 
 float volumeClumps(vec3 p, float u, float v, float d) {
     vec3 local = vec3(u, v, d);
-    vec2 drift = vec2(uTime * 0.010, -uTime * 0.006);
+    vec2 drift = vec2(uTime * 0.025, uTime * 0.018);
 
     float xy = sampleDetail(local.xy * vec2(3.4, 1.9) + vec2(uSeed * 1.7, 0.13) + drift);
     float zy = sampleDetail(local.zy * vec2(3.1, 2.2) + vec2(0.37, uSeed * 1.3) - drift * 0.7);
@@ -96,12 +96,14 @@ vec4 profileSample(vec3 p, out float profileDepth, out float clds) {
     profileDepth = clamp(0.5 + dot(toPoint, forward) / (halfSize.z * 2.0), 0.0, 1.0);
 
     float profileV = clamp(0.5 - (p.y - uProfileCenter.y) / (halfSize.y * 2.0), 0.0, 0.999);
-    vec2 sampleCoord = vec2(profileU, profileV);
+    float depthTint = clamp(uLayerDepth * 0.75, 0.0, 0.95);
+    float profileScroll = uTime * 0.025 * (1.0 - depthTint);
+    vec2 sampleCoord = vec2(fract(uSeed + profileU - profileScroll), profileV);
     vec2 profileOffset = vec2(0.5 - profileU, 0.6666667 - profileV);
     profileOffset.y *= 0.5;
 
     float h2Noise = texture(Sampler1, fract(vec2(sampleCoord.x * 1.5, sampleCoord.y * 0.75))).r;
-    float h2 = 0.5 - sin(h2Noise * 6.2831853) * 0.5;
+    float h2 = 0.5 - sin((uTime * 0.07 + h2Noise * 2.0) * 6.2831853) * 0.5;
     vec4 baseTex = texture(Sampler0, sampleCoord + profileOffset * 0.05 * h2 + vec2(0.0, mix(-1.0, 1.0, h2) * 0.01));
     float keyMask = cloudGreenKeyMask(baseTex);
     float redDepth = baseTex.r * keyMask;
@@ -182,7 +184,7 @@ float densityAt(vec3 p, out float tone) {
     float body = pow(clamp(dp, 0.0, 1.0), mix(1.16, 0.08, clds));
     float alphaShape = body * 1.18 - (1.0 - clds) * 0.22;
     alphaShape = clamp(alphaShape * mix(0.72, 1.16, clumpMask), 0.0, 1.0);
-    float mistNoise = texture(Sampler2, fract(p.xz * 0.003 + vec2(uTime * 0.010, -uTime * 0.006))).r;
+    float mistNoise = texture(Sampler2, fract(p.xz * 0.003 + vec2(uTime * 0.0025, 0.0))).r;
     float topMist = smoothstep(0.25, 0.85, mistNoise) * smoothstep(0.54, 0.92, q.y) * edgeFeather * 0.16;
     alphaShape = max(alphaShape * edgeFeather, topMist);
 
