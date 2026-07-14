@@ -1,6 +1,7 @@
 package dev.fouriis.karmagate.mixin.client;
 
 import dev.fouriis.karmagate.client.AtcCloudVolumeRenderer;
+import dev.fouriis.karmagate.client.AtcCowboyEasterEggRenderer;
 import dev.fouriis.karmagate.client.DistantStructuresRenderer;
 import dev.fouriis.karmagate.client.cubefold.CubeFoldEffect;
 import dev.fouriis.karmagate.client.gridproject.GridProjectRenderer;
@@ -35,6 +36,7 @@ public class GameRendererMixin {
         AtcCloudVolumeRenderer.renderDistantCloudLayer(tickDelta, camera);
         DistantStructuresRenderer.renderLate(tickDelta, camera);
         DistantStructuresRenderer.renderLightningLate(tickDelta, camera);
+        AtcCowboyEasterEggRenderer.render(tickDelta, camera);
         AtcCloudVolumeRenderer.renderVolumeClouds(tickDelta, camera);
         GridProjectRenderer.renderLate(tickDelta, camera);
     }

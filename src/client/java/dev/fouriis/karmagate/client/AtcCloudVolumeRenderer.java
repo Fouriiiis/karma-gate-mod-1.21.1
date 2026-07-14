@@ -95,6 +95,8 @@ public final class AtcCloudVolumeRenderer {
     public static final TuningValue DISTANT_DECK_MOTION_SCALE = new TuningValue("Deck Motion Scale", 0.10f, 0.0f, 2.0f, false);
     public static final TuningValue DISTANT_DECK_U_DRIFT = new TuningValue("Deck U Drift", 0.0009f, -0.0200f, 0.0200f, false);
     public static final TuningValue DISTANT_DECK_V_DRIFT = new TuningValue("Deck V Drift", -0.00045f, -0.0200f, 0.0200f, false);
+    public static final TuningValue COWBOY_EASTER_EGG_X = new TuningValue("Cowboy X", 0.0f, -100000.0f, 100000.0f, false);
+    public static final TuningValue COWBOY_EASTER_EGG_Z = new TuningValue("Cowboy Z", 0.0f, -100000.0f, 100000.0f, false);
 
     private static final List<TuningValue> TUNING_VALUES = List.of(
             CLOUD_BOTTOM_Y, CLOUD_TOP_Y, DISTANT_DECK_OFFSET,
@@ -106,7 +108,8 @@ public final class AtcCloudVolumeRenderer {
             DISTANT_START, DISTANT_FADE_START, DISTANT_FADE_END, DISTANT_END,
             DISTANT_DECK_RINGS, DISTANT_RING_SEGMENTS, DISTANT_HORIZON_LAYERS,
             DISTANT_HORIZON_MIN_RADIUS, DISTANT_HORIZON_MAX_RADIUS, DISTANT_DECK_UV_SCALE,
-            CLOSE_CLOUD_MOTION_SCALE, DISTANT_DECK_MOTION_SCALE, DISTANT_DECK_U_DRIFT, DISTANT_DECK_V_DRIFT
+            CLOSE_CLOUD_MOTION_SCALE, DISTANT_DECK_MOTION_SCALE, DISTANT_DECK_U_DRIFT, DISTANT_DECK_V_DRIFT,
+            COWBOY_EASTER_EGG_X, COWBOY_EASTER_EGG_Z
     );
 
     private static Object anchoredWorld;

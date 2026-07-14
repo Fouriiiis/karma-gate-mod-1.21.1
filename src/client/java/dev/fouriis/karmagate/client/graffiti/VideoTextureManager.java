@@ -191,10 +191,17 @@ public final class VideoTextureManager {
         int h = Math.min(srcH, dst.getHeight());
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
-                int argb = src.getRGB(x, y) | 0xFF000000; // force opaque
-                dst.setColor(x, y, argb);
+                int argb = src.getRGB(x, y);
+                int r = (argb >> 16) & 0xFF;
+                int g = (argb >> 8) & 0xFF;
+                int b = argb & 0xFF;
+                dst.setColor(x, y, nativeRgba(r, g, b, 255));
             }
         }
+    }
+
+    private static int nativeRgba(int r, int g, int b, int a) {
+        return (a << 24) | (b << 16) | (g << 8) | r;
     }
 
     /** Makes a texture-path safe for use in a Minecraft Identifier. */

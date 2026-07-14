@@ -2,6 +2,7 @@ package dev.fouriis.karmagate;
 
 import dev.fouriis.karmagate.client.AtcSkyFabricAdapter;
 import dev.fouriis.karmagate.client.AtcCloudConfigScreen;
+import dev.fouriis.karmagate.client.AtcCowboyEasterEggRenderer;
 import dev.fouriis.karmagate.client.gridproject.CoralNeuronCircleManager;
 import dev.fouriis.karmagate.client.gridproject.StarMatrixPatternManager;
 import dev.fouriis.karmagate.client.network.ClientNetworking;
@@ -64,6 +65,7 @@ import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.block.BlockState;
@@ -97,6 +99,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 		ClientNetworking.register();
 		FuelHoseWorldRenderer.register();
 		registerAtcCloudCommand();
+		registerCowboyEasterEgg();
 		ClientTickEvents.END_CLIENT_TICK.register(KarmaGateModClient::openPendingAtcCloudConfig);
 
 		// Register distant structure billboards
@@ -330,6 +333,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			RotWorldRenderer.clearCache();
 			CubeFoldEffect.clearForWorldTransition();
 			FuelHoseClientState.clear();
+			AtcCowboyEasterEggRenderer.stop();
 		});
 
 		// --- Wormgrass client hooks ---
@@ -359,6 +363,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			RotRenderCache.clearAll();
 			RotWorldRenderer.clearCache();
 			CubeFoldEffect.clearForWorldTransition();
+			AtcCowboyEasterEggRenderer.stop();
 		});
 	}
 
@@ -377,6 +382,16 @@ public class KarmaGateModClient implements ClientModInitializer {
 			}
 		}
 		return GateAudioSpecs.ELEC_SCREW;
+	}
+
+	private static void registerCowboyEasterEgg() {
+		ClientSendMessageEvents.ALLOW_CHAT.register(message -> {
+			if ("cowboy".equalsIgnoreCase(message.trim())) {
+				AtcCowboyEasterEggRenderer.trigger();
+				return false;
+			}
+			return true;
+		});
 	}
 
 	private static void registerAtcCloudCommand() {
