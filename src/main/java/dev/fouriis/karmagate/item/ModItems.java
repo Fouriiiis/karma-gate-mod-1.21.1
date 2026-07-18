@@ -61,6 +61,26 @@ public class ModItems {
         )
     );
 
+    public static final SpawnEggItem FIVE_PEBBLES_SPAWN_EGG = (SpawnEggItem) registerItem(
+        "five_pebbles_spawn_egg",
+        new SpawnEggItem(
+            KarmaGateMod.FIVE_PEBBLES_ENTITY_TYPE,
+            0xFF66CB,
+            0x17121F,
+            new Item.Settings().maxCount(64)
+        )
+    );
+
+    public static final SpawnEggItem LOOKS_TO_THE_MOON_SPAWN_EGG = (SpawnEggItem) registerItem(
+        "looks_to_the_moon_spawn_egg",
+        new SpawnEggItem(
+            KarmaGateMod.LOOKS_TO_THE_MOON_ENTITY_TYPE,
+            0x1B4557,
+            0x7D9A8D,
+            new Item.Settings().maxCount(64)
+        )
+    );
+
     private static Item registerItem(String name, Item item) {
         return Registry.register(Registries.ITEM, Identifier.of(KarmaGateMod.MOD_ID, name), item);
     }
@@ -78,6 +98,8 @@ public class ModItems {
             entries.add(SPIDER_SPAWN_EGG);
             entries.add(DADDY_LONG_LEGS_SPAWN_EGG);
             entries.add(YELLOW_OVERSEER_SPAWN_EGG);
+            entries.add(FIVE_PEBBLES_SPAWN_EGG);
+            entries.add(LOOKS_TO_THE_MOON_SPAWN_EGG);
         });
     }
 }

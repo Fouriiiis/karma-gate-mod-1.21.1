@@ -16,6 +16,9 @@ import dev.fouriis.karmagate.entity.centipede.SmallCentipedeEntity;
 import dev.fouriis.karmagate.entity.centipede.SmallCentiwingEntity;
 import dev.fouriis.karmagate.entity.daddy.DaddyLongLegsEntity;
 import dev.fouriis.karmagate.entity.garbworm.GarbageWormEntity;
+import dev.fouriis.karmagate.entity.oracle.FivePebblesEntity;
+import dev.fouriis.karmagate.entity.oracle.LooksToTheMoonEntity;
+import dev.fouriis.karmagate.entity.oracle.OracleEntity;
 import dev.fouriis.karmagate.entity.overseer.YellowOverseerEntity;
 import dev.fouriis.karmagate.entity.spider.SpiderEntity;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugEntity;
@@ -197,6 +200,26 @@ public class KarmaGateMod implements ModInitializer {
                     .build()
     );
 
+    public static final EntityType<FivePebblesEntity> FIVE_PEBBLES_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "five_pebbles"),
+            FabricEntityTypeBuilder.<FivePebblesEntity>create(SpawnGroup.CREATURE, FivePebblesEntity::new)
+                    .dimensions(EntityDimensions.fixed(0.65f, 1.55f))
+                    .trackRangeBlocks(128)
+                    .trackedUpdateRate(1)
+                    .build()
+    );
+
+    public static final EntityType<LooksToTheMoonEntity> LOOKS_TO_THE_MOON_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "looks_to_the_moon"),
+            FabricEntityTypeBuilder.<LooksToTheMoonEntity>create(SpawnGroup.CREATURE, LooksToTheMoonEntity::new)
+                    .dimensions(EntityDimensions.fixed(0.65f, 1.55f))
+                    .trackRangeBlocks(128)
+                    .trackedUpdateRate(1)
+                    .build()
+    );
+
 
     @Override
     public void onInitialize() {
@@ -224,6 +247,8 @@ public class KarmaGateMod implements ModInitializer {
         FabricDefaultAttributeRegistry.register(GARBAGE_WORM_ENTITY_TYPE, GarbageWormEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(DADDY_LONG_LEGS_ENTITY_TYPE, DaddyLongLegsEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(YELLOW_OVERSEER_ENTITY_TYPE, YellowOverseerEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(FIVE_PEBBLES_ENTITY_TYPE, OracleEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(LOOKS_TO_THE_MOON_ENTITY_TYPE, OracleEntity.createAttributes());
 
         // Register networking
         ModNetworking.register();
