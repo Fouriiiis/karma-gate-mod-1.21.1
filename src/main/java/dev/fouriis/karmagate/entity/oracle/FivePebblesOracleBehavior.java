@@ -28,7 +28,7 @@ public class FivePebblesOracleBehavior extends OracleBehavior {
         this.investigateAngle = oracle.getRandom().nextFloat() * 360f;
         this.baseAimDir = randomPlanarUnit();
         this.baseTargetDir = this.baseAimDir;
-        this.baseRetargetCounter = 40 + oracle.getRandom().nextInt(120);
+        this.baseRetargetCounter = 240 + oracle.getRandom().nextInt(360);
         this.idleCounter = 80 + oracle.getRandom().nextInt(180);
         this.meditate = oracle.getRandom().nextBoolean();
         this.oracleGetToPos = lastPos;
@@ -94,25 +94,25 @@ public class FivePebblesOracleBehavior extends OracleBehavior {
         nextHandle = getToDir().negate().multiply(distance * MathHelper.lerp(oracle.getRandom().nextFloat(), 0.3, 0.65));
         pathProgression = 0f;
         consistentBasePosCounter = 0;
-        if (oracle.getRandom().nextFloat() < 0.72f) {
+        if (oracle.getRandom().nextFloat() < 0.45f) {
             chooseNewBaseTarget();
         }
     }
 
     private void updateBaseIdeal() {
         baseRetargetCounter--;
-        if (baseRetargetCounter <= 0 || pathProgression >= 0.96f && oracle.getRandom().nextFloat() < 0.018f) {
+        if (baseRetargetCounter <= 0 || pathProgression >= 0.96f && oracle.getRandom().nextFloat() < 0.003f) {
             chooseNewBaseTarget();
         }
 
-        double blend = meditate ? 0.018 : 0.032;
+        double blend = meditate ? 0.006 : 0.012;
         baseAimDir = baseAimDir.multiply(1.0 - blend).add(baseTargetDir.multiply(blend));
         if (baseAimDir.lengthSquared() < 1.0E-6) {
             baseAimDir = randomPlanarUnit();
         } else {
             baseAimDir = new Vec3d(baseAimDir.x, baseAimDir.y, 0.0).normalize();
         }
-        if (baseAimDir.dotProduct(baseTargetDir) > 0.998 && oracle.getRandom().nextFloat() < 0.006f) {
+        if (baseAimDir.dotProduct(baseTargetDir) > 0.998 && oracle.getRandom().nextFloat() < 0.0015f) {
             chooseNewBaseTarget();
         }
     }
@@ -132,7 +132,7 @@ public class FivePebblesOracleBehavior extends OracleBehavior {
         } else {
             baseTargetDir = randomPlanarUnit();
         }
-        baseRetargetCounter = (meditate ? 160 : 70) + oracle.getRandom().nextInt(meditate ? 220 : 180);
+        baseRetargetCounter = (meditate ? 300 : 220) + oracle.getRandom().nextInt(meditate ? 400 : 360);
         consistentBasePosCounter = 0;
     }
 

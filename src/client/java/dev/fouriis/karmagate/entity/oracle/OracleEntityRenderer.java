@@ -21,8 +21,10 @@ import org.joml.Matrix4f;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 
 public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
     private static final Identifier WHITE_TEX = Identifier.of("minecraft", "textures/misc/white.png");
@@ -36,6 +38,14 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
     private static final float ARM_ROOT_CENTER_FROM_RAIL_PIXELS = 10.0f;
     private static final float ARM_ROOT_HALF_FROM_CENTER_PIXELS = 17.0f;
     private static final float ARM_ROOT_SOCKET_SURFACE_MARGIN_BLOCKS = 0.05f;
+    private static final double ARM_VISUAL_COLLISION_RADIUS_BLOCKS = 0.22;
+    private static final double ARM_VISUAL_COLLISION_SAMPLE_SPACING_BLOCKS = 0.3;
+    private static final Vec3d ARM_2D_NORMAL = new Vec3d(0.0, 0.0, 1.0);
+    private static final int UMBILICAL_MAIN_COORDS = 80;
+    private static final int UMBILICAL_SMALL_CORDS = 14;
+    private static final int UMBILICAL_SMALL_COORDS = 20;
+    private static final int UMBILICAL_TETHER_INDEX = UMBILICAL_MAIN_COORDS - 20;
+    private static final float UMBILICAL_MAIN_SPACING_PIXELS = 10.0f;
     private static final String[] UMBILICAL_MODEL_CANDIDATES = {
             "CentipedeSegment",
             "CentipedeBackShell",
@@ -52,6 +62,8 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
     private static FAtlasElement moonSigilSprite;
     private static Object umbilicalSegmentModel;
     private static final Map<String, Object> atlasSpriteModels = new HashMap<>();
+    private static final Map<Object, SpriteModelSnapshot> atlasSpriteModelSnapshots = new IdentityHashMap<>();
+    private static final Map<Integer, OracleUmbilicalState> umbilicalStates = new HashMap<>();
     private static boolean triedLoadSprites;
     private static boolean triedLoadUmbilicalModel;
 
@@ -64,8 +76,9 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
     public void render(OracleEntity entity, float yaw, float tickDelta, MatrixStack matrices,
                        VertexConsumerProvider vertexConsumers, int light) {
         int fullBright = LightmapTextureManager.MAX_LIGHT_COORDINATE;
+        Vec3d renderOrigin = entity.getLerpedPos(tickDelta);
         Vec3d bodyCenter = new Vec3d(0.0, entity.getHeight() * 0.58, 0.0);
-        Vec3d lookLocal = entity.getSyncedLookTarget().subtract(entity.getPos());
+        Vec3d lookLocal = entity.getSyncedLookTarget().subtract(renderOrigin);
         Vec3d forward = safeNormalize(lookLocal.subtract(bodyCenter), entity.getSyncedGetToDir());
         Vec3d[] frame = makeFrame(forward);
         Vec3d right = frame[0];
@@ -77,14 +90,14 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
         VertexConsumer lines = vertexConsumers.getBuffer(RenderLayer.LINES);
 
         Matrix4f matrix = matrices.peek().getPositionMatrix();
-        renderRailDebug(entity, lines, matrix, fullBright);
+        renderRailDebug(entity, lines, matrix, renderOrigin, fullBright);
         renderOracleBody(entity, solid, translucent, matrix, pose, light);
-        renderArm(entity, solid, translucent, matrix, pose, tickDelta, light);
-        renderUmbilical(entity, vertexConsumers, solid, matrix, pose, tickDelta, light);
-        renderDebugSkeleton(entity, lines, matrix, pose, fullBright);
-        renderDebugHitbox(entity, lines, matrix, fullBright);
+        renderArm(entity, solid, translucent, matrix, pose, renderOrigin, tickDelta, light);
+        renderUmbilical(entity, vertexConsumers, solid, matrix, pose, renderOrigin, tickDelta, light);
+        renderDebugSkeleton(entity, lines, matrix, pose, renderOrigin, tickDelta, fullBright);
+        renderDebugHitbox(entity, lines, matrix, renderOrigin, fullBright);
         renderSpriteAccents(entity, vertexConsumers, matrix, pose, right, up, forward, fullBright);
-        renderOracleFSprites(entity, vertexConsumers, matrix, pose, right, up, forward, fullBright, tickDelta);
+        renderOracleFSprites(entity, vertexConsumers, matrix, pose, right, up, forward, renderOrigin, fullBright, tickDelta);
         renderLookLine(lines, matrix, pose.head, lookLocal, fullBright);
 
         super.render(entity, yaw, tickDelta, matrices, vertexConsumers, light);
@@ -129,12 +142,12 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
     }
 
     private static void renderArm(OracleEntity entity, VertexConsumer solid, VertexConsumer translucent,
-                                  Matrix4f matrix, OraclePose pose, float tickDelta, int light) {
+                                  Matrix4f matrix, OraclePose pose, Vec3d renderOrigin, float tickDelta, int light) {
         int metalColor = entity.getOracleId().armColor();
         int baseColor = oracleArmSegmentColor(entity, false);
         int highlightColor = oracleArmSegmentColor(entity, true);
-        Vec3d faceNormal = safeNormalize(entity.getSyncedGetToDir(), new Vec3d(0.0, 0.0, 1.0));
-        List<Vec3d> points = armVisualPoints(entity, tickDelta, faceNormal, pose.hips);
+        Vec3d faceNormal = armPlaneNormal();
+        List<Vec3d> points = armVisualPoints(entity, tickDelta, faceNormal, pose.hips, renderOrigin);
         for (int i = 0; i < points.size() - 1; i++) {
             int logicalIndex = Math.min(i / 2, 3);
             float width = switch (i) {
@@ -234,20 +247,20 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
                 px(7.0f), px(7.0f), colorR(metal), colorG(metal), colorB(metal), 235, light);
     }
 
-    private static List<Vec3d> armVisualPoints(OracleEntity entity, float tickDelta, Vec3d faceNormal, Vec3d lowerBodyAnchor) {
+    private static List<Vec3d> armVisualPoints(OracleEntity entity, float tickDelta, Vec3d faceNormal,
+                                               Vec3d lowerBodyAnchor, Vec3d renderOrigin) {
         Joint[] joints = entity.getArm().joints();
-        Vec3d entityPos = entity.getPos();
-        Vec3d body = lowerBodyAnchor;
         if (joints.length == 0) {
-            return List.of(body);
+            return List.of(flattenLocalToArmPlane(entity, lowerBodyAnchor, renderOrigin));
         }
 
         Vec3d[] localJoints = new Vec3d[joints.length];
         for (Joint joint : joints) {
             JointView view = joint.view();
-            localJoints[view.index()] = lerp(view.lastPos(), view.pos(), tickDelta).subtract(entityPos);
+            localJoints[view.index()] = flattenWorldToArmPlane(entity, lerp(view.lastPos(), view.pos(), tickDelta)).subtract(renderOrigin);
         }
         localJoints[0] = localJoints[0].add(armRootJointOffset(entity));
+        Vec3d body = flattenWorldToArmPlane(entity, lowerBodyAnchor.add(renderOrigin)).subtract(renderOrigin);
 
         List<Vec3d> points = new ArrayList<>(joints.length * 2);
         points.add(localJoints[0]);
@@ -255,15 +268,12 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
             Vec3d start = localJoints[i];
             Vec3d end = i + 1 < joints.length ? localJoints[i + 1] : body;
             double length = joints[i].view().length();
-            Vec3d pole = i == 0
-                    ? entity.chamberTrackTangentDir(entity.getSyncedBaseTarget())
-                    : armBendPole(start, end, faceNormal, i);
             double firstLength = length / 3.0;
             double secondLength = i + 1 < joints.length ? length * 2.0 / 3.0 : length / 3.0;
-            points.add(solveKnee3D(start, end, firstLength, secondLength, pole));
+            points.add(solveKnee2D(start, end, firstLength, secondLength, i));
             points.add(end);
         }
-        return points;
+        return collideArmVisualPoints(entity, points, renderOrigin);
     }
 
     private static Vec3d armBendPole(Vec3d start, Vec3d end, Vec3d faceNormal, int index) {
@@ -275,11 +285,72 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
         return side.multiply(index % 2 == 0 ? 1.0 : -1.0);
     }
 
+    private static Vec3d armPlaneNormal() {
+        return ARM_2D_NORMAL;
+    }
+
+    private static Vec3d flattenWorldToArmPlane(OracleEntity entity, Vec3d worldPoint) {
+        return new Vec3d(worldPoint.x, worldPoint.y, entity.getChamberCenter().z);
+    }
+
+    private static Vec3d flattenLocalToArmPlane(OracleEntity entity, Vec3d localPoint, Vec3d renderOrigin) {
+        return flattenWorldToArmPlane(entity, localPoint.add(renderOrigin)).subtract(renderOrigin);
+    }
+
     private static Vec3d armRootJointOffset(OracleEntity entity) {
         Vec3d baseDir = entity.chamberTrackInwardDir(entity.getSyncedBaseTarget()).negate();
         Vec3d awayFromRail = baseDir.negate();
         return awayFromRail.multiply(px(ARM_ROOT_CENTER_FROM_RAIL_PIXELS + ARM_ROOT_HALF_FROM_CENTER_PIXELS)
                 + ARM_ROOT_SOCKET_SURFACE_MARGIN_BLOCKS);
+    }
+
+    private static List<Vec3d> collideArmVisualPoints(OracleEntity entity, List<Vec3d> localPoints, Vec3d renderOrigin) {
+        if (localPoints.size() < 3) {
+            return localPoints;
+        }
+        List<Vec3d> collided = new ArrayList<>(localPoints);
+        for (int i = 1; i < collided.size() - 1; i++) {
+            Vec3d worldPoint = collided.get(i).add(renderOrigin);
+            Vec3d adjusted = OraclePhysicsUtil.collidePoint(entity.getWorld(), worldPoint,
+                    ARM_VISUAL_COLLISION_RADIUS_BLOCKS, entity.getOracleCollisionCache());
+            collided.set(i, flattenWorldToArmPlane(entity, adjusted).subtract(renderOrigin));
+        }
+        for (int pass = 0; pass < 2; pass++) {
+            for (int i = 0; i < collided.size() - 1; i++) {
+                Vec3d start = collided.get(i).add(renderOrigin);
+                Vec3d end = collided.get(i + 1).add(renderOrigin);
+                Vec3d correction = OraclePhysicsUtil.segmentCollisionCorrection(entity.getWorld(), start, end,
+                        ARM_VISUAL_COLLISION_RADIUS_BLOCKS, ARM_VISUAL_COLLISION_SAMPLE_SPACING_BLOCKS,
+                        entity.getOracleCollisionCache());
+                correction = new Vec3d(correction.x, correction.y, 0.0);
+                if (correction.lengthSquared() < 1.0E-8) {
+                    continue;
+                }
+                boolean startPinned = i == 0;
+                boolean endPinned = i + 1 == collided.size() - 1;
+                if (!startPinned) {
+                    collided.set(i, collided.get(i).add(correction.multiply(endPinned ? 1.0 : 0.5)));
+                }
+                if (!endPinned) {
+                    collided.set(i + 1, collided.get(i + 1).add(correction.multiply(startPinned ? 1.0 : 0.5)));
+                }
+            }
+        }
+        for (int i = 0; i < collided.size(); i++) {
+            collided.set(i, flattenLocalToArmPlane(entity, collided.get(i), renderOrigin));
+        }
+        return collided;
+    }
+
+    private static Vec3d umbilicalTetherAnchor(List<Vec3d> armPoints, Vec3d faceNormal) {
+        if (armPoints.size() < 4) {
+            return armPoints.isEmpty() ? Vec3d.ZERO : armPoints.get(armPoints.size() - 1);
+        }
+        Vec3d joint = armPoints.get(2);
+        Vec3d elbow = armPoints.get(3);
+        Vec3d segment = elbow.subtract(joint);
+        Vec3d perpendicular = safeNormalize(faceNormal.crossProduct(segment), new Vec3d(0.0, 1.0, 0.0));
+        return joint.lerp(elbow, 0.4).add(perpendicular.multiply(px(8.0f)));
     }
 
     private static Vec3d quadratic(Vec3d a, Vec3d b, Vec3d c, float t) {
@@ -295,36 +366,58 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
     }
 
     private static void renderUmbilical(OracleEntity entity, VertexConsumerProvider vertexConsumers, VertexConsumer fallbackVc,
-                                        Matrix4f matrix, OraclePose pose, float tickDelta, int light) {
+                                        Matrix4f matrix, OraclePose pose, Vec3d renderOrigin, float tickDelta, int light) {
         int color = entity.getOracleId() == OracleId.LOOKS_TO_THE_MOON ? 0x303742 : 0x08060B;
-        Vec3d base = entity.getSyncedBaseTarget().subtract(entity.getPos());
-        Vec3d body = pose.hips;
         float t = entity.age + tickDelta;
+        boolean zeroG = entity.isZeroG();
+        Object model = getUmbilicalSegmentModel();
 
-        List<Vec3d> points = new ArrayList<>();
-        if (entity.getOracleId() == OracleId.LOOKS_TO_THE_MOON) {
-            points.add(body);
-            points.add(body.add(-0.25, -0.5, MathHelper.sin(t * 0.05f) * 0.12f));
-            points.add(body.add(-0.65, -0.9, MathHelper.cos(t * 0.04f) * 0.18f));
-            points.add(body.add(-1.05, -1.08, 0.0));
-        } else {
-            Vec3d mid = base.lerp(body, 0.55).add(0.0, -0.45 + MathHelper.sin(t * 0.035f) * 0.08, 0.0);
-            points.add(base);
-            points.add(base.lerp(mid, 0.55));
-            points.add(mid);
-            points.add(mid.lerp(body, 0.55));
-            points.add(body);
+        if (entity.getOracleId() == OracleId.FIVE_PEBBLES) {
+            OracleUmbilicalState state = umbilicalStates.computeIfAbsent(entity.getId(), OracleUmbilicalState::new);
+            List<Vec3d> armPoints = armVisualPoints(entity, tickDelta, armPlaneNormal(), pose.hips, renderOrigin);
+            Vec3d chamberCenter = entity.getChamberCenter();
+            Vec3d bottomRailAnchor = chamberCenter.add(0.0, -OracleEntity.CHAMBER_TRACK_HALF_WIDTH, 0.0);
+            Vec3d tetherAnchor = umbilicalTetherAnchor(armPoints, armPlaneNormal()).add(renderOrigin);
+            Vec3d firstChunkAnchor = pose.chest.add(renderOrigin);
+            Vec3d headAnchor = pose.head.add(renderOrigin);
+            Vec3d headLookDir = safeNormalize(entity.getSyncedLookTarget().subtract(headAnchor), entity.getSyncedGetToDir());
+            state.update(entity, entity.age, bottomRailAnchor, tetherAnchor, firstChunkAnchor, headAnchor, headLookDir, zeroG);
+
+            List<Vec3d> points = state.mainPoints(tickDelta, renderOrigin);
+            if (model != null && modelTexture(model) != null) {
+                try {
+                    renderUmbilicalModels(vertexConsumers, matrix, model, points, px(1.2f), color, lighten(color, 0.28f), light);
+                    for (int i = 0; i < UMBILICAL_SMALL_CORDS; i++) {
+                        int cordColor = state.smallCordColor(i, color);
+                        renderUmbilicalModels(vertexConsumers, matrix, model, state.smallCordPoints(i, tickDelta, renderOrigin),
+                                px(0.5f), cordColor, lighten(cordColor, 0.25f), light);
+                    }
+                    return;
+                } catch (RuntimeException | LinkageError ignored) {
+                    umbilicalSegmentModel = null;
+                    triedLoadUmbilicalModel = true;
+                }
+            }
+            renderTube(fallbackVc, matrix, points, px(1.2f), px(0.9f), color, 235, light);
+            for (int i = 0; i < UMBILICAL_SMALL_CORDS; i++) {
+                int cordColor = state.smallCordColor(i, color);
+                renderTube(fallbackVc, matrix, state.smallCordPoints(i, tickDelta, renderOrigin),
+                        px(0.5f), px(0.35f), cordColor, 235, light);
+            }
+            return;
         }
 
-        Object model = getUmbilicalSegmentModel();
+        List<Vec3d> points = new ArrayList<>();
+        Vec3d body = pose.hips;
+        points.add(body);
+        points.add(body.add(-0.25, -0.5, MathHelper.sin(t * 0.05f) * 0.12f));
+        points.add(body.add(-0.65, -0.9, MathHelper.cos(t * 0.04f) * 0.18f));
+        points.add(body.add(-1.05, -1.08, 0.0));
+
         if (model != null && modelTexture(model) != null) {
             try {
                 renderUmbilicalModels(vertexConsumers, matrix, model, points, px(1.2f), color, lighten(color, 0.28f), light);
-                if (entity.getOracleId() == OracleId.FIVE_PEBBLES) {
-                    renderPebblesSmallCords(vertexConsumers, matrix, model, points.get(points.size() - 1), pose.head, t, color, light);
-                } else {
-                    renderMoonDisconnectedCords(vertexConsumers, matrix, model, pose.hips, t, color, light);
-                }
+                renderMoonDisconnectedCords(vertexConsumers, matrix, model, pose.hips, t, color, zeroG, light);
                 return;
             } catch (RuntimeException | LinkageError ignored) {
                 umbilicalSegmentModel = null;
@@ -364,6 +457,11 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
     private static void renderUmbilicalModels(VertexConsumerProvider vertexConsumers, Matrix4f matrix,
                                               Object model, List<Vec3d> points,
                                               float halfWidth, int baseColor, int highlightColor, int light) {
+        SpriteModelSnapshot snapshot = spriteModelSnapshot(model);
+        if (snapshot == null) {
+            return;
+        }
+        VertexConsumer vc = vertexConsumers.getBuffer(RenderLayer.getEntityCutoutNoCull(snapshot.texture()));
         Vec3d faceHint = new Vec3d(0.0, 1.0, 0.0);
         for (int i = 0; i < points.size() - 1; i++) {
             Vec3d start = points.get(i);
@@ -371,7 +469,7 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
             if (start.squaredDistanceTo(end) < 1.0E-5) {
                 continue;
             }
-            renderSpriteModelSpan(vertexConsumers, matrix, model, start, end, halfWidth, faceHint, baseColor, highlightColor, 235, light);
+            renderSpriteModelSpan(vc, matrix, snapshot, start, end, halfWidth, faceHint, baseColor, highlightColor, 235, light);
         }
     }
 
@@ -396,26 +494,26 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
     }
 
     private static void renderMoonDisconnectedCords(VertexConsumerProvider vertexConsumers, Matrix4f matrix,
-                                                    Object model, Vec3d root, float age, int baseColor, int light) {
+                                                    Object model, Vec3d root, float age, int baseColor, boolean zeroG, int light) {
         for (int i = 0; i < 6; i++) {
             double angle = i * Math.PI * 2.0 / 6.0;
             double length = 0.22 + (i % 4) * 0.075;
-            Vec3d dir = new Vec3d(Math.cos(angle) * 0.55, -0.8, Math.sin(angle) * 0.55).normalize();
-            Vec3d mid = root.add(dir.multiply(length * 0.55)).add(0.0, Math.sin(age * 0.05 + i) * 0.035, 0.0);
-            Vec3d end = root.add(dir.multiply(length)).add(0.0, Math.cos(age * 0.04 + i) * 0.05, 0.0);
+            Vec3d dir = new Vec3d(Math.cos(angle) * 0.55, zeroG ? Math.sin(age * 0.02 + i) * 0.18 : -0.8, Math.sin(angle) * 0.55).normalize();
+            double floatY = zeroG ? Math.sin(age * 0.05 + i) * 0.055 : Math.sin(age * 0.05 + i) * 0.035;
+            Vec3d mid = root.add(dir.multiply(length * 0.55)).add(0.0, floatY, 0.0);
+            Vec3d end = root.add(dir.multiply(length)).add(0.0, zeroG ? Math.cos(age * 0.04 + i) * 0.07 : Math.cos(age * 0.04 + i) * 0.05, 0.0);
             int color = i % 2 == 0 ? lighten(baseColor, 0.18f) : mixColor(0x334CFF, baseColor, 0.45f);
             renderUmbilicalModels(vertexConsumers, matrix, model, List.of(root, mid, end), px(0.5f), color, lighten(color, 0.25f), light);
         }
     }
 
-    private static void renderSpriteModelSpan(VertexConsumerProvider vertexConsumers, Matrix4f matrix,
-                                              Object model, Vec3d start, Vec3d end,
+    private static void renderSpriteModelSpan(VertexConsumer vc, Matrix4f matrix,
+                                              SpriteModelSnapshot model, Vec3d start, Vec3d end,
                                               float halfWidth, Vec3d faceHint,
                                               int baseColor, int highlightColor, int alpha, int light) {
         Vec3d limbDir = end.subtract(start);
         double limbLen = limbDir.length();
-        Identifier texture = modelTexture(model);
-        if (limbLen < 0.001 || texture == null) {
+        if (limbLen < 0.001) {
             return;
         }
 
@@ -436,8 +534,8 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
             widthDir = widthDir.normalize();
         }
 
-        float modelWidth = Math.max(modelWidth(model), 1f);
-        float modelHeight = Math.max(modelHeight(model), 1f);
+        float modelWidth = model.width();
+        float modelHeight = model.height();
         float xScale = (halfWidth * 2f) / modelWidth;
         float yScale = (float) (limbLen / modelHeight);
         float zScale = xScale;
@@ -449,8 +547,7 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
         int highG = (highlightColor >> 8) & 0xFF;
         int highB = highlightColor & 0xFF;
 
-        VertexConsumer vc = vertexConsumers.getBuffer(RenderLayer.getEntityCutoutNoCull(texture));
-        for (Object quad : modelQuads(model)) {
+        for (Object quad : model.quads()) {
             Vec3d normal = transformModelNormal(widthDir, tangent, face,
                     invokeFloat(quad, "normalX"), invokeFloat(quad, "normalY"), invokeFloat(quad, "normalZ"));
             emitSpriteModelVertex(matrix, vc, modelWidth, modelHeight, xScale, yScale, zScale,
@@ -466,6 +563,24 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
                     start, widthDir, tangent, face, normal, invokeObject(quad, "d"),
                     baseR, baseG, baseB, highR, highG, highB, alpha, light);
         }
+    }
+
+    private static SpriteModelSnapshot spriteModelSnapshot(Object model) {
+        if (model == null) {
+            return null;
+        }
+        SpriteModelSnapshot cached = atlasSpriteModelSnapshots.get(model);
+        if (cached != null) {
+            return cached;
+        }
+        Identifier texture = modelTexture(model);
+        List<Object> quads = modelQuads(model);
+        if (texture == null || quads.isEmpty()) {
+            return null;
+        }
+        SpriteModelSnapshot snapshot = new SpriteModelSnapshot(texture, Math.max(modelWidth(model), 1f), Math.max(modelHeight(model), 1f), quads);
+        atlasSpriteModelSnapshots.put(model, snapshot);
+        return snapshot;
     }
 
     @SuppressWarnings("unchecked")
@@ -559,7 +674,8 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
         return 0f;
     }
 
-    private static void renderDebugSkeleton(OracleEntity entity, VertexConsumer lines, Matrix4f matrix, OraclePose pose, int light) {
+    private static void renderDebugSkeleton(OracleEntity entity, VertexConsumer lines, Matrix4f matrix, OraclePose pose,
+                                            Vec3d renderOrigin, float tickDelta, int light) {
         int lineColor = entity.getOracleId() == OracleId.FIVE_PEBBLES ? 0xFF4CC7 : 0x47C7FF;
         line(lines, matrix, pose.hips, pose.chest, lineColor, light);
         line(lines, matrix, pose.chest, pose.neck, 0xFFFFFF, light);
@@ -569,14 +685,14 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
         line(lines, matrix, pose.hips, pose.leftFoot, 0x46A5FF, light);
         line(lines, matrix, pose.hips, pose.rightFoot, 0x46A5FF, light);
 
-        List<Vec3d> armPoints = armVisualPoints(entity, 1.0f, entity.getSyncedGetToDir(), pose.hips);
+        List<Vec3d> armPoints = armVisualPoints(entity, tickDelta, armPlaneNormal(), pose.hips, renderOrigin);
         for (int i = 0; i < armPoints.size() - 1; i++) {
             line(lines, matrix, armPoints.get(i), armPoints.get(i + 1), 0xFFD34D, light);
         }
     }
 
-    private static void renderDebugHitbox(OracleEntity entity, VertexConsumer lines, Matrix4f matrix, int light) {
-        Box box = entity.getBoundingBox().offset(entity.getPos().negate());
+    private static void renderDebugHitbox(OracleEntity entity, VertexConsumer lines, Matrix4f matrix, Vec3d renderOrigin, int light) {
+        Box box = entity.getBoundingBox().offset(renderOrigin.negate());
         Vec3d a = new Vec3d(box.minX, box.minY, box.minZ);
         Vec3d b = new Vec3d(box.maxX, box.minY, box.minZ);
         Vec3d c = new Vec3d(box.maxX, box.minY, box.maxZ);
@@ -606,14 +722,13 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
         }
     }
 
-    private static void renderRailDebug(OracleEntity entity, VertexConsumer lines, Matrix4f matrix, int light) {
-        Vec3d entityPos = entity.getPos();
+    private static void renderRailDebug(OracleEntity entity, VertexConsumer lines, Matrix4f matrix, Vec3d renderOrigin, int light) {
         Vec3d center = entity.getChamberCenter();
         for (OracleEntity.RailSegment segment : OracleEntity.chamberRailSegments(center)) {
-            line(lines, matrix, segment.start().subtract(entityPos), segment.end().subtract(entityPos), 0x70F5FF, light);
+            line(lines, matrix, segment.start().subtract(renderOrigin), segment.end().subtract(renderOrigin), 0x70F5FF, light);
         }
         for (Vec3d junction : OracleEntity.chamberRailJunctions(center)) {
-            Vec3d local = junction.subtract(entityPos);
+            Vec3d local = junction.subtract(renderOrigin);
             line(lines, matrix, local.add(-0.16, 0.0, 0.0), local.add(0.16, 0.0, 0.0), 0xFFFFFF, light);
             line(lines, matrix, local.add(0.0, -0.16, 0.0), local.add(0.0, 0.16, 0.0), 0xFFFFFF, light);
             line(lines, matrix, local.add(0.0, 0.0, -0.16), local.add(0.0, 0.0, 0.16), 0xFFFFFF, light);
@@ -650,7 +765,7 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
 
     private static void renderOracleFSprites(OracleEntity entity, VertexConsumerProvider vertexConsumers, Matrix4f matrix,
                                              OraclePose pose, Vec3d right, Vec3d up, Vec3d forward,
-                                             int light, float tickDelta) {
+                                             Vec3d renderOrigin, int light, float tickDelta) {
         loadSprites();
         int skin = entity.getOracleId().skinColor();
         int robe = entity.getOracleId().robeColor();
@@ -660,8 +775,8 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
         renderBodyCircleSprites(vertexConsumers, matrix, pose, right, up, forward, skin, robe, light);
         renderPhoneSprites(entity, vertexConsumers, matrix, pose, right, up, forward, arm, light);
         renderHandFootGlyphs(vertexConsumers, matrix, pose, right, up, forward, skin, light);
-        renderArmBaseFSprites(entity, vertexConsumers, matrix, pose, forward, arm, tickDelta, light);
-        renderArmFSprites(entity, vertexConsumers, matrix, pose, right, up, forward, arm, tickDelta, light);
+        renderArmBaseFSprites(entity, vertexConsumers, matrix, pose, forward, renderOrigin, arm, tickDelta, light);
+        renderArmFSprites(entity, vertexConsumers, matrix, pose, right, up, forward, renderOrigin, arm, tickDelta, light);
         renderFutileWhiteGlow(entity, vertexConsumers, matrix, pose, right, up, forward, age, light);
 
         if (entity.getOracleId() == OracleId.FIVE_PEBBLES) {
@@ -725,49 +840,52 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
     }
 
     private static void renderArmFSprites(OracleEntity entity, VertexConsumerProvider vertexConsumers, Matrix4f matrix,
-                                          OraclePose pose, Vec3d right, Vec3d up, Vec3d forward, int armColor, float tickDelta, int light) {
+                                          OraclePose pose, Vec3d right, Vec3d up, Vec3d forward, Vec3d renderOrigin,
+                                          int armColor, float tickDelta, int light) {
         VertexConsumer pixel = vertexConsumers.getBuffer(RenderLayer.getEntityCutoutNoCull(WHITE_TEX));
         int highlight = lighten(armColor, 0.35f);
-        List<Vec3d> armPoints = armVisualPoints(entity, tickDelta, forward, pose.hips);
+        Vec3d armNormal = armPlaneNormal();
+        List<Vec3d> armPoints = armVisualPoints(entity, tickDelta, armNormal, pose.hips, renderOrigin);
         for (int i = 0; i < armPoints.size() - 1; i++) {
             Vec3d jointLocal = armPoints.get(i);
             Vec3d nextLocal = armPoints.get(i + 1);
             Vec3d jointToNext = safeNormalize(nextLocal.subtract(jointLocal), up);
-            Vec3d spriteRight = safeNormalize(forward.crossProduct(jointToNext), right);
+            Vec3d spriteRight = safeNormalize(armNormal.crossProduct(jointToNext), right);
             Vec3d spriteUp = safeNormalize(jointToNext, up);
             int logicalIndex = Math.min(i / 2, 3);
             float scale = px(Math.max(2.0f, (i % 2 == 0 ? 7.0f : 6.0f) - logicalIndex * 1.2f));
             if (i % 2 == 0) {
                 renderCogBars(pixel, matrix, jointLocal.add(jointToNext.multiply(i == 0 ? px(12.0f) : px(2.0f))),
-                        jointToNext, forward, armColor, logicalIndex, entity.age + tickDelta, light);
+                        jointToNext, armNormal, armColor, logicalIndex, entity.age + tickDelta, light);
             }
             if (circleSprite != null) {
-                renderAtlasModelOrQuad("Circle20", vertexConsumers, matrix, circleSprite, jointLocal, spriteRight, spriteUp, forward, scale, scale,
+                renderAtlasModelOrQuad("Circle20", vertexConsumers, matrix, circleSprite, jointLocal, spriteRight, spriteUp, armNormal, scale, scale,
                         colorR(armColor), colorG(armColor), colorB(armColor), 245, light, false);
             }
             if (eyeSprite != null) {
-                renderAtlasModelOrQuad("deerEyeB", vertexConsumers, matrix, eyeSprite, jointLocal.add(forward.multiply(px(0.35f))), spriteRight, spriteUp, forward,
+                renderAtlasModelOrQuad("deerEyeB", vertexConsumers, matrix, eyeSprite, jointLocal.add(armNormal.multiply(px(0.35f))), spriteRight, spriteUp, armNormal,
                         scale * 0.58f, scale * 0.38f, colorR(highlight), colorG(highlight), colorB(highlight), 220, light, false);
             }
             if (mirosLegSmallPartSprite != null && i % 2 == 1 && logicalIndex < 3) {
                 renderAtlasModelOrQuad("MirosLegSmallPart", vertexConsumers, matrix, mirosLegSmallPartSprite,
-                        jointLocal.subtract(spriteUp.multiply(scale * 1.45f)), spriteRight, spriteUp, forward,
+                        jointLocal.subtract(spriteUp.multiply(scale * 1.45f)), spriteRight, spriteUp, armNormal,
                         scale * 0.55f, scale * 1.35f, colorR(highlight), colorG(highlight), colorB(highlight), 210, light, false);
             }
         }
     }
 
     private static void renderArmBaseFSprites(OracleEntity entity, VertexConsumerProvider vertexConsumers, Matrix4f matrix,
-                                             OraclePose pose, Vec3d forward, int armColor, float tickDelta, int light) {
+                                             OraclePose pose, Vec3d forward, Vec3d renderOrigin,
+                                             int armColor, float tickDelta, int light) {
         Joint[] joints = entity.getArm().joints();
         if (joints.length < 2) {
             return;
         }
 
         VertexConsumer pixel = vertexConsumers.getBuffer(RenderLayer.getEntityCutoutNoCull(WHITE_TEX));
-        Vec3d base = lerp(joints[0].view().lastPos(), joints[0].view().pos(), tickDelta).subtract(entity.getPos());
+        Vec3d base = flattenWorldToArmPlane(entity, lerp(joints[0].view().lastPos(), joints[0].view().pos(), tickDelta)).subtract(renderOrigin);
         Vec3d visualBase = base.add(armRootJointOffset(entity));
-        Vec3d next = lerp(joints[1].view().lastPos(), joints[1].view().pos(), tickDelta).subtract(entity.getPos());
+        Vec3d next = flattenWorldToArmPlane(entity, lerp(joints[1].view().lastPos(), joints[1].view().pos(), tickDelta)).subtract(renderOrigin);
         Vec3d baseDir = entity.chamberTrackInwardDir(entity.getSyncedBaseTarget()).negate();
         Vec3d railTangent = entity.chamberTrackTangentDir(entity.getSyncedBaseTarget());
         Vec3d perp = projectToPlane(railTangent, baseDir);
@@ -783,7 +901,7 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
         renderArmBasePlate(pixel, matrix, plateCenter.add(railNormal.multiply(ARM_ROOT_THICKNESS_BLOCKS * 0.5f + px(0.2f))), baseDir, perp, railNormal,
                 px(24.0f), px(15.0f), px(30.0f), px(0.2f), highlight, 205, light);
 
-        List<Vec3d> armPoints = armVisualPoints(entity, tickDelta, forward, pose.hips);
+        List<Vec3d> armPoints = armVisualPoints(entity, tickDelta, armPlaneNormal(), pose.hips, renderOrigin);
         Vec3d elbowTarget = armPoints.size() > 1 ? armPoints.get(1) : solveKnee3D(base, next, px(100.0), px(200.0), perp.add(baseDir.multiply(px(6.0f))));
         Vec3d supportTarget = visualBase.lerp(elbowTarget, 0.25);
         for (int sideIndex = 0; sideIndex < 2; sideIndex++) {
@@ -897,6 +1015,21 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
         Vec3d polePlane = pole.subtract(dir.multiply(pole.dotProduct(dir)));
         polePlane = safeNormalize(polePlane, makeFrame(dir)[0]);
         return start.add(dir.multiply(along)).add(polePlane.multiply(height));
+    }
+
+    private static Vec3d solveKnee2D(Vec3d start, Vec3d end, double firstLength, double secondLength, int index) {
+        Vec3d chord = new Vec3d(end.x - start.x, end.y - start.y, 0.0);
+        double distance = chord.length();
+        double flip = index % 2 == 0 ? 1.0 : -1.0;
+        if (distance < 1.0E-5) {
+            return start.add(0.0, firstLength * flip, 0.0);
+        }
+        Vec3d dir = chord.normalize();
+        double clampedDistance = Math.min(distance, firstLength + secondLength - 1.0E-4);
+        double along = (firstLength * firstLength - secondLength * secondLength + clampedDistance * clampedDistance) / (2.0 * clampedDistance);
+        double height = Math.sqrt(Math.max(0.0, firstLength * firstLength - along * along));
+        Vec3d perpendicular = new Vec3d(-dir.y, dir.x, 0.0).multiply(flip);
+        return start.add(dir.multiply(along)).add(perpendicular.multiply(height));
     }
 
     private static Vec3d projectToPlane(Vec3d vector, Vec3d normal) {
@@ -1298,6 +1431,346 @@ public class OracleEntityRenderer extends EntityRenderer<OracleEntity> {
     @Override
     public Identifier getTexture(OracleEntity entity) {
         return WHITE_TEX;
+    }
+
+    private static class OracleUmbilicalState {
+        private static final int RAIN_WORLD_STEPS_PER_MINECRAFT_TICK = 2;
+        private static final double MAIN_SPACING = UMBILICAL_MAIN_SPACING_PIXELS * BLOCKS_PER_RAIN_WORLD_PIXEL;
+        private static final double MAX_BODY_DISTANCE = 80.0 * BLOCKS_PER_RAIN_WORLD_PIXEL;
+        private static final double MAIN_COLLISION_RADIUS = 2.0 * BLOCKS_PER_RAIN_WORLD_PIXEL;
+        private static final double SMALL_COLLISION_RADIUS = 0.75 * BLOCKS_PER_RAIN_WORLD_PIXEL;
+        private static final double CORD_SEGMENT_SAMPLE_SPACING = 4.0 * BLOCKS_PER_RAIN_WORLD_PIXEL;
+
+        private final Vec3d[] main = new Vec3d[UMBILICAL_MAIN_COORDS];
+        private final Vec3d[] lastMain = new Vec3d[UMBILICAL_MAIN_COORDS];
+        private final Vec3d[] mainVel = new Vec3d[UMBILICAL_MAIN_COORDS];
+        private final Vec3d[][] small = new Vec3d[UMBILICAL_SMALL_CORDS][UMBILICAL_SMALL_COORDS];
+        private final Vec3d[][] lastSmall = new Vec3d[UMBILICAL_SMALL_CORDS][UMBILICAL_SMALL_COORDS];
+        private final Vec3d[][] smallVel = new Vec3d[UMBILICAL_SMALL_CORDS][UMBILICAL_SMALL_COORDS];
+        private final double[] smallLengths = new double[UMBILICAL_SMALL_CORDS];
+        private final Vec3d[] smallHeadDirs = new Vec3d[UMBILICAL_SMALL_CORDS];
+        private final int[] smallColors = new int[UMBILICAL_SMALL_CORDS];
+        private boolean initialized;
+        private int lastUpdateAge = -1;
+
+        private OracleUmbilicalState(int seed) {
+            Random random = new Random(seed * 341873128712L + 132897987541L);
+            for (int i = 0; i < UMBILICAL_SMALL_CORDS; i++) {
+                if (random.nextFloat() < 0.5f) {
+                    smallLengths[i] = px(50.0 + random.nextDouble() * 15.0);
+                } else {
+                    smallLengths[i] = px(50.0 + (200.0 - 50.0) * Math.pow(random.nextDouble(), 1.5));
+                }
+                smallColors[i] = random.nextInt(3);
+                smallHeadDirs[i] = randomDirection(random).multiply(random.nextDouble());
+            }
+        }
+
+        private void update(OracleEntity entity, int age, Vec3d bottomAnchor, Vec3d tetherAnchor, Vec3d firstChunkAnchor,
+                            Vec3d headAnchor, Vec3d headLookDir, boolean zeroG) {
+            if (!initialized) {
+                initialize(bottomAnchor, tetherAnchor, headAnchor);
+            }
+            if (lastUpdateAge == age) {
+                return;
+            }
+            lastUpdateAge = age;
+            rememberRenderPositions();
+
+            for (int step = 0; step < RAIN_WORLD_STEPS_PER_MINECRAFT_TICK; step++) {
+                simulateStep(entity, bottomAnchor, tetherAnchor, firstChunkAnchor, headAnchor, headLookDir, zeroG);
+            }
+        }
+
+        private void rememberRenderPositions() {
+            for (int i = 0; i < main.length; i++) {
+                lastMain[i] = main[i];
+            }
+            for (int cord = 0; cord < UMBILICAL_SMALL_CORDS; cord++) {
+                for (int i = 0; i < UMBILICAL_SMALL_COORDS; i++) {
+                    lastSmall[cord][i] = small[cord][i];
+                }
+            }
+        }
+
+        private void simulateStep(OracleEntity entity, Vec3d bottomAnchor, Vec3d tetherAnchor, Vec3d firstChunkAnchor,
+                                  Vec3d headAnchor, Vec3d headLookDir, boolean zeroG) {
+            for (int i = 0; i < main.length; i++) {
+                main[i] = main[i].add(mainVel[i]);
+                double value = i / (double) (main.length - 1);
+                double lift = inverseLerpClamped(0.2, 0.0, value);
+                mainVel[i] = mainVel[i].multiply(0.995).add(0.0, px(lift - (zeroG ? 0.0 : 0.81)), 0.0);
+            }
+
+            collideMainCord(entity);
+            collideMainSegments(entity);
+            setStuckSegments(bottomAnchor, tetherAnchor);
+            satisfyMainLinksForward();
+            collideMainCord(entity);
+            collideMainSegments(entity);
+            setStuckSegments(bottomAnchor, tetherAnchor);
+            satisfyMainLinksBackward();
+            collideMainCord(entity);
+            collideMainSegments(entity);
+            setStuckSegments(bottomAnchor, tetherAnchor);
+            applyMainBendForces();
+            collideMainCord(entity);
+            collideMainSegments(entity);
+            setStuckSegments(bottomAnchor, tetherAnchor);
+            constrainMainEnd(firstChunkAnchor);
+            updateSmallCords(entity, headAnchor, headLookDir, zeroG);
+        }
+
+        private void initialize(Vec3d bottomAnchor, Vec3d tetherAnchor, Vec3d headAnchor) {
+            for (int i = 0; i < main.length; i++) {
+                double t = i / (double) (main.length - 1);
+                Vec3d point = t < 0.76
+                        ? bottomAnchor.lerp(tetherAnchor, t / 0.76)
+                        : tetherAnchor.lerp(headAnchor, (t - 0.76) / 0.24);
+                main[i] = point;
+                lastMain[i] = point;
+                mainVel[i] = Vec3d.ZERO;
+            }
+            for (int cord = 0; cord < UMBILICAL_SMALL_CORDS; cord++) {
+                for (int i = 0; i < UMBILICAL_SMALL_COORDS; i++) {
+                    double t = i / (double) (UMBILICAL_SMALL_COORDS - 1);
+                    Vec3d point = main[main.length - 1].lerp(headAnchor, t)
+                            .add(smallHeadDirs[cord].multiply(px(3.0) * Math.sin(t * Math.PI)));
+                    small[cord][i] = point;
+                    lastSmall[cord][i] = point;
+                    smallVel[cord][i] = Vec3d.ZERO;
+                }
+            }
+            initialized = true;
+        }
+
+        private void setStuckSegments(Vec3d bottomAnchor, Vec3d tetherAnchor) {
+            main[0] = bottomAnchor;
+            mainVel[0] = Vec3d.ZERO;
+            Vec3d jointToTether = safeNormalize(tetherAnchor.subtract(main[Math.max(0, UMBILICAL_TETHER_INDEX - 1)]), new Vec3d(0.0, 1.0, 0.0));
+            Vec3d side = safeNormalize(jointToTether.crossProduct(new Vec3d(0.0, 0.0, 1.0)), new Vec3d(1.0, 0.0, 0.0));
+            for (int i = -1; i < 2; i++) {
+                int index = UMBILICAL_TETHER_INDEX + i;
+                double weight = i == 0 ? 1.0 : 0.5;
+                Vec3d target = tetherAnchor.add(jointToTether.multiply(px(10.0f * i))).add(side.multiply(px(2.0f * i)));
+                main[index] = main[index].lerp(target, weight);
+                mainVel[index] = mainVel[index].multiply(1.0 - weight);
+            }
+        }
+
+        private void satisfyMainLinksForward() {
+            for (int i = 1; i < main.length; i++) {
+                satisfyLink(main, mainVel, i - 1, i, MAIN_SPACING);
+            }
+        }
+
+        private void satisfyMainLinksBackward() {
+            for (int i = 0; i < main.length - 1; i++) {
+                satisfyLink(main, mainVel, i, i + 1, MAIN_SPACING);
+            }
+        }
+
+        private void applyMainBendForces() {
+            double force = px(0.5);
+            for (int distance = 2; distance < 4; distance++) {
+                for (int i = distance; i < main.length - distance; i++) {
+                    Vec3d prevDir = safeNormalize(main[i].subtract(main[i - distance]), Vec3d.ZERO);
+                    Vec3d nextDir = safeNormalize(main[i].subtract(main[i + distance]), Vec3d.ZERO);
+                    mainVel[i] = mainVel[i].add(prevDir.multiply(force)).add(nextDir.multiply(force));
+                    mainVel[i - distance] = mainVel[i - distance].subtract(prevDir.multiply(force));
+                    mainVel[i + distance] = mainVel[i + distance].subtract(nextDir.multiply(force));
+                }
+                force *= 0.75;
+            }
+        }
+
+        private void constrainMainEnd(Vec3d firstChunkAnchor) {
+            int end = main.length - 1;
+            Vec3d toBody = firstChunkAnchor.subtract(main[end]);
+            double distance = toBody.length();
+            if (distance > MAX_BODY_DISTANCE) {
+                Vec3d correction = toBody.normalize().multiply((distance - MAX_BODY_DISTANCE) * 0.25);
+                main[end] = main[end].add(correction);
+                mainVel[end] = mainVel[end].add(correction.multiply(2.0));
+            }
+        }
+
+        private void updateSmallCords(OracleEntity entity, Vec3d headAnchor, Vec3d headLookDir, boolean zeroG) {
+            Vec3d mainEnd = main[main.length - 1];
+            Vec3d mainDir = safeNormalize(mainEnd.subtract(main[main.length - 2]), new Vec3d(0.0, 1.0, 0.0));
+            for (int cord = 0; cord < UMBILICAL_SMALL_CORDS; cord++) {
+                for (int i = 0; i < UMBILICAL_SMALL_COORDS; i++) {
+                    small[cord][i] = small[cord][i].add(smallVel[cord][i]);
+                    double speedPixels = smallVel[cord][i].length() / BLOCKS_PER_RAIN_WORLD_PIXEL;
+                    double damping = lerpDouble(inverseLerpClamped(2.0, 6.0, speedPixels), 0.999, 0.9);
+                    smallVel[cord][i] = smallVel[cord][i].multiply(damping);
+                    if (!zeroG) {
+                        smallVel[cord][i] = smallVel[cord][i].add(0.0, -px(0.81), 0.0);
+                    }
+                }
+                collideSmallCord(entity, cord);
+                collideSmallSegments(entity, cord);
+                double spacing = smallLengths[cord] / UMBILICAL_SMALL_COORDS;
+                for (int i = 1; i < UMBILICAL_SMALL_COORDS; i++) {
+                    satisfyLink(small[cord], smallVel[cord], i - 1, i, spacing);
+                }
+                for (int i = 0; i < UMBILICAL_SMALL_COORDS - 1; i++) {
+                    satisfyLink(small[cord], smallVel[cord], i, i + 1, spacing);
+                }
+
+                small[cord][0] = mainEnd;
+                smallVel[cord][0] = Vec3d.ZERO;
+                smallVel[cord][1] = smallVel[cord][1].add(mainDir.multiply(px(5.0)));
+                smallVel[cord][2] = smallVel[cord][2].add(mainDir.multiply(px(3.0)));
+                smallVel[cord][3] = smallVel[cord][3].add(mainDir.multiply(px(1.5)));
+
+                int last = UMBILICAL_SMALL_COORDS - 1;
+                Vec3d headPoint = headAnchor.add(smallHeadDirs[cord].multiply(px(1.5)));
+                small[cord][last] = headPoint;
+                smallVel[cord][last] = Vec3d.ZERO;
+                Vec3d headForce = headLookDir.add(smallHeadDirs[cord]);
+                smallVel[cord][last - 1] = smallVel[cord][last - 1].subtract(headForce.multiply(px(2.0)));
+                smallVel[cord][last - 2] = smallVel[cord][last - 2].subtract(headForce.multiply(px(1.0)));
+                collideSmallCord(entity, cord);
+                collideSmallSegments(entity, cord);
+            }
+        }
+
+        private void collideMainCord(OracleEntity entity) {
+            for (int i = 1; i < main.length; i++) {
+                if (Math.abs(i - UMBILICAL_TETHER_INDEX) <= 1) {
+                    continue;
+                }
+                collidePoint(entity, main, mainVel, i, MAIN_COLLISION_RADIUS);
+            }
+        }
+
+        private void collideSmallCord(OracleEntity entity, int cord) {
+            int last = UMBILICAL_SMALL_COORDS - 1;
+            for (int i = 1; i < last; i++) {
+                collidePoint(entity, small[cord], smallVel[cord], i, SMALL_COLLISION_RADIUS);
+            }
+        }
+
+        private void collideMainSegments(OracleEntity entity) {
+            for (int i = 0; i < main.length - 1; i++) {
+                collideSegment(entity, main, mainVel, i, i + 1, MAIN_COLLISION_RADIUS, this::isMainPinned);
+            }
+        }
+
+        private void collideSmallSegments(OracleEntity entity, int cord) {
+            for (int i = 0; i < UMBILICAL_SMALL_COORDS - 1; i++) {
+                collideSegment(entity, small[cord], smallVel[cord], i, i + 1, SMALL_COLLISION_RADIUS, this::isSmallPinned);
+            }
+        }
+
+        private void collidePoint(OracleEntity entity, Vec3d[] points, Vec3d[] velocities, int index, double radius) {
+            Vec3d before = points[index];
+            Vec3d after = OraclePhysicsUtil.collidePoint(entity.getWorld(), before, radius, entity.getOracleCollisionCache());
+            if (before.squaredDistanceTo(after) < 1.0E-8) {
+                return;
+            }
+            Vec3d correction = after.subtract(before);
+            points[index] = after;
+            velocities[index] = velocities[index].add(correction).multiply(0.35);
+        }
+
+        private void collideSegment(OracleEntity entity, Vec3d[] points, Vec3d[] velocities,
+                                    int a, int b, double radius, PinPredicate pinned) {
+            Vec3d correction = OraclePhysicsUtil.segmentCollisionCorrection(entity.getWorld(), points[a], points[b],
+                    radius, CORD_SEGMENT_SAMPLE_SPACING, entity.getOracleCollisionCache());
+            if (correction.lengthSquared() < 1.0E-8) {
+                return;
+            }
+
+            boolean aPinned = pinned.isPinned(a);
+            boolean bPinned = pinned.isPinned(b);
+            if (aPinned && bPinned) {
+                return;
+            }
+            double aWeight = aPinned ? 0.0 : bPinned ? 1.0 : 0.5;
+            double bWeight = bPinned ? 0.0 : aPinned ? 1.0 : 0.5;
+            applySegmentCorrection(points, velocities, a, correction.multiply(aWeight));
+            applySegmentCorrection(points, velocities, b, correction.multiply(bWeight));
+        }
+
+        private static void applySegmentCorrection(Vec3d[] points, Vec3d[] velocities, int index, Vec3d correction) {
+            if (correction.lengthSquared() < 1.0E-8) {
+                return;
+            }
+            points[index] = points[index].add(correction);
+            velocities[index] = velocities[index].add(correction).multiply(0.55);
+        }
+
+        private boolean isMainPinned(int index) {
+            return index == 0 || Math.abs(index - UMBILICAL_TETHER_INDEX) <= 1;
+        }
+
+        private boolean isSmallPinned(int index) {
+            return index == 0 || index == UMBILICAL_SMALL_COORDS - 1;
+        }
+
+        private List<Vec3d> mainPoints(float tickDelta, Vec3d renderOrigin) {
+            List<Vec3d> points = new ArrayList<>(main.length);
+            for (int i = 0; i < main.length; i++) {
+                points.add(lerp(lastMain[i], main[i], tickDelta).subtract(renderOrigin));
+            }
+            return points;
+        }
+
+        private List<Vec3d> smallCordPoints(int cord, float tickDelta, Vec3d renderOrigin) {
+            List<Vec3d> points = new ArrayList<>(UMBILICAL_SMALL_COORDS);
+            for (int i = 0; i < UMBILICAL_SMALL_COORDS; i++) {
+                points.add(lerp(lastSmall[cord][i], small[cord][i], tickDelta).subtract(renderOrigin));
+            }
+            return points;
+        }
+
+        private int smallCordColor(int cord, int metalColor) {
+            return switch (smallColors[cord]) {
+                case 1 -> mixColor(0xFF0000, metalColor, 0.5f);
+                case 2 -> mixColor(0x0000FF, metalColor, 0.5f);
+                default -> metalColor;
+            };
+        }
+
+        private static void satisfyLink(Vec3d[] points, Vec3d[] velocities, int a, int b, double desired) {
+            Vec3d delta = points[b].subtract(points[a]);
+            double distance = delta.length();
+            if (distance < 1.0E-6) {
+                return;
+            }
+            Vec3d correction = delta.normalize().multiply((distance - desired) * 0.5);
+            points[b] = points[b].subtract(correction);
+            velocities[b] = velocities[b].subtract(correction);
+            points[a] = points[a].add(correction);
+            velocities[a] = velocities[a].add(correction);
+        }
+
+        private static Vec3d randomDirection(Random random) {
+            double x = random.nextDouble() * 2.0 - 1.0;
+            double y = random.nextDouble() * 2.0 - 1.0;
+            double z = (random.nextDouble() * 2.0 - 1.0) * 0.35;
+            return safeNormalize(new Vec3d(x, y, z), new Vec3d(1.0, 0.0, 0.0));
+        }
+
+        private static double inverseLerpClamped(double from, double to, double value) {
+            if (Math.abs(to - from) < 1.0E-6) {
+                return 0.0;
+            }
+            return MathHelper.clamp((value - from) / (to - from), 0.0, 1.0);
+        }
+
+        private static double lerpDouble(double t, double from, double to) {
+            return from + (to - from) * t;
+        }
+
+        private interface PinPredicate {
+            boolean isPinned(int index);
+        }
+    }
+
+    private record SpriteModelSnapshot(Identifier texture, float width, float height, List<Object> quads) {
     }
 
     private record OraclePose(

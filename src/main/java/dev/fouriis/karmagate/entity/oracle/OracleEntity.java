@@ -29,6 +29,11 @@ public abstract class OracleEntity extends PathAwareEntity {
     private static final double CHAMBER_TRACK_ROOT_WIDTH = 3.0;
     private static final double VISIBILITY_ARM_MARGIN = 18.0;
     private static final double VISIBILITY_DEPTH_MARGIN = 8.0;
+    private static final double BASE_START_MOVING_DISTANCE = 5.0;
+    private static final double BASE_KEEP_MOVING_DISTANCE = 1.2;
+    private static final double BASE_RAIL_STEP_PER_TICK = 0.16;
+    private static final int BASE_STABLE_TICKS_BEFORE_MOVE = 30;
+    private static final int COLLISION_CACHE_RADIUS_BLOCKS = 15;
 
     private static final TrackedData<Float> TARGET_X = DataTracker.registerData(OracleEntity.class, TrackedDataHandlerRegistry.FLOAT);
     private static final TrackedData<Float> TARGET_Y = DataTracker.registerData(OracleEntity.class, TrackedDataHandlerRegistry.FLOAT);
@@ -45,6 +50,7 @@ public abstract class OracleEntity extends PathAwareEntity {
     private static final TrackedData<Float> CHAMBER_X = DataTracker.registerData(OracleEntity.class, TrackedDataHandlerRegistry.FLOAT);
     private static final TrackedData<Float> CHAMBER_Y = DataTracker.registerData(OracleEntity.class, TrackedDataHandlerRegistry.FLOAT);
     private static final TrackedData<Float> CHAMBER_Z = DataTracker.registerData(OracleEntity.class, TrackedDataHandlerRegistry.FLOAT);
+    private static final TrackedData<Boolean> ZERO_G = DataTracker.registerData(OracleEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
 
     private final OracleId oracleId;
     private final OracleArm arm;
@@ -54,6 +60,8 @@ public abstract class OracleEntity extends PathAwareEntity {
     private boolean chamberBlockInitialized;
     private Vec3d chamberBasePos = Vec3d.ZERO;
     private boolean chamberBaseFrameInitialized;
+    private boolean chamberBaseMoving;
+    private final OraclePhysicsUtil.CollisionCache collisionCache = new OraclePhysicsUtil.CollisionCache();
 
     protected OracleEntity(EntityType<? extends PathAwareEntity> type, World world, OracleId oracleId) {
         super(type, world);
@@ -62,6 +70,7 @@ public abstract class OracleEntity extends PathAwareEntity {
         this.setNoGravity(true);
         this.noClip = true;
         this.experiencePoints = 0;
+        this.dataTracker.set(ZERO_G, oracleId == OracleId.FIVE_PEBBLES);
     }
 
     public static DefaultAttributeContainer.Builder createAttributes() {
@@ -97,6 +106,7 @@ public abstract class OracleEntity extends PathAwareEntity {
         builder.add(CHAMBER_X, 0f);
         builder.add(CHAMBER_Y, 0f);
         builder.add(CHAMBER_Z, 0f);
+        builder.add(ZERO_G, false);
     }
 
     @Override
@@ -109,6 +119,7 @@ public abstract class OracleEntity extends PathAwareEntity {
             initializeChamberBlockIfNeeded();
             syncChamberCenter();
         }
+        ensureCollisionCache();
         if (behavior == null && !this.getWorld().isClient) {
             behavior = createBehavior();
             syncBehaviorTargets();
@@ -141,14 +152,34 @@ public abstract class OracleEntity extends PathAwareEntity {
             chamberBaseFrameInitialized = true;
             return chamberBasePos;
         }
-        Vec3d toProjected = projected.subtract(chamberBasePos);
-        double distance = toProjected.length();
-        if (distance > 0.001) {
-            double maxStep = 0.35;
-            chamberBasePos = chamberBasePos.add(toProjected.multiply(Math.min(maxStep, distance) / distance));
+
+        RailProjection currentProjection = closestRailProjection(chamberBasePos);
+        RailProjection targetProjection = closestRailProjection(projected);
+        double totalLength = railPathLength(chamberRailSegments(getChamberCenter()));
+        double railDelta = shortestRailDelta(currentProjection.pathDistance(), targetProjection.pathDistance(), totalLength);
+        double railDistance = Math.abs(railDelta);
+        int stableTicks = behavior == null ? BASE_STABLE_TICKS_BEFORE_MOVE : behavior.consistentBasePosCounter();
+        double moveThreshold = chamberBaseMoving ? BASE_KEEP_MOVING_DISTANCE : BASE_START_MOVING_DISTANCE;
+        chamberBaseMoving = railDistance > moveThreshold && stableTicks > BASE_STABLE_TICKS_BEFORE_MOVE;
+        if (chamberBaseMoving) {
+            double step = Math.copySign(Math.min(BASE_RAIL_STEP_PER_TICK, railDistance), railDelta);
+            chamberBasePos = railPointAtDistance(getChamberCenter(), currentProjection.pathDistance() + step);
         }
         chamberBasePos = projectToChamberTrack(chamberBasePos);
         return chamberBasePos;
+    }
+
+    private static double shortestRailDelta(double from, double to, double totalLength) {
+        if (totalLength <= 1.0E-6) {
+            return 0.0;
+        }
+        double delta = (to - from) % totalLength;
+        if (delta > totalLength * 0.5) {
+            delta -= totalLength;
+        } else if (delta < -totalLength * 0.5) {
+            delta += totalLength;
+        }
+        return delta;
     }
 
     private void initializeChamberBlockIfNeeded() {
@@ -166,6 +197,11 @@ public abstract class OracleEntity extends PathAwareEntity {
 
     private void updateHomeFromChamberBlock() {
         homePos = Vec3d.ofCenter(chamberBlockPos);
+        collisionCache.clear();
+    }
+
+    private void ensureCollisionCache() {
+        collisionCache.preloadCube(getWorld(), BlockPos.ofFloored(getChamberCenter()), COLLISION_CACHE_RADIUS_BLOCKS);
     }
 
     private void applyOracleMovement() {
@@ -208,6 +244,11 @@ public abstract class OracleEntity extends PathAwareEntity {
 
     public OracleArm getArm() {
         return arm;
+    }
+
+    public OraclePhysicsUtil.CollisionCache getOracleCollisionCache() {
+        ensureCollisionCache();
+        return collisionCache;
     }
 
     public Vec3d getHomePos() {
@@ -412,6 +453,14 @@ public abstract class OracleEntity extends PathAwareEntity {
         return dir.normalize();
     }
 
+    public boolean isZeroG() {
+        return dataTracker.get(ZERO_G);
+    }
+
+    public void setZeroG(boolean zeroG) {
+        dataTracker.set(ZERO_G, zeroG);
+    }
+
     private Vec3d getTrackedVec(TrackedData<Float> x, TrackedData<Float> y, TrackedData<Float> z) {
         return new Vec3d(dataTracker.get(x), dataTracker.get(y), dataTracker.get(z));
     }
@@ -488,6 +537,7 @@ public abstract class OracleEntity extends PathAwareEntity {
         nbt.putInt("OracleChamberBlockY", chamberBlockPos.getY());
         nbt.putInt("OracleChamberBlockZ", chamberBlockPos.getZ());
         nbt.putBoolean("OracleChamberBlockInitialized", chamberBlockInitialized);
+        nbt.putBoolean("OracleZeroG", isZeroG());
     }
 
     @Override
@@ -506,6 +556,11 @@ public abstract class OracleEntity extends PathAwareEntity {
             chamberBlockPos = BlockPos.ofFloored(homePos);
             chamberBlockInitialized = true;
             updateHomeFromChamberBlock();
+        }
+        if (nbt.contains("OracleZeroG")) {
+            setZeroG(nbt.getBoolean("OracleZeroG"));
+        } else {
+            setZeroG(oracleId == OracleId.FIVE_PEBBLES);
         }
     }
 }

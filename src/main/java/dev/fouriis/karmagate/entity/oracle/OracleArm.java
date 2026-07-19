@@ -3,9 +3,12 @@ package dev.fouriis.karmagate.entity.oracle;
 import net.minecraft.util.math.Vec3d;
 
 public class OracleArm {
+    private static final int RAIN_WORLD_STEPS_PER_MINECRAFT_TICK = 2;
     private static final double FIRST_SEGMENT_LENGTH_BLOCKS = 14.0;
     private static final double BLOCKS_PER_ORACLE_ARM_PIXEL = FIRST_SEGMENT_LENGTH_BLOCKS / 300.0;
     private static final double[] SEGMENT_LENGTHS = { armPx(300.0), armPx(150.0), armPx(90.0), armPx(30.0) };
+    private static final double JOINT_COLLISION_RADIUS = 0.28;
+    private static final double SEGMENT_COLLISION_SAMPLE_SPACING = 0.35;
 
     private final OracleEntity oracle;
     private final Joint[] joints = new Joint[4];
@@ -19,8 +22,8 @@ public class OracleArm {
     }
 
     public void tick() {
-        Vec3d base = oracle.getSyncedBaseTarget();
-        Vec3d body = oracle.getOracleCenter();
+        Vec3d base = flattenToArmPlane(oracle.getSyncedBaseTarget());
+        Vec3d body = flattenToArmPlane(oracle.getOracleCenter());
 
         if (!initialized) {
             for (int i = 0; i < joints.length; i++) {
@@ -33,7 +36,20 @@ public class OracleArm {
         }
 
         for (Joint joint : joints) {
+            joint.pos = flattenToArmPlane(joint.pos);
+            joint.vel = flattenVectorToArmPlane(joint.vel);
             joint.lastPos = joint.pos;
+        }
+
+        for (int step = 0; step < RAIN_WORLD_STEPS_PER_MINECRAFT_TICK; step++) {
+            simulateStep(base, body, step);
+        }
+    }
+
+    private void simulateStep(Vec3d base, Vec3d body, int step) {
+        Vec3d[] stepStart = new Vec3d[joints.length];
+        for (int i = 0; i < joints.length; i++) {
+            stepStart[i] = joints[i].pos;
         }
 
         joints[0].pos = base;
@@ -41,7 +57,7 @@ public class OracleArm {
 
         for (int i = 1; i < joints.length; i++) {
             Joint joint = joints[i];
-            Vec3d sway = orbitalBias(i).multiply(0.010 + i * 0.003);
+            Vec3d sway = orbitalBias(i, step).multiply(0.010 + i * 0.003);
             if (i == 1) {
                 Vec3d preferred = preferredRootBendTarget(base);
                 sway = sway.add(preferred.subtract(joint.pos).multiply(0.012));
@@ -50,7 +66,8 @@ public class OracleArm {
                 sway = sway.add(preferred.subtract(joint.pos).multiply(0.035));
             }
             joint.vel = joint.vel.multiply(0.82).add(sway);
-            joint.pos = joint.pos.add(joint.vel);
+            joint.pos = flattenToArmPlane(joint.pos.add(joint.vel));
+            collideJoint(joint);
         }
 
         for (int pass = 0; pass < 16; pass++) {
@@ -60,17 +77,72 @@ public class OracleArm {
             }
             satisfyCSharpLink(0);
             satisfyBody(joints[joints.length - 1], body, SEGMENT_LENGTHS[SEGMENT_LENGTHS.length - 1], 1.0);
+            flattenFreeJoints();
+            collideFreeJoints();
+            collideSegments(body);
+            flattenFreeJoints();
         }
 
         for (int i = 1; i < joints.length; i++) {
-            joints[i].vel = joints[i].pos.subtract(joints[i].lastPos);
+            joints[i].vel = joints[i].pos.subtract(stepStart[i]);
         }
     }
 
-    private Vec3d orbitalBias(int index) {
-        float age = oracle.age + index * 37.0f;
-        Vec3d dir = oracle.getSyncedGetToDir();
-        Vec3d side = dir.crossProduct(new Vec3d(0.0, 1.0, 0.0));
+    private void collideFreeJoints() {
+        for (int i = 1; i < joints.length; i++) {
+            collideJoint(joints[i]);
+        }
+    }
+
+    private void collideJoint(Joint joint) {
+        Vec3d before = joint.pos;
+        Vec3d collided = OraclePhysicsUtil.collidePoint(oracle.getWorld(), joint.pos, JOINT_COLLISION_RADIUS, oracle.getOracleCollisionCache());
+        joint.pos = flattenToArmPlane(collided);
+        Vec3d correction = flattenVectorToArmPlane(joint.pos.subtract(before));
+        if (correction.lengthSquared() > 1.0E-8) {
+            joint.vel = flattenVectorToArmPlane(joint.vel.add(correction).multiply(0.35));
+        }
+    }
+
+    private void collideSegments(Vec3d body) {
+        for (int i = 0; i < joints.length - 1; i++) {
+            double aWeight = i == 0 ? 0.0 : 0.5;
+            double bWeight = i == 0 ? 1.0 : 0.5;
+            collideJointSegment(joints[i], joints[i + 1], aWeight, bWeight);
+        }
+        Vec3d correction = OraclePhysicsUtil.segmentCollisionCorrection(oracle.getWorld(),
+                joints[joints.length - 1].pos, body, JOINT_COLLISION_RADIUS, SEGMENT_COLLISION_SAMPLE_SPACING,
+                oracle.getOracleCollisionCache());
+        correction = flattenVectorToArmPlane(correction);
+        if (correction.lengthSquared() > 1.0E-8) {
+            joints[joints.length - 1].pos = joints[joints.length - 1].pos.add(correction);
+            joints[joints.length - 1].vel = flattenVectorToArmPlane(joints[joints.length - 1].vel.add(correction).multiply(0.45));
+        }
+    }
+
+    private void collideJointSegment(Joint a, Joint b, double aWeight, double bWeight) {
+        Vec3d correction = OraclePhysicsUtil.segmentCollisionCorrection(oracle.getWorld(), a.pos, b.pos,
+                JOINT_COLLISION_RADIUS, SEGMENT_COLLISION_SAMPLE_SPACING, oracle.getOracleCollisionCache());
+        correction = flattenVectorToArmPlane(correction);
+        if (correction.lengthSquared() < 1.0E-8) {
+            return;
+        }
+        Vec3d aCorrection = correction.multiply(aWeight);
+        Vec3d bCorrection = correction.multiply(bWeight);
+        a.pos = a.pos.add(aCorrection);
+        b.pos = b.pos.add(bCorrection);
+        if (aWeight > 0.0) {
+            a.vel = flattenVectorToArmPlane(a.vel.add(aCorrection).multiply(0.45));
+        }
+        if (bWeight > 0.0) {
+            b.vel = flattenVectorToArmPlane(b.vel.add(bCorrection).multiply(0.45));
+        }
+    }
+
+    private Vec3d orbitalBias(int index, int step) {
+        float age = oracle.age * RAIN_WORLD_STEPS_PER_MINECRAFT_TICK + step + index * 37.0f;
+        Vec3d dir = flattenVectorToArmPlane(oracle.getSyncedGetToDir());
+        Vec3d side = new Vec3d(-dir.y, dir.x, 0.0);
         if (side.lengthSquared() < 1.0E-6) {
             side = new Vec3d(1.0, 0.0, 0.0);
         } else {
@@ -124,38 +196,57 @@ public class OracleArm {
     }
 
     private Vec3d preferredRootBendTarget(Vec3d base) {
-        Vec3d rootDir = oracle.chamberTrackInwardDir(base);
+        Vec3d rootDir = flattenVectorToArmPlane(oracle.chamberTrackInwardDir(base));
         if (rootDir.lengthSquared() < 1.0E-6) {
-            rootDir = oracle.getOracleCenter().subtract(base);
+            rootDir = flattenVectorToArmPlane(oracle.getOracleCenter().subtract(base));
         }
         if (rootDir.lengthSquared() < 1.0E-6) {
             rootDir = new Vec3d(0.0, -1.0, 0.0);
         }
-        Vec3d tangent = oracle.chamberTrackTangentDir(base);
+        Vec3d tangent = flattenVectorToArmPlane(oracle.chamberTrackTangentDir(base));
         if (tangent.lengthSquared() < 1.0E-6) {
-            tangent = rootDir.crossProduct(new Vec3d(0.0, 0.0, 1.0));
+            tangent = new Vec3d(-rootDir.y, rootDir.x, 0.0);
         }
         tangent = tangent.normalize();
-        return base.add(rootDir.normalize().multiply(SEGMENT_LENGTHS[0] * 0.72))
-                .add(tangent.multiply(SEGMENT_LENGTHS[0] * 0.24));
+        return flattenToArmPlane(base.add(rootDir.normalize().multiply(SEGMENT_LENGTHS[0] * 0.72))
+                .add(tangent.multiply(SEGMENT_LENGTHS[0] * 0.24)));
     }
 
     private Vec3d preferredFinalJointTarget(Vec3d currentPos) {
         double length = SEGMENT_LENGTHS[SEGMENT_LENGTHS.length - 1];
-        Vec3d lowerBody = oracle.getOracleLowerBodyAnchor();
-        Vec3d getToDir = oracle.getSyncedGetToDir();
+        Vec3d lowerBody = flattenToArmPlane(oracle.getOracleLowerBodyAnchor());
+        Vec3d getToDir = flattenVectorToArmPlane(oracle.getSyncedGetToDir());
+        if (getToDir.lengthSquared() < 1.0E-6) {
+            getToDir = new Vec3d(0.0, 1.0, 0.0);
+        }
         Vec3d target;
         if (oracle.getOracleId() == OracleId.FIVE_PEBBLES) {
             target = lowerBody.subtract(getToDir.multiply(length * 0.5));
         } else {
-            Vec3d side = getToDir.crossProduct(new Vec3d(0.0, 0.0, 1.0));
+            Vec3d side = new Vec3d(-getToDir.y, getToDir.x, 0.0);
             if (side.lengthSquared() < 1.0E-6) {
-                side = getToDir.crossProduct(new Vec3d(1.0, 0.0, 0.0));
+                side = new Vec3d(1.0, 0.0, 0.0);
             }
             target = lowerBody.subtract(safeNormalize(side, new Vec3d(1.0, 0.0, 0.0)).multiply(length * 0.5));
         }
-        target = target.add(safeNormalize(currentPos.subtract(lowerBody), getToDir.negate()).multiply(length * 0.5));
-        return currentPos.add(clampMagnitude(target.subtract(currentPos), 2.5).multiply(0.48));
+        currentPos = flattenToArmPlane(currentPos);
+        target = target.add(safeNormalize(flattenVectorToArmPlane(currentPos.subtract(lowerBody)), getToDir.negate()).multiply(length * 0.5));
+        return flattenToArmPlane(currentPos.add(clampMagnitude(target.subtract(currentPos), 2.5).multiply(0.48)));
+    }
+
+    private void flattenFreeJoints() {
+        for (int i = 1; i < joints.length; i++) {
+            joints[i].pos = flattenToArmPlane(joints[i].pos);
+            joints[i].vel = flattenVectorToArmPlane(joints[i].vel);
+        }
+    }
+
+    private Vec3d flattenToArmPlane(Vec3d value) {
+        return new Vec3d(value.x, value.y, oracle.getChamberCenter().z);
+    }
+
+    private static Vec3d flattenVectorToArmPlane(Vec3d value) {
+        return new Vec3d(value.x, value.y, 0.0);
     }
 
     private static double armPx(double pixels) {
