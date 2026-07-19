@@ -115,6 +115,8 @@ public final class AtcCloudVolumeRenderer {
     private static Object anchoredWorld;
     private static float anchoredBandCenterZ = Float.NaN;
     private static final List<CloudBank> VISIBLE_BANKS = new ArrayList<>(384);
+    private static ShaderProgram cachedVolumeProgram;
+    private static VolumeUniforms cachedVolumeUniforms;
 //1372
     private AtcCloudVolumeRenderer() {}
 
@@ -181,7 +183,8 @@ public final class AtcCloudVolumeRenderer {
         Matrix4f savedModelView = new Matrix4f(mvStack);
         mvStack.identity();
         RenderSystem.applyModelViewMatrix();
-        RenderSystem.setProjectionMatrix(cloudProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
+        Matrix4f projection = cloudProjection(mc, camera, tickDelta);
+        RenderSystem.setProjectionMatrix(projection, VertexSorter.BY_DISTANCE);
 
         MatrixStack bobStack = new MatrixStack();
         if (mc.options.getBobView().getValue()) {
@@ -228,7 +231,8 @@ public final class AtcCloudVolumeRenderer {
         Matrix4f savedModelView = new Matrix4f(mvStack);
         mvStack.identity();
         RenderSystem.applyModelViewMatrix();
-        RenderSystem.setProjectionMatrix(cloudProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
+        Matrix4f projection = cloudProjection(mc, camera, tickDelta);
+        RenderSystem.setProjectionMatrix(projection, VertexSorter.BY_DISTANCE);
 
         MatrixStack bobStack = new MatrixStack();
         if (mc.options.getBobView().getValue()) {
@@ -275,7 +279,8 @@ public final class AtcCloudVolumeRenderer {
         Matrix4f savedModelView = new Matrix4f(mvStack);
         mvStack.identity();
         RenderSystem.applyModelViewMatrix();
-        RenderSystem.setProjectionMatrix(cloudProjection(mc, camera, tickDelta), VertexSorter.BY_DISTANCE);
+        Matrix4f projection = cloudProjection(mc, camera, tickDelta);
+        RenderSystem.setProjectionMatrix(projection, VertexSorter.BY_DISTANCE);
 
         MatrixStack bobStack = new MatrixStack();
         if (mc.options.getBobView().getValue()) {
@@ -327,18 +332,20 @@ public final class AtcCloudVolumeRenderer {
         RenderSystem.setShaderTexture(2, CLOUD_DETAIL);
         volumeProgram.addSampler("Sampler1", mc.getTextureManager().getTexture(DISTRIBUTION_NOISE));
         volumeProgram.addSampler("Sampler2", mc.getTextureManager().getTexture(CLOUD_DETAIL));
+        int color = MathHelper.clamp((int) (255.0f * light), 120, 255);
+        volumeProgram.bind();
+        uploadFrameUniforms(volumeProgram, camPos, view, light, palette);
         for (CloudBank bank : banks) {
             volumeProgram.bind();
-            uploadBankUniforms(volumeProgram, bank, camPos, view, worldTime, light, palette);
+            uploadBankUniforms(volumeProgram, bank, camPos, worldTime);
 
-            int color = MathHelper.clamp((int) (255.0f * light), 120, 255);
             int alpha = bank.alphaByte();
             alpha = MathHelper.clamp((int) (alpha * altitudeVisibility), 0, 255);
             if (alpha <= 0) {
                 continue;
             }
             VertexConsumer vc = immediate.getBuffer(CLOUD_LAYERS[bank.textureIndex]);
-            emitBox(vc, bank, color, alpha);
+            emitBox(vc, bank, camPos, color, alpha);
             immediate.draw(CLOUD_LAYERS[bank.textureIndex]);
         }
     }
@@ -391,7 +398,11 @@ public final class AtcCloudVolumeRenderer {
                 float centerX = rowOffset + (tile + 0.5f) * tileSpacing + jitterX;
                 float centerY = cloudBottomY() + localHalfHeight + jitterY;
                 float centerZ = rowCenterZ + jitterZ;
-                float rowLod = MathHelper.clamp(Math.abs(centerZ - (float) camPos.z) / (rowRadius * BAND_ROW_SPACING.value()), 0.0f, 1.0f);
+                float rowLod = MathHelper.clamp(
+                        Math.abs(centerZ - (float) camPos.z) / (rowRadius * BAND_ROW_SPACING.value()),
+                        0.0f,
+                        1.0f
+                );
                 float horizontalDist = horizontalDistanceToBox(camPos, centerX, centerZ, localHalfWidth, localHalfDepth);
                 float nearFade = 1.0f - smoothstep(fadeStart, fadeEnd, horizontalDist);
                 if (nearFade <= 0.01f) {
@@ -445,13 +456,13 @@ public final class AtcCloudVolumeRenderer {
 
     private static int stepCountForDistance(float horizontalDistance, boolean inCloudLayer) {
         if (inCloudLayer) {
-            if (horizontalDistance <= 180.0f) return 6;
-            if (horizontalDistance <= 360.0f) return 5;
-            return 4;
+            if (horizontalDistance <= 180.0f) return 5;
+            if (horizontalDistance <= 360.0f) return 4;
+            return 3;
         }
-        if (horizontalDistance <= 360.0f) return 8;
-        if (horizontalDistance <= 700.0f) return 6;
-        return 4;
+        if (horizontalDistance <= 360.0f) return 5;
+        if (horizontalDistance <= 700.0f) return 4;
+        return 3;
     }
 
     private static float horizontalDistanceToBox(Vec3d camPos,
@@ -625,7 +636,7 @@ public final class AtcCloudVolumeRenderer {
         vc.vertex(x3, y3, z3).color(color, color, color, alpha).texture(u0, 0.0f).light(FULL_BRIGHT);
     }
 
-    private static void emitBox(VertexConsumer vc, CloudBank bank, int color, int alpha) {
+    private static void emitBox(VertexConsumer vc, CloudBank bank, Vec3d camPos, int color, int alpha) {
         float x0 = bank.minX;
         float y0 = bank.minY;
         float z0 = bank.minZ;
@@ -633,12 +644,26 @@ public final class AtcCloudVolumeRenderer {
         float y1 = bank.maxY;
         float z1 = bank.maxZ;
 
-        emitQuad(vc, x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0, color, alpha);
-        emitQuad(vc, x1, y0, z1, x0, y0, z1, x0, y1, z1, x1, y1, z1, color, alpha);
-        emitQuad(vc, x0, y0, z1, x0, y0, z0, x0, y1, z0, x0, y1, z1, color, alpha);
-        emitQuad(vc, x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y1, z0, color, alpha);
-        emitQuad(vc, x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1, color, alpha);
-        emitQuad(vc, x0, y0, z1, x1, y0, z1, x1, y0, z0, x0, y0, z0, color, alpha);
+        // A ray only needs the box face it exits through. For axes where the
+        // camera is within the box slab, either face can be the exit face.
+        if (camPos.z >= z0) {
+            emitQuad(vc, x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0, color, alpha);
+        }
+        if (camPos.z <= z1) {
+            emitQuad(vc, x1, y0, z1, x0, y0, z1, x0, y1, z1, x1, y1, z1, color, alpha);
+        }
+        if (camPos.x >= x0) {
+            emitQuad(vc, x0, y0, z1, x0, y0, z0, x0, y1, z0, x0, y1, z1, color, alpha);
+        }
+        if (camPos.x <= x1) {
+            emitQuad(vc, x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y1, z0, color, alpha);
+        }
+        if (camPos.y <= y1) {
+            emitQuad(vc, x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1, color, alpha);
+        }
+        if (camPos.y >= y0) {
+            emitQuad(vc, x0, y0, z1, x1, y0, z1, x1, y0, z0, x0, y0, z0, color, alpha);
+        }
     }
 
     private static void emitQuad(VertexConsumer vc,
@@ -653,30 +678,47 @@ public final class AtcCloudVolumeRenderer {
         vc.vertex(x3, y3, z3).color(color, color, color, alpha).texture(0.0f, 0.0f).light(FULL_BRIGHT);
     }
 
+    private static void uploadFrameUniforms(ShaderProgram program,
+                                            Vec3d camPos,
+                                            Matrix4f view,
+                                            float light,
+                                            AtcSkyRenderer.CloudPalette palette) {
+        VolumeUniforms uniforms = volumeUniforms(program);
+        setUniformMat4(uniforms.viewMat, view);
+        setUniform3f(uniforms.cameraPos, (float) camPos.x, (float) camPos.y, (float) camPos.z);
+        setUniform1f(uniforms.light, light);
+        Vector3f atmosphere = palette.atmosphere();
+        Vector3f multiply = palette.multiply();
+        setUniform3f(uniforms.atmosphereColor, atmosphere.x, atmosphere.y, atmosphere.z);
+        setUniform3f(uniforms.cloudMultiply, multiply.x, multiply.y, multiply.z);
+    }
+
     private static void uploadBankUniforms(ShaderProgram program,
                                            CloudBank bank,
                                            Vec3d camPos,
-                                           Matrix4f view,
-                                           float worldTime,
-                                           float light,
-                                           AtcSkyRenderer.CloudPalette palette) {
-        setUniformMat4(program, "uViewMat", view);
-        setUniform3f(program, "uCameraPos", (float) camPos.x, (float) camPos.y, (float) camPos.z);
-        setUniform3f(program, "uBoxMin", bank.minX, bank.minY, bank.minZ);
-        setUniform3f(program, "uBoxMax", bank.maxX, bank.maxY, bank.maxZ);
-        setUniform3f(program, "uProfileCenter", bank.centerX, bank.centerY, bank.centerZ);
-        setUniform3f(program, "uProfileHalfSize", bank.halfWidth, bank.halfHeight, bank.halfDepth);
-        setUniform3f(program, "uProfileRight", bank.rightX, bank.rightZ, 0.0f);
-        setUniform3f(program, "uProfileForward", bank.forwardX, bank.forwardZ, 0.0f);
-        setUniform1f(program, "uTime", worldTime * CLOSE_CLOUD_MOTION_SCALE.value() * bank.motionScale + bank.motionOffset);
-        setUniform1f(program, "uSeed", bank.seed);
-        setUniform1f(program, "uAlphaScale", bank.alpha);
-        setUniform1f(program, "uLight", light);
-        setUniform1f(program, "uLayerDepth", bank.layerDepth);
-        setUniform1f(program, "uDistanceTint", distanceTint(bank, camPos));
-        setUniform1f(program, "uStepCount", bank.stepCount);
-        setUniform1f(program, "uDensityScale", bank.densityScale);
-        uploadPaletteUniforms(program, palette);
+                                           float worldTime) {
+        VolumeUniforms uniforms = volumeUniforms(program);
+        setUniform3f(uniforms.boxMin, bank.minX, bank.minY, bank.minZ);
+        setUniform3f(uniforms.boxMax, bank.maxX, bank.maxY, bank.maxZ);
+        setUniform3f(uniforms.profileCenter, bank.centerX, bank.centerY, bank.centerZ);
+        setUniform3f(uniforms.profileHalfSize, bank.halfWidth, bank.halfHeight, bank.halfDepth);
+        setUniform3f(uniforms.profileRight, bank.rightX, bank.rightZ, 0.0f);
+        setUniform3f(uniforms.profileForward, bank.forwardX, bank.forwardZ, 0.0f);
+        setUniform1f(uniforms.time, worldTime * CLOSE_CLOUD_MOTION_SCALE.value() * bank.motionScale + bank.motionOffset);
+        setUniform1f(uniforms.seed, bank.seed);
+        setUniform1f(uniforms.alphaScale, bank.alpha);
+        setUniform1f(uniforms.layerDepth, bank.layerDepth);
+        setUniform1f(uniforms.distanceTint, distanceTint(bank, camPos));
+        setUniform1f(uniforms.stepCount, bank.stepCount);
+        setUniform1f(uniforms.densityScale, bank.densityScale);
+    }
+
+    private static VolumeUniforms volumeUniforms(ShaderProgram program) {
+        if (cachedVolumeProgram != program || cachedVolumeUniforms == null) {
+            cachedVolumeProgram = program;
+            cachedVolumeUniforms = new VolumeUniforms(program);
+        }
+        return cachedVolumeUniforms;
     }
 
     private static void uploadPaletteUniforms(ShaderProgram program, AtcSkyRenderer.CloudPalette palette) {
@@ -698,6 +740,18 @@ public final class AtcCloudVolumeRenderer {
 
     private static void setUniformMat4(ShaderProgram program, String name, Matrix4f value) {
         GlUniform uniform = program.getUniform(name);
+        if (uniform != null) uniform.set(value);
+    }
+
+    private static void setUniform1f(GlUniform uniform, float value) {
+        if (uniform != null) uniform.set(value);
+    }
+
+    private static void setUniform3f(GlUniform uniform, float x, float y, float z) {
+        if (uniform != null) uniform.set(x, y, z);
+    }
+
+    private static void setUniformMat4(GlUniform uniform, Matrix4f value) {
         if (uniform != null) uniform.set(value);
     }
 
@@ -784,6 +838,48 @@ public final class AtcCloudVolumeRenderer {
                 true,
                 params
         );
+    }
+
+    private static final class VolumeUniforms {
+        private final GlUniform viewMat;
+        private final GlUniform cameraPos;
+        private final GlUniform boxMin;
+        private final GlUniform boxMax;
+        private final GlUniform profileCenter;
+        private final GlUniform profileHalfSize;
+        private final GlUniform profileRight;
+        private final GlUniform profileForward;
+        private final GlUniform time;
+        private final GlUniform seed;
+        private final GlUniform alphaScale;
+        private final GlUniform light;
+        private final GlUniform layerDepth;
+        private final GlUniform distanceTint;
+        private final GlUniform stepCount;
+        private final GlUniform densityScale;
+        private final GlUniform atmosphereColor;
+        private final GlUniform cloudMultiply;
+
+        private VolumeUniforms(ShaderProgram program) {
+            viewMat = program.getUniform("uViewMat");
+            cameraPos = program.getUniform("uCameraPos");
+            boxMin = program.getUniform("uBoxMin");
+            boxMax = program.getUniform("uBoxMax");
+            profileCenter = program.getUniform("uProfileCenter");
+            profileHalfSize = program.getUniform("uProfileHalfSize");
+            profileRight = program.getUniform("uProfileRight");
+            profileForward = program.getUniform("uProfileForward");
+            time = program.getUniform("uTime");
+            seed = program.getUniform("uSeed");
+            alphaScale = program.getUniform("uAlphaScale");
+            light = program.getUniform("uLight");
+            layerDepth = program.getUniform("uLayerDepth");
+            distanceTint = program.getUniform("uDistanceTint");
+            stepCount = program.getUniform("uStepCount");
+            densityScale = program.getUniform("uDensityScale");
+            atmosphereColor = program.getUniform("uAtmosphereColor");
+            cloudMultiply = program.getUniform("uCloudMultiply");
+        }
     }
 
     public static final class TuningValue {

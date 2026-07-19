@@ -52,15 +52,13 @@ float horizontalCoverage(vec3 p) {
     vec2 drift = vec2(uTime * 0.00030, -uTime * 0.00016);
     vec2 uv0 = fract(p.xz * 0.00024 + vec2(0.17, 0.61) + drift);
     vec2 uv1 = fract((p.xz + vec2(p.z, -p.x) * 0.31) * 0.00062 + vec2(0.53, 0.23) - drift * 1.7);
-    vec2 uv2 = fract((p.xz + vec2(p.z, -p.x) * 0.17) * 0.00135 + vec2(0.31, 0.79));
 
     float n0 = texture(Sampler1, uv0).r;
     float n1 = texture(Sampler1, uv1).g;
-    float n2 = texture(Sampler1, uv2).b;
-    float field = n0 * 0.56 + n1 * 0.31 + n2 * 0.13;
+    float field = n0 * 0.64 + n1 * 0.36;
 
     float broad = smoothstep(0.20, 0.78, field);
-    float detail = smoothstep(0.18, 0.82, n1 * 0.65 + n2 * 0.35);
+    float detail = smoothstep(0.18, 0.82, n1);
     return clamp(broad * 0.86 + detail * 0.14, 0.0, 1.0);
 }
 
@@ -75,10 +73,9 @@ float volumeClumps(vec3 p, float u, float v, float d) {
     float xy = sampleDetail(local.xy * vec2(3.4, 1.9) + vec2(uSeed * 1.7, 0.13) + drift);
     float zy = sampleDetail(local.zy * vec2(3.1, 2.2) + vec2(0.37, uSeed * 1.3) - drift * 0.7);
     float xz = texture(Sampler1, fract(p.xz * 0.00135 + vec2(uSeed * 0.41, uSeed * 0.17))).r;
-    float fine = sampleDetail((local.xz + local.yy * 0.23) * 6.7 + vec2(uSeed * 2.1, 0.73));
     float cheap3d = hash13(floor(vec3(u * 10.0 + uSeed * 17.0, v * 5.0, d * 12.0)));
 
-    float clump = xy * 0.30 + zy * 0.27 + xz * 0.19 + fine * 0.14 + cheap3d * 0.10;
+    float clump = xy * 0.38 + zy * 0.34 + xz * 0.20 + cheap3d * 0.08;
     float puffs = smoothstep(0.24, 0.74, clump);
 
     vec2 cell = abs(local.xz - 0.5);
@@ -88,8 +85,8 @@ float volumeClumps(vec3 p, float u, float v, float d) {
 }
 
 vec4 profileSample(vec3 p, out float profileDepth, out float clds) {
-    vec2 right = normalize(uProfileRight.xy);
-    vec2 forward = normalize(uProfileForward.xy);
+    vec2 right = uProfileRight.xy;
+    vec2 forward = uProfileForward.xy;
     vec3 halfSize = max(uProfileHalfSize, vec3(0.001));
     vec2 toPoint = p.xz - uProfileCenter.xz;
     float profileU = clamp(0.5 + dot(toPoint, right) / (halfSize.x * 2.0), 0.0, 0.999);
@@ -146,13 +143,8 @@ float densityAt(vec3 p, out float tone) {
         tone = 0.0;
         return 0.0;
     }
-    float coverage = horizontalCoverage(p);
-    float gapMask = smoothstep(0.10, 0.68, coverage);
-    float dp = profile.r * profile.a * mix(0.48, 1.08, gapMask);
-    dp = clamp(dp, 0.0, 1.0);
-
-    vec2 profileRight = normalize(uProfileRight.xy);
-    vec2 profileForward = normalize(uProfileForward.xy);
+    vec2 profileRight = uProfileRight.xy;
+    vec2 profileForward = uProfileForward.xy;
     vec2 toProfile = p.xz - uProfileCenter.xz;
     float orientedU = 0.5 + dot(toProfile, profileRight) / (max(uProfileHalfSize.x, 0.001) * 2.0);
     float orientedDepth = 0.5 + dot(toProfile, profileForward) / (max(uProfileHalfSize.z, 0.001) * 2.0);
@@ -165,6 +157,14 @@ float densityAt(vec3 p, out float tone) {
         tone = 0.0;
         return 0.0;
     }
+    float coverage = horizontalCoverage(p);
+    float gapMask = smoothstep(0.10, 0.68, coverage);
+    if (gapMask <= 0.001) {
+        tone = 0.0;
+        return 0.0;
+    }
+    float dp = profile.r * profile.a * mix(0.48, 1.08, gapMask);
+    dp = clamp(dp, 0.0, 1.0);
     float roundedDepth = pow(clamp(1.0 - normalizedDepth, 0.0, 1.0), 0.55);
     float clumpMask = volumeClumps(p, orientedU, localV, orientedDepth);
     float interiorNoise = mix(0.62, 1.24, clumpMask);
@@ -184,8 +184,11 @@ float densityAt(vec3 p, out float tone) {
     float body = pow(clamp(dp, 0.0, 1.0), mix(1.16, 0.08, clds));
     float alphaShape = body * 1.18 - (1.0 - clds) * 0.22;
     alphaShape = clamp(alphaShape * mix(0.72, 1.16, clumpMask), 0.0, 1.0);
-    float mistNoise = texture(Sampler2, fract(p.xz * 0.003 + vec2(uTime * 0.0025, 0.0))).r;
-    float topMist = smoothstep(0.25, 0.85, mistNoise) * smoothstep(0.54, 0.92, q.y) * edgeFeather * 0.16;
+    float topMist = 0.0;
+    if (q.y > 0.50) {
+        float mistNoise = texture(Sampler2, fract(p.xz * 0.003 + vec2(uTime * 0.0025, 0.0))).r;
+        topMist = smoothstep(0.25, 0.85, mistNoise) * smoothstep(0.54, 0.92, q.y) * edgeFeather * 0.16;
+    }
     alphaShape = max(alphaShape * edgeFeather, topMist);
 
     float greenTone = profile.g * clamp((dp - 0.3) * 6.0, 0.48, 1.0);
@@ -225,7 +228,7 @@ void main() {
 
     float alpha = 0.0;
     float toneAccum = 0.0;
-    const int MAX_STEPS = 8;
+    const int MAX_STEPS = 5;
     int steps = int(clamp(floor(uStepCount + 0.5), 3.0, float(MAX_STEPS)));
     float jitter = hash13(vec3(gl_FragCoord.xy, uSeed + uTime * 0.013));
     for (int i = 0; i < MAX_STEPS; i++) {
