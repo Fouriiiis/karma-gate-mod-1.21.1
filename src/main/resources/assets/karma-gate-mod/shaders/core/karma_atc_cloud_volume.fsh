@@ -208,7 +208,11 @@ void main() {
     }
 
     vec3 dir = ray / rayLen;
-    vec3 invDir = 1.0 / max(abs(dir), vec3(0.00001)) * sign(dir);
+    // sign(0.0) is zero, so use an explicit sign when clamping a nearly
+    // axis-parallel ray. Otherwise the box intersection can select the wrong
+    // proxy face at exact horizontal/vertical viewing angles.
+    vec3 dirSign = mix(vec3(-1.0), vec3(1.0), step(vec3(0.0), dir));
+    vec3 invDir = dirSign / max(abs(dir), vec3(0.00001));
     vec3 t0v = (uBoxMin - rayStart) * invDir;
     vec3 t1v = (uBoxMax - rayStart) * invDir;
     vec3 tminv = min(t0v, t1v);
@@ -219,8 +223,17 @@ void main() {
         discard;
     }
 
+    // emitBox submits every face that could contain the ray exit. More than one
+    // of those quads can rasterize the same pixel, especially along their two
+    // constituent triangles. Only shade the fragment whose rasterized face is
+    // the analytic box exit; otherwise translucent density is accumulated
+    // repeatedly and appears as sharp polygon-aligned lines.
+    float exitTolerance = max(0.05, rayLen * 0.0001);
+    if (abs(tExit - rayLen) > exitTolerance) {
+        discard;
+    }
+
     tEnter = max(tEnter, 0.0);
-    tExit = min(tExit, rayLen);
     float span = tExit - tEnter;
     if (span <= 0.001) {
         discard;
