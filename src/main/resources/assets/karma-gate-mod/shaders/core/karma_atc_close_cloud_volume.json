@@ -1,32 +1,23 @@
 {
-  "blend": {
-    "func": "add",
-    "srcrgb": "src_alpha",
-    "dstrgb": "one_minus_src_alpha"
-  },
-  "vertex": "karma-gate-mod:karma_atc_cloud_volume",
-  "fragment": "karma-gate-mod:karma_atc_cloud_volume",
+  "vertex": "karma-gate-mod:karma_atc_close_cloud_volume",
+  "fragment": "karma-gate-mod:karma_atc_close_cloud_volume",
   "attributes": [
     "Position",
     "Color",
     "UV0",
-    "UV2"
+    "UV1",
+    "UV2",
+    "Normal"
   ],
   "samplers": [
     {
       "name": "Sampler0",
-      "wrap": "clamp",
-      "minfilter": "linear",
-      "magfilter": "linear"
-    },
-    {
-      "name": "Sampler1",
       "wrap": "repeat",
       "minfilter": "linear",
       "magfilter": "linear"
     },
     {
-      "name": "Sampler2",
+      "name": "Sampler1",
       "wrap": "repeat",
       "minfilter": "linear",
       "magfilter": "linear"
@@ -52,64 +43,10 @@
       "values": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
     },
     {
-      "name": "uCameraPos",
-      "type": "float",
-      "count": 3,
-      "values": [0.0, 0.0, 0.0]
-    },
-    {
-      "name": "uBoxMin",
-      "type": "float",
-      "count": 3,
-      "values": [0.0, 0.0, 0.0]
-    },
-    {
-      "name": "uBoxMax",
-      "type": "float",
-      "count": 3,
-      "values": [1.0, 1.0, 1.0]
-    },
-    {
-      "name": "uProfileCenter",
-      "type": "float",
-      "count": 3,
-      "values": [0.0, 0.0, 0.0]
-    },
-    {
-      "name": "uProfileHalfSize",
-      "type": "float",
-      "count": 3,
-      "values": [1.0, 1.0, 1.0]
-    },
-    {
-      "name": "uProfileRight",
-      "type": "float",
-      "count": 3,
-      "values": [1.0, 0.0, 0.0]
-    },
-    {
-      "name": "uProfileForward",
-      "type": "float",
-      "count": 3,
-      "values": [0.0, 1.0, 0.0]
-    },
-    {
       "name": "uTime",
       "type": "float",
       "count": 1,
       "values": [0.0]
-    },
-    {
-      "name": "uSeed",
-      "type": "float",
-      "count": 1,
-      "values": [0.0]
-    },
-    {
-      "name": "uAlphaScale",
-      "type": "float",
-      "count": 1,
-      "values": [1.0]
     },
     {
       "name": "uLight",
@@ -118,28 +55,70 @@
       "values": [1.0]
     },
     {
-      "name": "uLayerDepth",
+      "name": "uOpacity",
       "type": "float",
       "count": 1,
-      "values": [0.0]
+      "values": [0.96]
     },
     {
-      "name": "uDistanceTint",
+      "name": "uVolumeDensity",
       "type": "float",
       "count": 1,
-      "values": [0.0]
+      "values": [0.12]
     },
     {
-      "name": "uStepCount",
+      "name": "uEdgeFalloff",
       "type": "float",
       "count": 1,
       "values": [8.0]
     },
     {
-      "name": "uDensityScale",
+      "name": "uDepthPrepass",
       "type": "float",
       "count": 1,
-      "values": [1.0]
+      "values": [0.0]
+    },
+    {
+      "name": "uFirstRadius",
+      "type": "float",
+      "count": 1,
+      "values": [3375.0]
+    },
+    {
+      "name": "uFadeWidth",
+      "type": "float",
+      "count": 1,
+      "values": [1500.0]
+    },
+    {
+      "name": "uCameraXZ",
+      "type": "float",
+      "count": 2,
+      "values": [0.0, 0.0]
+    },
+    {
+      "name": "uCameraPos",
+      "type": "float",
+      "count": 3,
+      "values": [0.0, 0.0, 0.0]
+    },
+    {
+      "name": "uTileOrigin",
+      "type": "float",
+      "count": 3,
+      "values": [0.0, 0.0, 0.0]
+    },
+    {
+      "name": "uTileScale",
+      "type": "float",
+      "count": 3,
+      "values": [1.0, 1.0, 1.0]
+    },
+    {
+      "name": "uTileYawSinCos",
+      "type": "float",
+      "count": 2,
+      "values": [0.0, 1.0]
     },
     {
       "name": "uAtmosphereColor",

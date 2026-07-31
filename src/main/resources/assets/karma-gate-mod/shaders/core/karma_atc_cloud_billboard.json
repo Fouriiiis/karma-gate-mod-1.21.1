@@ -4,8 +4,8 @@
     "srcrgb": "src_alpha",
     "dstrgb": "one_minus_src_alpha"
   },
-  "vertex": "karma-gate-mod:karma_atc_cloud_distant",
-  "fragment": "karma-gate-mod:karma_atc_cloud_distant",
+  "vertex": "karma-gate-mod:karma_atc_cloud_billboard",
+  "fragment": "karma-gate-mod:karma_atc_cloud_billboard",
   "attributes": [
     "Position",
     "Color",
@@ -15,6 +15,18 @@
   "samplers": [
     {
       "name": "Sampler0",
+      "wrap": "repeat",
+      "minfilter": "linear",
+      "magfilter": "linear"
+    },
+    {
+      "name": "Sampler1",
+      "wrap": "repeat",
+      "minfilter": "linear",
+      "magfilter": "linear"
+    },
+    {
+      "name": "Sampler2",
       "wrap": "repeat",
       "minfilter": "linear",
       "magfilter": "linear"
@@ -38,6 +50,24 @@
       "type": "matrix4x4",
       "count": 16,
       "values": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    },
+    {
+      "name": "uTime",
+      "type": "float",
+      "count": 1,
+      "values": [0.0]
+    },
+    {
+      "name": "uLight",
+      "type": "float",
+      "count": 1,
+      "values": [1.0]
+    },
+    {
+      "name": "uDistantStyle",
+      "type": "float",
+      "count": 1,
+      "values": [0.0]
     },
     {
       "name": "uAtmosphereColor",
