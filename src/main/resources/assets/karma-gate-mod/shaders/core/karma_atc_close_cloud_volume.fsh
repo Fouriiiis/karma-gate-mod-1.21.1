@@ -2,35 +2,36 @@
 
 uniform sampler2D Sampler0;
 uniform sampler2D Sampler1;
+uniform sampler2D Sampler2;
+uniform sampler2D Sampler3;
 
 uniform float uTime;
 uniform float uLight;
 uniform float uOpacity;
-uniform float uVolumeDensity;
-uniform float uEdgeFalloff;
-uniform float uDepthPrepass;
 uniform float uFirstRadius;
 uniform float uFadeWidth;
+uniform float uWarp;
+uniform float uNoiseInfluence;
 uniform vec2 uCameraXZ;
+uniform vec2 uProfileOffset;
+uniform vec2 uWarpPhase;
 uniform vec3 uCameraPos;
+uniform vec3 uTileOrigin;
 uniform vec3 uTileScale;
+uniform vec3 uVoxelGrid;
 uniform vec3 uAtmosphereColor;
 uniform vec3 uCloudMultiply;
 
-in vec4 vColor;
 in vec3 vWorldPos;
-in vec3 vWorldNormal;
 in vec3 vLocalPos;
-in float vHeight;
-in float vProfileShade;
+flat in vec3 vLocalNormal;
+flat in float vShellOpacity;
 
 out vec4 fragColor;
 
-const float TAU = 6.28318530718;
-
-float smooth01(float x) {
-    x = clamp(x, 0.0, 1.0);
-    return x * x * (3.0 - 2.0 * x);
+float smooth01(float value) {
+    value = clamp(value, 0.0, 1.0);
+    return value * value * (3.0 - 2.0 * value);
 }
 
 float overlay(float base, float blend) {
@@ -40,49 +41,11 @@ float overlay(float base, float blend) {
     return 1.0 - 2.0 * (1.0 - base) * (1.0 - blend);
 }
 
-float volumeOpacity(float entryFacing, float densityCue) {
-    float volumeRadius = max(uTileScale.y * 0.5, 1.0);
-    float chordLength = 2.0 * volumeRadius * entryFacing;
-    float depthToCore = chordLength * 0.5;
-    float edgeRamp = smooth01(depthToCore / max(uEdgeFalloff, 1.0));
-    float authoredDensity = mix(0.55, 1.0, densityCue);
-    float opticalDepth = chordLength
-            * edgeRamp
-            * authoredDensity
-            * max(uVolumeDensity, 0.0001)
-            * clamp(uOpacity, 0.0, 1.0);
-    return 1.0 - exp(-opticalDepth);
-}
-
-float projectedSample(sampler2D source,
-                      vec3 position,
-                      vec3 normal,
-                      vec3 frequency,
-                      vec2 drift) {
-    // One dominant-axis lookup replaces three-way triplanar blending. The
-    // inputs are low-frequency cloud textures, so projection transitions are
-    // hidden by the authored shade while fragment texture cost drops by 3x.
-    vec3 axis = abs(normal);
-    vec2 uv;
-    if (axis.y >= axis.x && axis.y >= axis.z) {
-        uv = position.xz * frequency.xz;
-    } else if (axis.x >= axis.z) {
-        uv = position.zy * frequency.zy;
-    } else {
-        uv = position.xy * frequency.xy;
-    }
-    return texture(source, fract(uv + drift)).r;
-}
-
-vec3 cloudPalette(float shade, float atmosphereDepth) {
-    // Cloud.shader quantizes the authored lighting into five broad values and
-    // changes the exponent applied to the palette colour.
-    float posterized = floor(clamp(shade, 0.0, 1.0) * 4.0 + 0.5) * 0.25;
-    vec3 paletteBase = vec3(0.70, 0.73, 0.80);
-    vec3 color = pow(paletteBase, vec3(mix(1.6, 0.4, posterized)));
-    color = mix(color, uAtmosphereColor, clamp(atmosphereDepth, 0.0, 0.96));
-    color *= mix(vec3(1.0), uCloudMultiply, 0.42);
-    return color * mix(0.88, 1.06, clamp(uLight, 0.0, 1.0));
+float profileDensity(vec4 sampleColor) {
+    float greenDominance = sampleColor.g - max(sampleColor.r, sampleColor.b);
+    float background = smoothstep(0.06, 0.28, greenDominance);
+    float coverage = (1.0 - background) * sampleColor.a;
+    return coverage * (0.68 + sampleColor.r * 0.32);
 }
 
 void main() {
@@ -92,109 +55,145 @@ void main() {
             (radialDistance - fadeStart)
                     / max(uFirstRadius - fadeStart, 1.0)
     );
-    if (handoff <= 0.003) {
+    if (handoff <= 0.001) {
         discard;
     }
 
-    vec3 normal = normalize(vWorldNormal);
-    if (uDepthPrepass > 0.5) {
-        vec3 prepassToCamera = uCameraPos - vWorldPos;
-        float prepassDistance = length(prepassToCamera);
-        vec3 prepassViewDirection = prepassDistance > 0.001
-                ? prepassToCamera / prepassDistance
-                : vec3(0.0, 1.0, 0.0);
-        float prepassFacing = clamp(dot(normal, prepassViewDirection), 0.0, 1.0);
-        float prepassDensity = smooth01(clamp(vProfileShade, 0.0, 1.0));
-        float prepassAlpha = volumeOpacity(prepassFacing, prepassDensity) * handoff;
-        if (prepassAlpha < 0.90) {
-            discard;
-        }
-        fragColor = vec4(0.0);
-        return;
-    }
-    vec3 local = vec3(vLocalPos.x, vHeight, vLocalPos.z);
-    vec2 slowDrift = vec2(uTime * 0.00017, -uTime * 0.00011);
-
-    // These two octaves mirror Cloud.shader's 5x/1.5x and 8x/2.5x
-    // _CloudsTex samples. Triplanar projection keeps the detail attached to
-    // the 3D surface and independent of camera angle.
-    float clouds1 = projectedSample(
-            Sampler0,
-            local,
-            normal,
-            vec3(5.0, 1.5, 5.0),
-            slowDrift
+    // The mesh boundary lies between cells. Move a quarter voxel inward so
+    // every fragment shades the occupied source voxel that emitted the face.
+    vec3 samplePosition = clamp(
+            vLocalPos - vLocalNormal * (0.25 / uVoxelGrid),
+            vec3(0.0),
+            vec3(0.999999)
     );
-    float clouds2 = projectedSample(
-            Sampler0,
-            local,
-            normal,
-            vec3(8.0, 2.5, 8.0),
-            slowDrift * 0.73 + vec2(0.31, 0.17)
+    ivec2 frontSize = textureSize(Sampler2, 0);
+    ivec2 sideSize = textureSize(Sampler3, 0);
+    int voxelX = clamp(int(floor(samplePosition.x * float(frontSize.x))), 0, frontSize.x - 1);
+    int voxelY = clamp(int(floor(samplePosition.y * float(frontSize.y))), 0, frontSize.y - 1);
+    int voxelZ = clamp(int(floor(samplePosition.z * float(sideSize.x))), 0, sideSize.x - 1);
+    int geometryVoxelX = voxelX;
+    int geometryVoxelZ = voxelZ;
+    vec2 horizontalUv = (vec2(voxelX, voxelZ) + vec2(0.5))
+            / vec2(frontSize.x, sideSize.x);
+    float warpNoiseX = dot(
+            texture(Sampler1, fract(horizontalUv + uWarpPhase)).rgb,
+            vec3(0.2126, 0.7152, 0.0722)
     );
-    float clouds = overlay(clouds1, clouds2);
+    float warpNoiseZ = dot(
+            texture(
+                    Sampler1,
+                    fract(horizontalUv + uWarpPhase + vec2(0.37, 0.61))
+            ).rgb,
+            vec3(0.2126, 0.7152, 0.0722)
+    );
+    int maxWarpX = int(floor(
+            clamp(uWarp, 0.0, 1.0) * float(frontSize.x) * 0.08 + 0.5
+    ));
+    int maxWarpZ = int(floor(
+            clamp(uWarp, 0.0, 1.0) * float(sideSize.x) * 0.08 + 0.5
+    ));
+    voxelX = int(mod(
+            float(voxelX + int(floor(
+                    (warpNoiseX * 2.0 - 1.0) * float(maxWarpX) + 0.5
+            ))) + float(frontSize.x),
+            float(frontSize.x)
+    ));
+    voxelZ = int(mod(
+            float(voxelZ + int(floor(
+                    (warpNoiseZ * 2.0 - 1.0) * float(maxWarpZ) + 0.5
+            ))) + float(sideSize.x),
+            float(sideSize.x)
+    ));
+    int frontY = frontSize.y - 1 - voxelY;
+    int sideY = sideSize.y - 1 - clamp(voxelY, 0, sideSize.y - 1);
+    vec4 frontSample = texelFetch(Sampler2, ivec2(voxelX, frontY), 0);
+    vec4 sideSample = texelFetch(Sampler3, ivec2(voxelZ, sideY), 0);
 
-    float noise = projectedSample(
+    float frontDensity = profileDensity(frontSample);
+    float sideDensity = profileDensity(sideSample);
+    float intersection = sqrt(max(0.0, frontDensity * sideDensity));
+    float support = intersection * 0.80
+            + min(frontDensity, sideDensity) * 0.20;
+
+    // All procedural lookups use the integer voxel coordinate. Adjacent
+    // fragments on the same voxel therefore receive exactly the same colour.
+    vec3 voxelCoordinate = vec3(voxelX, voxelY, voxelZ);
+    vec2 voxelXZ = (voxelCoordinate.xz + vec2(0.5)) / uVoxelGrid.xz;
+    float noise = texture(
             Sampler1,
-            local,
-            normal,
-            vec3(3.0, 1.5, 3.0),
-            slowDrift * 0.22 + vec2(0.19, 0.43)
-    );
-    noise = 0.5 + sin((uTime * 0.00012 + noise * 2.0) * TAU) * 0.5;
-
-    // The original cloud sprite's green channel is carried on the extracted
-    // mesh and remains the primary source of its illustrated tonal shapes.
-    float shade = pow(
-            clamp(vProfileShade, 0.001, 1.0),
-            mix(1.4, 0.7, noise)
-    );
-    shade = overlay(shade, clouds);
-    shade = clamp(shade * 1.4, 0.0, 1.0);
-
-    // Preserve the reference's broad neutral shelf near the cloud base.
-    float sourceV = 1.0 - clamp(vHeight, 0.0, 1.0);
-    float shelf = clamp(
-            (sourceV - mix(0.8, 0.5, noise)) * mix(5.0, 2.0, noise),
+            fract(voxelXZ * 3.0 + uProfileOffset * 2.7)
+    ).r;
+    noise = 0.5 + sin((noise * 2.0 + uTime * 0.00025) * 6.28318530718) * 0.5;
+    noise = clamp(
+            0.5 + (noise - 0.5) * clamp(uNoiseInfluence, 0.0, 2.0),
             0.0,
             1.0
     );
-    shade = mix(shade, 0.5, shelf);
 
-    // Rain World's close layers use cloudDepth for atmosphere mixing. The 3D
-    // field replaces seven discrete layers with the equivalent continuous
-    // camera-relative gradient.
-    float cloudDepth = smooth01(radialDistance / max(uFirstRadius, 1.0));
-    float atmosphereDepth = cloudDepth * 0.75;
-
-    // A restrained normal term gives true 3D forms readable curvature while
-    // retaining the unlit, posterized character of the 2D shader.
-    vec3 sunDir = normalize(vec3(-0.45, 0.82, -0.28));
-    float normalLight = clamp(dot(normal, sunDir) * 0.5 + 0.5, 0.0, 1.0);
-    shade = clamp(shade * mix(0.88, 1.08, normalLight), 0.0, 1.0);
-
-    vec3 color = cloudPalette(shade, atmosphereDepth);
-    // Approximate Blender's spherical Blend texture without raymarching. For
-    // a sphere, the chord traversed by a view ray entering at this surface is
-    // exactly 2R*cos(theta). The irregular cloud mesh uses the same local
-    // curvature proxy, producing a genuine optical-depth gradient from its
-    // silhouette toward its visually dense interior.
-    vec3 toCamera = uCameraPos - vWorldPos;
-    float cameraDistance = length(toCamera);
-    vec3 viewDirection = cameraDistance > 0.001
-            ? toCamera / cameraDistance
-            : vec3(0.0, 1.0, 0.0);
-    float entryFacing = clamp(dot(normal, viewDirection), 0.0, 1.0);
-    float densityCue = smooth01(
-            clamp(vProfileShade * 0.68 + clouds * 0.32, 0.0, 1.0)
+    float detail1 = texture(
+            Sampler0,
+            fract(vec2(voxelX, voxelY) / vec2(frontSize) * vec2(5.0, 1.5)
+                    + uProfileOffset)
+    ).r;
+    float detail2 = texture(
+            Sampler0,
+            fract(vec2(voxelZ, voxelY) / vec2(sideSize.x, sideSize.y)
+                    * vec2(8.0, 2.5)
+                    + uProfileOffset.yx * 0.73)
+    ).r;
+    float cloudDetail = overlay(detail1, detail2);
+    cloudDetail = mix(
+            0.5,
+            cloudDetail,
+            clamp(uNoiseInfluence, 0.0, 1.0)
     );
-    float volumeAlpha = volumeOpacity(entryFacing, densityCue);
 
-    color = mix(uAtmosphereColor, color, clamp(uOpacity, 0.0, 1.0));
-    color = mix(uAtmosphereColor, color, handoff);
-    float alpha = clamp(volumeAlpha * handoff, 0.0, 0.985);
-    if (alpha <= 0.015) {
+    // Port of Cloud.shader's authored green-channel tone, overlay operation,
+    // lower-deck neutralisation and four-step palette posterisation.
+    float authoredShade = clamp((frontSample.g + sideSample.g) * 0.5, 0.0, 1.0);
+    float colorLevel = pow(max(authoredShade, 0.001), mix(1.4, 0.7, noise))
+            * clamp((support - 0.30) * 6.0, 0.5, 1.0);
+    colorLevel = overlay(colorLevel, cloudDetail);
+    colorLevel = clamp(colorLevel * 1.4, 0.0, 1.0);
+    float lowerDeck = clamp(
+            ((1.0 - samplePosition.y) - mix(0.8, 0.5, noise))
+                    * mix(5.0, 2.0, noise),
+            0.0,
+            1.0
+    );
+    colorLevel = mix(colorLevel, 0.5, lowerDeck);
+    float posterized = floor(clamp(colorLevel, 0.0, 1.0) * 4.0 + 0.5) * 0.25;
+
+    vec3 paletteBase = vec3(0.70, 0.73, 0.80);
+    vec3 cloudColor = pow(
+            paletteBase,
+            vec3(mix(1.6, 0.4, posterized))
+    );
+    float voxelLight = mix(0.88, 1.05, clamp(uLight, 0.0, 1.0));
+    cloudColor *= voxelLight;
+    cloudColor *= mix(vec3(1.0), uCloudMultiply, 0.45);
+
+    vec3 geometryVoxelCoordinate = vec3(geometryVoxelX, voxelY, geometryVoxelZ);
+    vec3 voxelCenterLocal = (geometryVoxelCoordinate + vec3(0.5)) / uVoxelGrid;
+    vec3 voxelCenterWorld = (voxelCenterLocal - vec3(0.5, 0.0, 0.5))
+            * uTileScale
+            + uTileOrigin;
+    float voxelRadialDistance = length(voxelCenterWorld.xz - uCameraXZ);
+    float atmosphereDepth = smooth01(
+            voxelRadialDistance / max(uFirstRadius, 1.0)
+    ) * 0.75;
+    cloudColor = mix(cloudColor, uAtmosphereColor, atmosphereDepth);
+    // Screen-door only the handoff annulus. Interior voxels remain opaque and
+    // write depth, eliminating cross-tile triangle sorting artefacts.
+    float dither = texture(
+            Sampler1,
+            fract(gl_FragCoord.xy / 225.0 + uProfileOffset * 4.11)
+    ).g;
+    if (dither > handoff) {
         discard;
     }
-    fragColor = vec4(color, alpha);
+    fragColor = vec4(
+            cloudColor,
+            clamp(vShellOpacity * uOpacity, 0.0, 1.0)
+    );
 }

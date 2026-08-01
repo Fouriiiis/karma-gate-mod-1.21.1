@@ -14,9 +14,11 @@ import net.minecraft.client.render.VertexFormat;
 import net.minecraft.client.render.VertexFormats;
 import net.minecraft.resource.ResourceManager;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.MathHelper;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.IntStream;
 
 public final class AtcCloseCloudVolumeCache implements AutoCloseable {
     private static final Identifier[] PROFILE_IDS = {
@@ -27,7 +29,7 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
     private static final String[] PROFILE_NAMES = {"clouds1", "clouds2", "clouds3"};
     private static final Identifier NOISE_ID =
             Identifier.of("karma-gate-mod", "clouds/noise-hq.png");
-    private static final int LOD_COUNT = 2;
+    private static final int LOD_COUNT = 1;
     private static final int FULL_BRIGHT = LightmapTextureManager.pack(15, 15);
 
     private static AtcCloseCloudVolumeCache active;
@@ -87,34 +89,31 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
             AtcCloudNoiseMap noise = AtcCloudNoiseMap.load(manager, NOISE_ID);
             long profileDone = System.nanoTime();
 
-            AtcCloseCloudVolumeBuilder builder = new AtcCloseCloudVolumeBuilder();
-            ArrayList<MeshBuild> builtMeshes = new ArrayList<>();
-            int baseResolution = AtcCloudVolumeRenderer.CLOSE_VOLUME_RESOLUTION.intValue();
-            for (int lod = 0; lod < LOD_COUNT; lod++) {
-                int resolution = lod == 0
-                        ? baseResolution
-                        : Math.max(40, Math.round(baseResolution * 0.50f));
-                for (int front = 0; front < profiles.length; front++) {
-                    for (int side = 0; side < profiles.length; side++) {
-                        for (int variant = 0; variant < AtcCloseCloudVolumeBuilder.VARIANTS_PER_PAIR; variant++) {
-                            AtcCloudMesh mesh = builder.build(
-                                    profiles[front],
-                                    profiles[side],
-                                    noise,
-                                    front,
-                                    side,
-                                    variant,
-                                    resolution,
-                                    AtcCloudVolumeRenderer.CLOSE_VOLUME_ISO_LEVEL.value(),
-                                    AtcCloudVolumeRenderer.CLOSE_VOLUME_BREAKUP.value(),
-                                    AtcCloudVolumeRenderer.CLOSE_VOLUME_WARP.value(),
-                                    AtcCloudVolumeRenderer.CLOSE_VOLUME_DEPTH_SCALE.value()
-                            );
-                            builtMeshes.add(new MeshBuild(lod, front, side, variant, mesh));
-                        }
-                    }
-                }
-            }
+            int variants = AtcCloseCloudVolumeBuilder.VARIANTS_PER_PAIR;
+            int pairCount = profiles.length * profiles.length * variants;
+            MeshBuild[] meshBuilds = new MeshBuild[pairCount];
+            IntStream.range(0, pairCount).parallel().forEach(job -> {
+                int front = job / (profiles.length * variants);
+                int side = (job / variants) % profiles.length;
+                int variant = job % variants;
+                AtcCloudMesh mesh = new AtcCloseCloudVolumeBuilder().build(
+                        profiles[front],
+                        profiles[side],
+                        noise,
+                        front,
+                        side,
+                        variant,
+                        profiles[front].width(),
+                        AtcCloudVolumeRenderer.CLOSE_VOLUME_ISO_LEVEL.value(),
+                        AtcCloudVolumeRenderer.CLOSE_VOLUME_BREAKUP.value(),
+                        AtcCloudVolumeRenderer.CLOSE_VOLUME_WARP.value(),
+                        AtcCloudVolumeRenderer.CLOSE_VOXEL_NOISE_INFLUENCE.value(),
+                        AtcCloudVolumeRenderer.CLOSE_VOXEL_ROUNDING.value(),
+                        AtcCloudVolumeRenderer.CLOSE_VOLUME_DEPTH_SCALE.value()
+                );
+                meshBuilds[job] = new MeshBuild(0, front, side, variant, mesh);
+            });
+            ArrayList<MeshBuild> builtMeshes = new ArrayList<>(List.of(meshBuilds));
             long meshDone = System.nanoTime();
 
             Entry[] entries = new Entry[builtMeshes.size()];
@@ -218,15 +217,17 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
         float[] normals = mesh.normals;
         float[] heights = mesh.heights;
         float[] shades = mesh.shades;
+        float[] thicknesses = mesh.thicknesses;
         int[] indices = mesh.indices;
         for (int index : indices) {
             int p = index * 3;
             int n = index * 3;
             float height = heights[index];
             float profileShade = shades[index];
+            int interiorThickness = Math.round(MathHelper.clamp(thicknesses[index], 0.0f, 1.0f) * 255.0f);
             int vertexTint = Math.round((0.88f + height * 0.12f) * 255.0f);
             buffer.vertex(positions[p], positions[p + 1], positions[p + 2])
-                    .color(vertexTint, vertexTint, vertexTint, 255)
+                    .color(vertexTint, vertexTint, vertexTint, interiorThickness)
                     .texture(height, profileShade)
                     .overlay(OverlayTexture.DEFAULT_UV)
                     .light(FULL_BRIGHT)
@@ -249,11 +250,11 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
 
     private static long settingsKey() {
         long h = 1469598103934665603L;
-        h = mix(h, AtcCloudVolumeRenderer.CLOSE_VOLUME_RESOLUTION.intValue());
         h = mix(h, Float.floatToIntBits(AtcCloudVolumeRenderer.CLOSE_VOLUME_ISO_LEVEL.value()));
         h = mix(h, Float.floatToIntBits(AtcCloudVolumeRenderer.CLOSE_VOLUME_BREAKUP.value()));
         h = mix(h, Float.floatToIntBits(AtcCloudVolumeRenderer.CLOSE_VOLUME_WARP.value()));
-        h = mix(h, Float.floatToIntBits(AtcCloudVolumeRenderer.CLOSE_VOLUME_DEPTH_SCALE.value()));
+        h = mix(h, Float.floatToIntBits(AtcCloudVolumeRenderer.CLOSE_VOXEL_NOISE_INFLUENCE.value()));
+        h = mix(h, Float.floatToIntBits(AtcCloudVolumeRenderer.CLOSE_VOXEL_ROUNDING.value()));
         return h;
     }
 

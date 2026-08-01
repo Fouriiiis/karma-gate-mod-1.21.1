@@ -120,6 +120,30 @@ public final class AtcCloudProfile {
         return name;
     }
 
+    public int width() {
+        return width;
+    }
+
+    public int height() {
+        return height;
+    }
+
+    public float densityPixelWrapped(int x, int y) {
+        int wrappedX = Math.floorMod(x, width);
+        int clampedY = MathHelper.clamp(y, 0, height - 1);
+        return density[clampedY * width + wrappedX];
+    }
+
+    public float shadePixelWrapped(int x, int y) {
+        int wrappedX = Math.floorMod(x, width);
+        int clampedY = MathHelper.clamp(y, 0, height - 1);
+        return shade[clampedY * width + wrappedX];
+    }
+
+    float[] densityPixels() {
+        return density;
+    }
+
     private float sample(float[] values, float u, float v) {
         if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) {
             return 0.0f;

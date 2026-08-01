@@ -5,6 +5,7 @@ public final class AtcCloudMesh {
     public final float[] normals;
     public final float[] heights;
     public final float[] shades;
+    public final float[] thicknesses;
     public final int[] indices;
     public final float localWidth;
     public final float localHeight;
@@ -18,6 +19,7 @@ public final class AtcCloudMesh {
                         float[] normals,
                         float[] heights,
                         float[] shades,
+                        float[] thicknesses,
                         int[] indices,
                         float localWidth,
                         float localHeight,
@@ -30,6 +32,7 @@ public final class AtcCloudMesh {
         this.normals = normals;
         this.heights = heights;
         this.shades = shades;
+        this.thicknesses = thicknesses;
         this.indices = indices;
         this.localWidth = localWidth;
         this.localHeight = localHeight;

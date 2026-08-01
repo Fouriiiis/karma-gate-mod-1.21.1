@@ -30,7 +30,7 @@ public final class AtcCloudShaders implements ClientModInitializer {
                 .registerReloadListener(new SimpleSynchronousResourceReloadListener() {
                     @Override
                     public Identifier getFabricId() {
-                        return Identifier.of("karma-gate-mod", "close_cloud_volume_cache");
+                        return Identifier.of("karma-gate-mod", "close_cloud_voxel_cache");
                     }
 
                     @Override
@@ -38,7 +38,10 @@ public final class AtcCloudShaders implements ClientModInitializer {
                         AtcCloseCloudVolumeCache.reload(manager);
                     }
                 });
-        ClientLifecycleEvents.CLIENT_STOPPING.register(client -> AtcCloseCloudVolumeCache.closeActive());
+        ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
+            AtcCloseCloudVolumeRenderer.close();
+            AtcCloseCloudVolumeCache.closeActive();
+        });
     }
 
     public static RenderPhase.ShaderProgram phase() {

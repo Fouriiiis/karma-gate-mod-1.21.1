@@ -32,7 +32,7 @@ import static net.minecraft.client.render.RenderPhase.TRANSLUCENT_TRANSPARENCY;
 
 /**
  * Above-cloud renderer split into two paths:
- * distant Rain World-style billboard rings, and cached close 3D cloud meshes.
+ * distant Rain World-style billboard rings, and raymarched close cloud volumes.
  */
 public final class AtcCloudVolumeRenderer {
     private static final Identifier CLOUD_1 = Identifier.of("karma-gate-mod", "clouds/clouds1.png");
@@ -75,15 +75,19 @@ public final class AtcCloudVolumeRenderer {
     public static final TuningValue CLOUD_NORTH_SPEED =
             new TuningValue("Cloud North Speed", 2.0f, 0.0f, 20.0f, false);
     public static final TuningValue CLOSE_VOLUME_RESOLUTION =
-            new TuningValue("Close Volume Resolution", 112.0f, 32.0f, 160.0f, true, true);
+            new TuningValue("Close Voxel Native Resolution", 700.0f, 700.0f, 700.0f, true);
     public static final TuningValue CLOSE_VOLUME_ISO_LEVEL =
             new TuningValue("Close Volume Iso Level", 0.38f, 0.15f, 0.80f, false, true);
     public static final TuningValue CLOSE_VOLUME_BREAKUP =
-            new TuningValue("Close Volume Breakup", 0.035f, 0.0f, 0.35f, false, true);
+            new TuningValue("Close Voxel Breakup", 0.035f, 0.0f, 0.35f, false, true);
     public static final TuningValue CLOSE_VOLUME_WARP =
-            new TuningValue("Close Horizontal Warp", 0.14f, 0.0f, 0.40f, false, true);
+            new TuningValue("Close Voxel Horizontal Warp", 0.14f, 0.0f, 0.40f, false, true);
+    public static final TuningValue CLOSE_VOXEL_NOISE_INFLUENCE =
+            new TuningValue("Close Voxel Noise Influence", 1.0f, 0.0f, 2.0f, false, true);
+    public static final TuningValue CLOSE_VOXEL_ROUNDING =
+            new TuningValue("Close Voxel Rounding", 0.35f, 0.0f, 1.0f, false, true);
     public static final TuningValue CLOSE_VOLUME_DEPTH_SCALE =
-            new TuningValue("Close Volume Depth Scale", 0.72f, 0.35f, 1.35f, false, true);
+            new TuningValue("Close Voxel Depth Scale", 1.0f, 1.0f, 1.0f, false);
     public static final TuningValue CLOSE_TILE_WIDTH_X =
             new TuningValue("Close Tile Width X", 1800.0f, 128.0f, 4000.0f, false);
     public static final TuningValue CLOSE_TILE_WIDTH_Z =
@@ -91,13 +95,7 @@ public final class AtcCloudVolumeRenderer {
     public static final TuningValue CLOSE_HANDOFF_FADE_WIDTH =
             new TuningValue("Close Handoff Fade Width", 0.0f, 0.0f, 8000.0f, false);
     public static final TuningValue CLOSE_VOLUME_OPACITY =
-            new TuningValue("Close Volume Opacity", 0.96f, 0.05f, 1.0f, false);
-    public static final TuningValue CLOSE_VOLUME_DENSITY =
-            new TuningValue("Close Volume Density", 0.12f, 0.005f, 0.50f, false);
-    public static final TuningValue CLOSE_VOLUME_EDGE_FALLOFF =
-            new TuningValue("Close Volume Edge Falloff", 8.0f, 1.0f, 400.0f, false);
-    public static final TuningValue CLOSE_INTERIOR_FOG_OPACITY =
-            new TuningValue("Close Interior Fog Opacity", 0.72f, 0.0f, 0.95f, false);
+            new TuningValue("Close Volume Opacity", 1.0f, 0.05f, 1.0f, false);
     public static final TuningValue COWBOY_EASTER_EGG_X =
             new TuningValue("Cowboy X", 0.0f, -100000.0f, 100000.0f, false);
     public static final TuningValue COWBOY_EASTER_EGG_Z =
@@ -112,14 +110,13 @@ public final class AtcCloudVolumeRenderer {
             CLOSE_VOLUME_ISO_LEVEL,
             CLOSE_VOLUME_BREAKUP,
             CLOSE_VOLUME_WARP,
+            CLOSE_VOXEL_NOISE_INFLUENCE,
+            CLOSE_VOXEL_ROUNDING,
             CLOSE_VOLUME_DEPTH_SCALE,
             CLOSE_TILE_WIDTH_X,
             CLOSE_TILE_WIDTH_Z,
             CLOSE_HANDOFF_FADE_WIDTH,
             CLOSE_VOLUME_OPACITY,
-            CLOSE_VOLUME_DENSITY,
-            CLOSE_VOLUME_EDGE_FALLOFF,
-            CLOSE_INTERIOR_FOG_OPACITY,
             DISTANT_LAYER_COUNT,
             DISTANT_MAX_DISTANCE,
             DISTANT_WIDTH_SCALE,

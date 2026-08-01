@@ -3,23 +3,13 @@ package dev.fouriis.karmagate.client;
 import net.minecraft.util.math.MathHelper;
 
 import java.util.Arrays;
+import java.util.BitSet;
 
+/** Builds a block-accurate cloud volume at the source profile's native resolution. */
 public final class AtcCloseCloudVolumeBuilder {
     public static final int PROFILE_COUNT = 3;
-    public static final int VARIANTS_PER_PAIR = 3;
-
-    private static final int[][] CORNERS = {
-            {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
-            {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}
-    };
-    private static final int[][] TETRAS = {
-            {0, 5, 1, 6},
-            {0, 1, 2, 6},
-            {0, 2, 3, 6},
-            {0, 3, 7, 6},
-            {0, 7, 4, 6},
-            {0, 4, 5, 6}
-    };
+    public static final int VARIANTS_PER_PAIR = 1;
+    private static final float[] SHELL_OPACITY = {0.25f, 0.50f, 0.75f, 1.0f};
 
     public AtcCloudMesh build(AtcCloudProfile front,
                               AtcCloudProfile side,
@@ -27,181 +17,246 @@ public final class AtcCloseCloudVolumeBuilder {
                               int frontIndex,
                               int sideIndex,
                               int variantIndex,
-                              int resolution,
+                              int ignoredResolution,
                               float isoLevel,
                               float breakupAmount,
                               float warpAmount,
-                              float depthScale) {
-        int sizeX = MathHelper.clamp(resolution, 32, 160);
-        int sizeY = MathHelper.clamp(Math.round(resolution * 0.54f), 28, 96);
-        int sizeZ = MathHelper.clamp(Math.round(resolution * MathHelper.clamp(depthScale, 0.45f, 1.25f)), 32, 144);
-        long seed = hash(frontIndex + 17, sideIndex + 31, variantIndex + 73);
-        FieldData fields = buildField(
+                              float noiseInfluence,
+                              float rounding,
+                              float ignoredDepthScale) {
+        int sizeX = front.width();
+        int sizeY = Math.min(front.height(), side.height());
+        int sizeZ = side.width();
+        long seed = variantSeed(frontIndex, sideIndex, variantIndex);
+        BitSet occupied = buildOccupancy(
                 front,
                 side,
                 noise,
-                seed,
                 sizeX,
                 sizeY,
                 sizeZ,
+                seed,
+                isoLevel,
                 breakupAmount,
-                warpAmount
+                warpAmount,
+                noiseInfluence,
+                rounding
         );
-        smoothField(fields.density, sizeX, sizeY, sizeZ, 1);
-        return extractSurface(fields.density, fields.shade, sizeX, sizeY, sizeZ, isoLevel);
+        return greedyMesh(occupied, sizeX, sizeY, sizeZ);
     }
 
-    private FieldData buildField(AtcCloudProfile front,
-                                 AtcCloudProfile side,
-                                 AtcCloudNoiseMap noise,
-                                 long seed,
-                                 int sizeX,
-                                 int sizeY,
-                                 int sizeZ,
-                                 float breakupAmount,
-                                 float warpAmount) {
-        float[] field = new float[sizeX * sizeY * sizeZ];
-        float[] shadeField = new float[field.length];
+    private BitSet buildOccupancy(AtcCloudProfile front,
+                                  AtcCloudProfile side,
+                                  AtcCloudNoiseMap noise,
+                                  int sizeX,
+                                  int sizeY,
+                                  int sizeZ,
+                                  long seed,
+                                  float isoLevel,
+                                  float breakupAmount,
+                                  float warpAmount,
+                                  float noiseInfluence,
+                                  float rounding) {
+        int horizontalSize = Math.multiplyExact(sizeX, sizeZ);
+        short[] warpedX = new short[horizontalSize];
+        short[] warpedZ = new short[horizontalSize];
+        byte[] breakup = new byte[horizontalSize];
         float phaseX = hashUnit(seed ^ 0x43A31D7BL) * 32.0f;
         float phaseZ = hashUnit(seed ^ 0x7F4A7C15L) * 32.0f;
-        float[] warpedU = new float[sizeX * sizeZ];
-        float[] warpedW = new float[sizeX * sizeZ];
-        float[] columnNoise = new float[sizeX * sizeZ];
-        float distortionStrength = MathHelper.clamp(warpAmount, 0.0f, 1.0f) * 0.55f;
-        float breakupStrength = breakupAmount * MathHelper.clamp(warpAmount, 0.0f, 1.0f);
+        float noiseStrength = MathHelper.clamp(noiseInfluence, 0.0f, 2.0f);
+        int maxWarpX = Math.round(
+                MathHelper.clamp(warpAmount, 0.0f, 1.0f) * noiseStrength * sizeX * 0.08f
+        );
+        int maxWarpZ = Math.round(
+                MathHelper.clamp(warpAmount, 0.0f, 1.0f) * noiseStrength * sizeZ * 0.08f
+        );
 
-        // Build one horizontal warp map and reuse it for every Y sample. This
-        // bends the X/Z layout without stretching, shifting, or otherwise
-        // modifying the vertical cloud profiles.
         for (int z = 0; z < sizeZ; z++) {
-            float w0 = z / (float) (sizeZ - 1);
+            float w = (z + 0.5f) / sizeZ;
             for (int x = 0; x < sizeX; x++) {
-                float u0 = x / (float) (sizeX - 1);
-                float noiseX = noise.sample(
-                        u0 + phaseX,
-                        w0 + phaseZ
-                );
-                float noiseZ = noise.sample(
-                        u0 + phaseX + 0.37f,
-                        w0 + phaseZ + 0.61f
-                );
+                float u = (x + 0.5f) / sizeX;
+                float noiseX = noise.sample(u + phaseX, w + phaseZ);
+                float noiseZ = noise.sample(u + phaseX + 0.37f, w + phaseZ + 0.61f);
                 int horizontalIndex = z * sizeX + x;
-                warpedU[horizontalIndex] = u0
-                        + (noiseX * 2.0f - 1.0f) * distortionStrength;
-                warpedW[horizontalIndex] = w0
-                        + (noiseZ * 2.0f - 1.0f) * distortionStrength;
-                columnNoise[horizontalIndex] = noiseX;
+                int offsetX = Math.round((noiseX * 2.0f - 1.0f) * maxWarpX);
+                int offsetZ = Math.round((noiseZ * 2.0f - 1.0f) * maxWarpZ);
+                warpedX[horizontalIndex] = (short) Math.floorMod(x + offsetX, sizeX);
+                warpedZ[horizontalIndex] = (short) Math.floorMod(z + offsetZ, sizeZ);
+                breakup[horizontalIndex] = (byte) MathHelper.clamp(
+                        Math.round(noiseX * 255.0f),
+                        0,
+                        255
+                );
             }
         }
 
-        for (int z = 0; z < sizeZ; z++) {
-            for (int y = 0; y < sizeY; y++) {
-                float localY = y / (float) (sizeY - 1);
-                float v0 = 1.0f - localY;
+        int voxelCount = Math.multiplyExact(horizontalSize, sizeY);
+        BitSet occupied = new BitSet(voxelCount);
+        float threshold = MathHelper.clamp(isoLevel, 0.05f, 0.90f);
+        float breakupStrength = MathHelper.clamp(breakupAmount, 0.0f, 0.35f) * noiseStrength;
+        float roundingStrength = MathHelper.clamp(rounding, 0.0f, 1.0f);
+        float[] frontPixels = front.densityPixels();
+        float[] sidePixels = side.densityPixels();
+        for (int y = 0; y < sizeY; y++) {
+            int sourceY = sizeY - 1 - y;
+            int frontRow = sourceY * sizeX;
+            int sideRow = sourceY * sizeZ;
+            for (int z = 0; z < sizeZ; z++) {
+                int horizontalBase = z * sizeX;
                 for (int x = 0; x < sizeX; x++) {
-                    int horizontalIndex = z * sizeX + x;
-                    float sampleU = warpedU[horizontalIndex];
-                    float sampleW = warpedW[horizontalIndex];
-
-                    // Exactly two source samplers define the volume: the front
-                    // profile controls X/Y and the side profile controls Z/Y.
-                    // noise-hq.png only offsets their horizontal coordinates.
-                    float frontDensity = front.sampleDensityWrappedU(sampleU, v0);
-                    float sideDensity = side.sampleDensityWrappedU(sampleW, v0);
-                    float frontShade = front.sampleShadeWrappedU(sampleU, v0);
-                    float sideShade = side.sampleShadeWrappedU(sampleW, v0);
-                    float intersection = (float) Math.sqrt(Math.max(0.0f, frontDensity * sideDensity));
-                    float support = intersection * 0.80f
+                    int horizontalIndex = horizontalBase + x;
+                    int profileX = warpedX[horizontalIndex] & 0xFFFF;
+                    int profileZ = warpedZ[horizontalIndex] & 0xFFFF;
+                    float frontDensity = frontPixels[frontRow + profileX];
+                    float sideDensity = sidePixels[sideRow + profileZ];
+                    float product = Math.max(0.0f, frontDensity * sideDensity);
+                    float intersection = (float) Math.sqrt(product);
+                    float roundedIntersection = MathHelper.lerp(
+                            roundingStrength * 0.55f,
+                            intersection,
+                            product
+                    );
+                    float support = roundedIntersection * 0.80f
                             + Math.min(frontDensity, sideDensity) * 0.20f;
                     float density = smoothstep(0.04f, 0.72f, support);
-                    if (density > 0.001f) {
-                        density += (columnNoise[horizontalIndex] * 2.0f - 1.0f)
-                                * breakupStrength;
+                    if (density > 0.001f && breakupStrength > 0.0f) {
+                        float signedNoise = ((breakup[horizontalIndex] & 0xFF) / 255.0f) * 2.0f - 1.0f;
+                        float surfaceWeight = 1.0f - Math.abs(density * 2.0f - 1.0f);
+                        density += signedNoise
+                                * breakupStrength
+                                * (0.20f + surfaceWeight * 0.80f);
                     }
-
-                    float verticalCap = smoothstep(0.015f, 0.06f, localY)
-                            * (1.0f - smoothstep(0.985f, 1.0f, localY));
-                    int fieldIndex = index(x, y, z, sizeX, sizeY);
-                    field[fieldIndex] = MathHelper.clamp(density * verticalCap, 0.0f, 1.0f);
-                    shadeField[fieldIndex] = MathHelper.clamp(
-                            (frontShade + sideShade) * 0.5f,
-                            0.0f,
-                            1.0f
-                    );
-                }
-            }
-        }
-        return new FieldData(field, shadeField);
-    }
-
-    private void smoothField(float[] field, int sizeX, int sizeY, int sizeZ, int passes) {
-        float[] scratch = new float[field.length];
-        for (int pass = 0; pass < passes; pass++) {
-            System.arraycopy(field, 0, scratch, 0, field.length);
-            for (int z = 1; z < sizeZ - 1; z++) {
-                for (int y = 1; y < sizeY - 1; y++) {
-                    for (int x = 1; x < sizeX - 1; x++) {
-                        float center = scratch[index(x, y, z, sizeX, sizeY)];
-                        float axial =
-                                scratch[index(x - 1, y, z, sizeX, sizeY)]
-                                        + scratch[index(x + 1, y, z, sizeX, sizeY)]
-                                        + scratch[index(x, y - 1, z, sizeX, sizeY)]
-                                        + scratch[index(x, y + 1, z, sizeX, sizeY)]
-                                        + scratch[index(x, y, z - 1, sizeX, sizeY)]
-                                        + scratch[index(x, y, z + 1, sizeX, sizeY)];
-                        field[index(x, y, z, sizeX, sizeY)] = center * 0.58f + axial * (0.42f / 6.0f);
+                    if (density >= threshold) {
+                        occupied.set(index(x, y, z, sizeX, sizeY));
                     }
                 }
             }
         }
+        return occupied;
     }
 
-    private AtcCloudMesh extractSurface(float[] field,
-                                        float[] shadeField,
-                                        int sizeX,
-                                        int sizeY,
-                                        int sizeZ,
-                                        float isoLevel) {
+    private AtcCloudMesh greedyMesh(BitSet occupied, int sizeX, int sizeY, int sizeZ) {
+        BitSet[] layers = new BitSet[SHELL_OPACITY.length];
+        layers[0] = occupied;
+        for (int layer = 1; layer < layers.length; layer++) {
+            layers[layer] = erode(layers[layer - 1], sizeX, sizeY, sizeZ);
+        }
+        int[] dimensions = {sizeX, sizeY, sizeZ};
+        int maxMaskSize = Math.max(
+                sizeX * sizeY,
+                Math.max(sizeX * sizeZ, sizeY * sizeZ)
+        );
+        byte[] mask = new byte[maxMaskSize];
         FloatList positions = new FloatList();
         FloatList normals = new FloatList();
         FloatList heights = new FloatList();
         FloatList shades = new FloatList();
-        IntList indices = new IntList();
+        FloatList thicknesses = new FloatList();
+        IntList[] layerIndices = new IntList[SHELL_OPACITY.length];
+        for (int layer = 0; layer < layerIndices.length; layer++) {
+            layerIndices[layer] = new IntList();
+        }
 
-        // With translucent depth writes disabled, triangle submission order is
-        // also blend order. Submit the lower deck before the formations so it
-        // remains visually behind them when viewed from above.
-        appendBaseShelf(positions, normals, heights, shades, indices);
-
-        for (int z = 0; z < sizeZ - 1; z++) {
-            for (int y = 0; y < sizeY - 1; y++) {
-                for (int x = 0; x < sizeX - 1; x++) {
-                    float[] values = new float[8];
-                    for (int i = 0; i < 8; i++) {
-                        int gx = x + CORNERS[i][0];
-                        int gy = y + CORNERS[i][1];
-                        int gz = z + CORNERS[i][2];
-                        values[i] = field[index(gx, gy, gz, sizeX, sizeY)];
+        int[] x = new int[3];
+        int[] q = new int[3];
+        int[] du = new int[3];
+        int[] dv = new int[3];
+        for (int axis = 0; axis < 3; axis++) {
+            int u = (axis + 1) % 3;
+            int v = (axis + 2) % 3;
+            q[0] = q[1] = q[2] = 0;
+            q[axis] = 1;
+            x[axis] = -1;
+            while (x[axis] < dimensions[axis]) {
+                int maskIndex = 0;
+                for (x[v] = 0; x[v] < dimensions[v]; x[v]++) {
+                    for (x[u] = 0; x[u] < dimensions[u]; x[u]++) {
+                        int a = x[axis] >= 0
+                                ? shellDepth(layers, x[0], x[1], x[2], sizeX, sizeY, sizeZ)
+                                : -1;
+                        int b = x[axis] < dimensions[axis] - 1
+                                ? shellDepth(
+                                layers,
+                                x[0] + q[0],
+                                x[1] + q[1],
+                                x[2] + q[2],
+                                sizeX,
+                                sizeY,
+                                sizeZ
+                        )
+                                : -1;
+                        mask[maskIndex++] = a == b
+                                ? 0
+                                : (byte) (a > b ? a + 1 : -(b + 1));
                     }
-                    emitCellTetras(
-                            field,
-                            shadeField,
-                            sizeX,
-                            sizeY,
-                            sizeZ,
-                            x,
-                            y,
-                            z,
-                            values,
-                            isoLevel,
-                            positions,
-                            normals,
-                            heights,
-                            shades,
-                            indices
-                    );
+                }
+                x[axis]++;
+
+                maskIndex = 0;
+                for (int j = 0; j < dimensions[v]; j++) {
+                    for (int i = 0; i < dimensions[u]; ) {
+                        byte face = mask[maskIndex];
+                        if (face == 0) {
+                            i++;
+                            maskIndex++;
+                            continue;
+                        }
+                        int width = 1;
+                        while (i + width < dimensions[u]
+                                && mask[maskIndex + width] == face) {
+                            width++;
+                        }
+                        int height = 1;
+                        heightLoop:
+                        while (j + height < dimensions[v]) {
+                            int row = maskIndex + height * dimensions[u];
+                            for (int k = 0; k < width; k++) {
+                                if (mask[row + k] != face) {
+                                    break heightLoop;
+                                }
+                            }
+                            height++;
+                        }
+
+                        x[u] = i;
+                        x[v] = j;
+                        du[0] = du[1] = du[2] = 0;
+                        dv[0] = dv[1] = dv[2] = 0;
+                        du[u] = width;
+                        dv[v] = height;
+                        appendQuad(
+                                positions,
+                                normals,
+                                heights,
+                                shades,
+                                thicknesses,
+                                layerIndices,
+                                x,
+                                du,
+                                dv,
+                                axis,
+                                face,
+                                dimensions
+                        );
+
+                        for (int h = 0; h < height; h++) {
+                            Arrays.fill(
+                                    mask,
+                                    maskIndex + h * dimensions[u],
+                                    maskIndex + h * dimensions[u] + width,
+                                    (byte) 0
+                            );
+                        }
+                        i += width;
+                        maskIndex += width;
+                    }
                 }
             }
+        }
+
+        IntList indices = new IntList();
+        for (int layer = layerIndices.length - 1; layer >= 0; layer--) {
+            indices.addAll(layerIndices[layer]);
         }
 
         return new AtcCloudMesh(
@@ -209,297 +264,158 @@ public final class AtcCloseCloudVolumeBuilder {
                 normals.toArray(),
                 heights.toArray(),
                 shades.toArray(),
+                thicknesses.toArray(),
                 indices.toArray(),
                 1.0f,
                 1.0f,
                 1.0f,
-                field,
-                sizeX,
-                sizeY,
-                sizeZ
+                new float[0],
+                0,
+                0,
+                0
         );
     }
 
-    private void appendBaseShelf(FloatList positions,
-                                 FloatList normals,
-                                 FloatList heights,
-                                 FloatList shades,
-                                 IntList indices) {
-        final int segments = 8;
-        for (int z = 0; z < segments; z++) {
-            float w0 = z / (float) segments;
-            float w1 = (z + 1) / (float) segments;
-            for (int x = 0; x < segments; x++) {
-                float u0 = x / (float) segments;
-                float u1 = (x + 1) / (float) segments;
-                int a = addShelfVertex(u0, w0, positions, normals, heights, shades);
-                int b = addShelfVertex(u0, w1, positions, normals, heights, shades);
-                int c = addShelfVertex(u1, w1, positions, normals, heights, shades);
-                int d = addShelfVertex(u1, w0, positions, normals, heights, shades);
-                indices.add(a);
-                indices.add(b);
-                indices.add(c);
-                indices.add(a);
-                indices.add(c);
-                indices.add(d);
-            }
-        }
-    }
-
-    private int addShelfVertex(float u,
-                               float w,
-                               FloatList positions,
-                               FloatList normals,
-                               FloatList heights,
-                               FloatList shades) {
-        float tau = (float) (Math.PI * 2.0);
-        float sinU = MathHelper.sin(u * tau);
-        float sinW = MathHelper.sin(w * tau);
-        float height = 0.105f + sinU * sinW * 0.014f
-                + MathHelper.sin(u * tau * 2.0f) * MathHelper.sin(w * tau * 2.0f) * 0.005f;
-        float dhdu = tau * MathHelper.cos(u * tau) * sinW * 0.014f
-                + tau * 2.0f * MathHelper.cos(u * tau * 2.0f)
-                * MathHelper.sin(w * tau * 2.0f) * 0.005f;
-        float dhdw = tau * sinU * MathHelper.cos(w * tau) * 0.014f
-                + tau * 2.0f * MathHelper.sin(u * tau * 2.0f)
-                * MathHelper.cos(w * tau * 2.0f) * 0.005f;
-        float nx = -dhdu;
-        float ny = 1.0f;
-        float nz = -dhdw;
-        float inverseLength = 1.0f / MathHelper.sqrt(nx * nx + ny * ny + nz * nz);
-        int vertex = positions.size() / 3;
-        positions.add(u - 0.5f);
-        positions.add(height);
-        positions.add(w - 0.5f);
-        normals.add(nx * inverseLength);
-        normals.add(ny * inverseLength);
-        normals.add(nz * inverseLength);
-        heights.add(height);
-        shades.add(0.48f + (height - 0.105f) * 3.0f);
-        return vertex;
-    }
-
-    private void emitCellTetras(float[] field,
-                                float[] shadeField,
-                                int sizeX,
-                                int sizeY,
-                                int sizeZ,
-                                int cellX,
-                                int cellY,
-                                int cellZ,
-                                float[] cubeValues,
-                                float isoLevel,
-                                FloatList positions,
-                                FloatList normals,
-                                FloatList heights,
-                                FloatList shades,
-                                IntList indices) {
-        for (int[] tetra : TETRAS) {
-            float[][] p = new float[4][3];
-            float[] v = new float[4];
-            boolean[] inside = new boolean[4];
-            int insideCount = 0;
-            for (int i = 0; i < 4; i++) {
-                int corner = tetra[i];
-                p[i][0] = cellX + CORNERS[corner][0];
-                p[i][1] = cellY + CORNERS[corner][1];
-                p[i][2] = cellZ + CORNERS[corner][2];
-                v[i] = cubeValues[corner];
-                inside[i] = v[i] >= isoLevel;
-                if (inside[i]) {
-                    insideCount++;
-                }
-            }
-            if (insideCount == 0 || insideCount == 4) {
-                continue;
-            }
-
-            int[] in = new int[4];
-            int[] out = new int[4];
-            int inCount = 0;
-            int outCount = 0;
-            for (int i = 0; i < 4; i++) {
-                if (inside[i]) {
-                    in[inCount++] = i;
-                } else {
-                    out[outCount++] = i;
-                }
-            }
-
-            if (insideCount == 1) {
-                int a = surfaceVertex(field, shadeField, sizeX, sizeY, sizeZ, p[in[0]], v[in[0]], p[out[0]], v[out[0]], isoLevel, positions, normals, heights, shades);
-                int b = surfaceVertex(field, shadeField, sizeX, sizeY, sizeZ, p[in[0]], v[in[0]], p[out[1]], v[out[1]], isoLevel, positions, normals, heights, shades);
-                int c = surfaceVertex(field, shadeField, sizeX, sizeY, sizeZ, p[in[0]], v[in[0]], p[out[2]], v[out[2]], isoLevel, positions, normals, heights, shades);
-                addOrientedTriangle(a, b, c, positions, normals, indices);
-            } else if (insideCount == 3) {
-                int a = surfaceVertex(field, shadeField, sizeX, sizeY, sizeZ, p[out[0]], v[out[0]], p[in[0]], v[in[0]], isoLevel, positions, normals, heights, shades);
-                int b = surfaceVertex(field, shadeField, sizeX, sizeY, sizeZ, p[out[0]], v[out[0]], p[in[1]], v[in[1]], isoLevel, positions, normals, heights, shades);
-                int c = surfaceVertex(field, shadeField, sizeX, sizeY, sizeZ, p[out[0]], v[out[0]], p[in[2]], v[in[2]], isoLevel, positions, normals, heights, shades);
-                addOrientedTriangle(a, c, b, positions, normals, indices);
-            } else {
-                int a = surfaceVertex(field, shadeField, sizeX, sizeY, sizeZ, p[in[0]], v[in[0]], p[out[0]], v[out[0]], isoLevel, positions, normals, heights, shades);
-                int b = surfaceVertex(field, shadeField, sizeX, sizeY, sizeZ, p[in[0]], v[in[0]], p[out[1]], v[out[1]], isoLevel, positions, normals, heights, shades);
-                int c = surfaceVertex(field, shadeField, sizeX, sizeY, sizeZ, p[in[1]], v[in[1]], p[out[1]], v[out[1]], isoLevel, positions, normals, heights, shades);
-                int d = surfaceVertex(field, shadeField, sizeX, sizeY, sizeZ, p[in[1]], v[in[1]], p[out[0]], v[out[0]], isoLevel, positions, normals, heights, shades);
-                addOrientedTriangle(a, b, c, positions, normals, indices);
-                addOrientedTriangle(a, c, d, positions, normals, indices);
-            }
-        }
-    }
-
-    private int surfaceVertex(float[] field,
-                              float[] shadeField,
-                              int sizeX,
-                              int sizeY,
-                              int sizeZ,
-                              float[] a,
-                              float va,
-                              float[] b,
-                              float vb,
-                              float isoLevel,
-                              FloatList positions,
-                              FloatList normals,
-                              FloatList heights,
-                              FloatList shades) {
-        float denominator = vb - va;
-        float t = Math.abs(denominator) < 0.000001f
-                ? 0.5f
-                : MathHelper.clamp((isoLevel - va) / denominator, 0.0f, 1.0f);
-        float px = MathHelper.lerp(t, a[0], b[0]);
-        float py = MathHelper.lerp(t, a[1], b[1]);
-        float pz = MathHelper.lerp(t, a[2], b[2]);
-        float localX = px / (sizeX - 1.0f) - 0.5f;
-        float localY = py / (sizeY - 1.0f);
-        float localZ = pz / (sizeZ - 1.0f) - 0.5f;
-        int vertexIndex = positions.size() / 3;
-        positions.add(localX);
-        positions.add(localY);
-        positions.add(localZ);
-        addGradientNormal(field, sizeX, sizeY, sizeZ, px, py, pz, normals);
-        heights.add(localY);
-        shades.add(sampleTrilinear(shadeField, sizeX, sizeY, sizeZ, px, py, pz));
-        return vertexIndex;
-    }
-
-    private void addOrientedTriangle(int a,
-                                     int b,
-                                     int c,
-                                     FloatList positions,
-                                     FloatList normals,
-                                     IntList indices) {
-        float ax = positions.get(a * 3);
-        float ay = positions.get(a * 3 + 1);
-        float az = positions.get(a * 3 + 2);
-        float bx = positions.get(b * 3);
-        float by = positions.get(b * 3 + 1);
-        float bz = positions.get(b * 3 + 2);
-        float cx = positions.get(c * 3);
-        float cy = positions.get(c * 3 + 1);
-        float cz = positions.get(c * 3 + 2);
-        float ux = bx - ax;
-        float uy = by - ay;
-        float uz = bz - az;
-        float vx = cx - ax;
-        float vy = cy - ay;
-        float vz = cz - az;
-        float nx = uy * vz - uz * vy;
-        float ny = uz * vx - ux * vz;
-        float nz = ux * vy - uy * vx;
-        float avgNx = normals.get(a * 3) + normals.get(b * 3) + normals.get(c * 3);
-        float avgNy = normals.get(a * 3 + 1) + normals.get(b * 3 + 1) + normals.get(c * 3 + 1);
-        float avgNz = normals.get(a * 3 + 2) + normals.get(b * 3 + 2) + normals.get(c * 3 + 2);
-        if (nx * avgNx + ny * avgNy + nz * avgNz < 0.0f) {
-            indices.add(a);
-            indices.add(c);
-            indices.add(b);
+    private void appendQuad(FloatList positions,
+                            FloatList normals,
+                            FloatList heights,
+                            FloatList shades,
+                            FloatList thicknesses,
+                            IntList[] layerIndices,
+                            int[] origin,
+                            int[] du,
+                            int[] dv,
+                            int axis,
+                            byte face,
+                            int[] dimensions) {
+        int layer = Math.abs(face) - 1;
+        int direction = face > 0 ? 1 : -1;
+        int[][] corners;
+        if (direction > 0) {
+            corners = new int[][]{
+                    copy(origin),
+                    add(origin, du),
+                    add(add(origin, du), dv),
+                    add(origin, dv)
+            };
         } else {
-            indices.add(a);
-            indices.add(b);
-            indices.add(c);
+            corners = new int[][]{
+                    copy(origin),
+                    add(origin, dv),
+                    add(add(origin, du), dv),
+                    add(origin, du)
+            };
+        }
+        int baseVertex = positions.size() / 3;
+        float nx = axis == 0 ? direction : 0.0f;
+        float ny = axis == 1 ? direction : 0.0f;
+        float nz = axis == 2 ? direction : 0.0f;
+        for (int[] corner : corners) {
+            float localX = corner[0] / (float) dimensions[0] - 0.5f;
+            float localY = corner[1] / (float) dimensions[1];
+            float localZ = corner[2] / (float) dimensions[2] - 0.5f;
+            positions.add(localX, localY, localZ);
+            normals.add(nx, ny, nz);
+            heights.add(localY);
+            shades.add(1.0f);
+            thicknesses.add(SHELL_OPACITY[layer]);
+        }
+        IntList indices = layerIndices[layer];
+        indices.add(baseVertex, baseVertex + 1, baseVertex + 2);
+        indices.add(baseVertex, baseVertex + 2, baseVertex + 3);
+    }
+
+    private static int shellDepth(BitSet[] layers,
+                                  int x,
+                                  int y,
+                                  int z,
+                                  int sizeX,
+                                  int sizeY,
+                                  int sizeZ) {
+        if (x < 0 || x >= sizeX || y < 0 || y >= sizeY || z < 0 || z >= sizeZ) {
+            return -1;
+        }
+        int voxelIndex = index(x, y, z, sizeX, sizeY);
+        for (int layer = layers.length - 1; layer >= 0; layer--) {
+            if (layers[layer].get(voxelIndex)) {
+                return layer;
+            }
+        }
+        return -1;
+    }
+
+    private static BitSet erode(BitSet source, int sizeX, int sizeY, int sizeZ) {
+        int planeSize = Math.multiplyExact(sizeX, sizeY);
+        int voxelCount = Math.multiplyExact(planeSize, sizeZ);
+        int wordCount = (voxelCount + 63) >>> 6;
+        long[] sourceWords = Arrays.copyOf(source.toLongArray(), wordCount);
+        long[] resultWords = Arrays.copyOf(sourceWords, wordCount);
+        andShiftedNeighbor(resultWords, sourceWords, 1);
+        andShiftedNeighbor(resultWords, sourceWords, -1);
+        andShiftedNeighbor(resultWords, sourceWords, sizeX);
+        andShiftedNeighbor(resultWords, sourceWords, -sizeX);
+        andShiftedNeighbor(resultWords, sourceWords, planeSize);
+        andShiftedNeighbor(resultWords, sourceWords, -planeSize);
+
+        BitSet result = BitSet.valueOf(resultWords);
+        result.clear(0, Math.min(planeSize, voxelCount));
+        result.clear(Math.max(0, voxelCount - planeSize), voxelCount);
+        for (int z = 1; z < sizeZ - 1; z++) {
+            int plane = z * planeSize;
+            result.clear(plane, plane + sizeX);
+            result.clear(plane + (sizeY - 1) * sizeX, plane + sizeY * sizeX);
+            for (int y = 1; y < sizeY - 1; y++) {
+                int row = plane + y * sizeX;
+                result.clear(row);
+                result.clear(row + sizeX - 1);
+            }
+        }
+        return result;
+    }
+
+    /** result[i] &= source[i + offset], using word shifts instead of voxel loops. */
+    private static void andShiftedNeighbor(long[] result, long[] source, int offset) {
+        int amount = Math.abs(offset);
+        int wordOffset = amount >>> 6;
+        int bitOffset = amount & 63;
+        for (int word = 0; word < result.length; word++) {
+            long shifted;
+            if (offset > 0) {
+                int sourceWord = word + wordOffset;
+                shifted = sourceWord < source.length
+                        ? source[sourceWord] >>> bitOffset
+                        : 0L;
+                if (bitOffset != 0 && sourceWord + 1 < source.length) {
+                    shifted |= source[sourceWord + 1] << (64 - bitOffset);
+                }
+            } else {
+                int sourceWord = word - wordOffset;
+                shifted = sourceWord >= 0
+                        ? source[sourceWord] << bitOffset
+                        : 0L;
+                if (bitOffset != 0 && sourceWord - 1 >= 0) {
+                    shifted |= source[sourceWord - 1] >>> (64 - bitOffset);
+                }
+            }
+            result[word] &= shifted;
         }
     }
 
-    private void addGradientNormal(float[] field,
-                                   int sizeX,
-                                   int sizeY,
-                                   int sizeZ,
-                                   float px,
-                                   float py,
-                                   float pz,
-                                   FloatList normals) {
-        // Interpolate the density gradient at the actual surface crossing.
-        // Rounding to the nearest voxel made every vertex in a cell share a
-        // blocky normal even when the extracted positions were smooth.
-        float epsilon = 0.72f;
-        float nx = sampleTrilinear(field, sizeX, sizeY, sizeZ, px - epsilon, py, pz)
-                - sampleTrilinear(field, sizeX, sizeY, sizeZ, px + epsilon, py, pz);
-        float ny = sampleTrilinear(field, sizeX, sizeY, sizeZ, px, py - epsilon, pz)
-                - sampleTrilinear(field, sizeX, sizeY, sizeZ, px, py + epsilon, pz);
-        float nz = sampleTrilinear(field, sizeX, sizeY, sizeZ, px, py, pz - epsilon)
-                - sampleTrilinear(field, sizeX, sizeY, sizeZ, px, py, pz + epsilon);
-        nx *= sizeX;
-        ny *= sizeY;
-        nz *= sizeZ;
-        float len = MathHelper.sqrt(nx * nx + ny * ny + nz * nz);
-        if (len < 0.000001f) {
-            normals.add(0.0f);
-            normals.add(1.0f);
-            normals.add(0.0f);
-            return;
-        }
-        normals.add(nx / len);
-        normals.add(ny / len);
-        normals.add(nz / len);
+    private static int index(int x, int y, int z, int sizeX, int sizeY) {
+        return (z * sizeY + y) * sizeX + x;
     }
 
-    private static float sampleField(float[] field, int sizeX, int sizeY, int sizeZ, int x, int y, int z) {
-        x = MathHelper.clamp(x, 0, sizeX - 1);
-        y = MathHelper.clamp(y, 0, sizeY - 1);
-        z = MathHelper.clamp(z, 0, sizeZ - 1);
-        return field[index(x, y, z, sizeX, sizeY)];
+    private static int[] copy(int[] value) {
+        return new int[]{value[0], value[1], value[2]};
     }
 
-    private static float sampleTrilinear(float[] field,
-                                         int sizeX,
-                                         int sizeY,
-                                         int sizeZ,
-                                         float x,
-                                         float y,
-                                         float z) {
-        x = MathHelper.clamp(x, 0.0f, sizeX - 1.0f);
-        y = MathHelper.clamp(y, 0.0f, sizeY - 1.0f);
-        z = MathHelper.clamp(z, 0.0f, sizeZ - 1.0f);
-        int x0 = MathHelper.clamp((int) Math.floor(x), 0, sizeX - 1);
-        int y0 = MathHelper.clamp((int) Math.floor(y), 0, sizeY - 1);
-        int z0 = MathHelper.clamp((int) Math.floor(z), 0, sizeZ - 1);
-        int x1 = Math.min(x0 + 1, sizeX - 1);
-        int y1 = Math.min(y0 + 1, sizeY - 1);
-        int z1 = Math.min(z0 + 1, sizeZ - 1);
-        float tx = x - x0;
-        float ty = y - y0;
-        float tz = z - z0;
-        float x00 = MathHelper.lerp(tx,
-                field[index(x0, y0, z0, sizeX, sizeY)],
-                field[index(x1, y0, z0, sizeX, sizeY)]);
-        float x10 = MathHelper.lerp(tx,
-                field[index(x0, y1, z0, sizeX, sizeY)],
-                field[index(x1, y1, z0, sizeX, sizeY)]);
-        float x01 = MathHelper.lerp(tx,
-                field[index(x0, y0, z1, sizeX, sizeY)],
-                field[index(x1, y0, z1, sizeX, sizeY)]);
-        float x11 = MathHelper.lerp(tx,
-                field[index(x0, y1, z1, sizeX, sizeY)],
-                field[index(x1, y1, z1, sizeX, sizeY)]);
-        return MathHelper.lerp(tz, MathHelper.lerp(ty, x00, x10), MathHelper.lerp(ty, x01, x11));
+    private static int[] add(int[] left, int[] right) {
+        return new int[]{left[0] + right[0], left[1] + right[1], left[2] + right[2]};
     }
 
     private static float smoothstep(float edge0, float edge1, float value) {
         float t = MathHelper.clamp((value - edge0) / (edge1 - edge0), 0.0f, 1.0f);
         return t * t * (3.0f - 2.0f * t);
-    }
-
-    private static int index(int x, int y, int z, int sizeX, int sizeY) {
-        return (z * sizeY + y) * sizeX + x;
     }
 
     private static long hash(int x, int y, int z) {
@@ -508,6 +424,18 @@ public final class AtcCloseCloudVolumeBuilder {
         h = (h ^ y) * 1099511628211L;
         h = (h ^ z) * 1099511628211L;
         return h;
+    }
+
+    public static float warpPhaseX(int frontIndex, int sideIndex, int variantIndex) {
+        return hashUnit(variantSeed(frontIndex, sideIndex, variantIndex) ^ 0x43A31D7BL) * 32.0f;
+    }
+
+    public static float warpPhaseZ(int frontIndex, int sideIndex, int variantIndex) {
+        return hashUnit(variantSeed(frontIndex, sideIndex, variantIndex) ^ 0x7F4A7C15L) * 32.0f;
+    }
+
+    private static long variantSeed(int frontIndex, int sideIndex, int variantIndex) {
+        return hash(frontIndex + 17, sideIndex + 31, variantIndex + 73);
     }
 
     private static float hashUnit(long seed) {
@@ -520,26 +448,32 @@ public final class AtcCloseCloudVolumeBuilder {
         return (h >>> 40) / (float) (1 << 24);
     }
 
-    private record FieldData(float[] density, float[] shade) {
-    }
-
     private static final class FloatList {
         private float[] values = new float[4096];
         private int size;
 
         private void add(float value) {
-            if (size >= values.length) {
-                values = Arrays.copyOf(values, values.length * 2);
-            }
+            ensureCapacity(size + 1);
             values[size++] = value;
+        }
+
+        private void add(float a, float b, float c) {
+            ensureCapacity(size + 3);
+            values[size++] = a;
+            values[size++] = b;
+            values[size++] = c;
         }
 
         private int size() {
             return size;
         }
 
-        private float get(int index) {
-            return values[index];
+        private void ensureCapacity(int required) {
+            if (required > values.length) {
+                int next = values.length;
+                while (next < required) next *= 2;
+                values = Arrays.copyOf(values, next);
+            }
         }
 
         private float[] toArray() {
@@ -551,11 +485,25 @@ public final class AtcCloseCloudVolumeBuilder {
         private int[] values = new int[8192];
         private int size;
 
-        private void add(int value) {
-            if (size >= values.length) {
-                values = Arrays.copyOf(values, values.length * 2);
+        private void add(int a, int b, int c) {
+            ensureCapacity(size + 3);
+            values[size++] = a;
+            values[size++] = b;
+            values[size++] = c;
+        }
+
+        private void addAll(IntList other) {
+            ensureCapacity(size + other.size);
+            System.arraycopy(other.values, 0, values, size, other.size);
+            size += other.size;
+        }
+
+        private void ensureCapacity(int required) {
+            if (required > values.length) {
+                int next = values.length;
+                while (next < required) next *= 2;
+                values = Arrays.copyOf(values, next);
             }
-            values[size++] = value;
         }
 
         private int[] toArray() {
