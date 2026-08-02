@@ -62,6 +62,8 @@ public final class AtcCloudVolumeRenderer {
             new TuningValue("Close Radius Layers", 7.0f, 1.0f, 12.0f, true);
     public static final TuningValue CLOUD_BAND_SPACING =
             new TuningValue("Close Radius Spacing", 450.0f, 40.0f, 4000.0f, false);
+    public static final TuningValue CLOSE_GRADIENT_LAYER_SPACING =
+            new TuningValue("Close Gradient Layer Spacing (blocks)", 30.0f, 1.0f, 4000.0f, false);
     public static final TuningValue DISTANT_LAYER_COUNT =
             new TuningValue("Distant Layers", 44.0f, 4.0f, 128.0f, true);
     public static final TuningValue DISTANT_MAX_DISTANCE =
@@ -83,7 +85,7 @@ public final class AtcCloudVolumeRenderer {
     public static final TuningValue CLOSE_VOLUME_WARP =
             new TuningValue("Close Voxel Horizontal Warp", 0.14f, 0.0f, 0.40f, false, true);
     public static final TuningValue CLOSE_VOXEL_NOISE_INFLUENCE =
-            new TuningValue("Close Voxel Noise Influence", 1.0f, 0.0f, 2.0f, false, true);
+            new TuningValue("Close Voxel Noise Influence", 1.75f, 0.0f, 4.0f, false, true);
     public static final TuningValue CLOSE_VOXEL_ROUNDING =
             new TuningValue("Close Voxel Rounding", 0.35f, 0.0f, 1.0f, false, true);
     public static final TuningValue CLOSE_VOLUME_DEPTH_SCALE =
@@ -106,6 +108,7 @@ public final class AtcCloudVolumeRenderer {
             CLOUD_TOP_Y,
             CLOSE_LAYER_COUNT,
             CLOUD_BAND_SPACING,
+            CLOSE_GRADIENT_LAYER_SPACING,
             CLOSE_VOLUME_RESOLUTION,
             CLOSE_VOLUME_ISO_LEVEL,
             CLOSE_VOLUME_BREAKUP,

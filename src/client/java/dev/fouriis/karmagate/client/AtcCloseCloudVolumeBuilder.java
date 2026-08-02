@@ -63,7 +63,7 @@ public final class AtcCloseCloudVolumeBuilder {
         byte[] breakup = new byte[horizontalSize];
         float phaseX = hashUnit(seed ^ 0x43A31D7BL) * 32.0f;
         float phaseZ = hashUnit(seed ^ 0x7F4A7C15L) * 32.0f;
-        float noiseStrength = MathHelper.clamp(noiseInfluence, 0.0f, 2.0f);
+        float noiseStrength = MathHelper.clamp(noiseInfluence, 0.0f, 4.0f);
         int maxWarpX = Math.round(
                 MathHelper.clamp(warpAmount, 0.0f, 1.0f) * noiseStrength * sizeX * 0.08f
         );

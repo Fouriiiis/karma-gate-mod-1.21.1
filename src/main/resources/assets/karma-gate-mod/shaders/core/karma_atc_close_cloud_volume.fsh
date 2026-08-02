@@ -10,6 +10,7 @@ uniform float uLight;
 uniform float uOpacity;
 uniform float uFirstRadius;
 uniform float uFadeWidth;
+uniform float uGradientLayerSpacing;
 uniform float uWarp;
 uniform float uNoiseInfluence;
 uniform vec2 uCameraXZ;
@@ -125,7 +126,7 @@ void main() {
     ).r;
     noise = 0.5 + sin((noise * 2.0 + uTime * 0.00025) * 6.28318530718) * 0.5;
     noise = clamp(
-            0.5 + (noise - 0.5) * clamp(uNoiseInfluence, 0.0, 2.0),
+            0.5 + (noise - 0.5) * clamp(uNoiseInfluence, 0.0, 4.0),
             0.0,
             1.0
     );
@@ -178,22 +179,30 @@ void main() {
     vec3 voxelCenterWorld = (voxelCenterLocal - vec3(0.5, 0.0, 0.5))
             * uTileScale
             + uTileOrigin;
-    float voxelRadialDistance = length(voxelCenterWorld.xz - uCameraXZ);
-    float atmosphereDepth = smooth01(
-            voxelRadialDistance / max(uFirstRadius, 1.0)
-    ) * 0.75;
+    float voxelRadialDistance = length(voxelCenterWorld - uCameraPos);
+    // The C# scene has seven close layers with cloudDepth = layerIndex / 6.
+    // Treat each configurable block interval as one of those layer steps:
+    // spacing maps to layer 1, 2 * spacing to layer 2, and so on. Smooth the
+    // interpolation within an interval while preserving every exact layer stop.
+    const float closeLayerCount = 7.0;
+    float layerCoordinate = clamp(
+            voxelRadialDistance / max(uGradientLayerSpacing, 1.0) - 1.0,
+            0.0,
+            closeLayerCount - 1.0
+    );
+    float layerBase = floor(layerCoordinate);
+    float layerBlend = smooth01(fract(layerCoordinate));
+    float csharpCloudDepth = (layerBase + layerBlend)
+            / (closeLayerCount - 1.0);
+
+    // CloseCloud.DrawSprites passes cloudDepth * 0.75 to Cloud.shader, which
+    // uses it as the atmosphere blend. Applying the same value continuously
+    // reproduces the C# layer fade without visible radial bands.
+    float atmosphereDepth = csharpCloudDepth * 0.75;
     cloudColor = mix(cloudColor, uAtmosphereColor, atmosphereDepth);
-    // Screen-door only the handoff annulus. Interior voxels remain opaque and
-    // write depth, eliminating cross-tile triangle sorting artefacts.
-    float dither = texture(
-            Sampler1,
-            fract(gl_FragCoord.xy / 225.0 + uProfileOffset * 4.11)
-    ).g;
-    if (dither > handoff) {
+    float finalAlpha = clamp(vShellOpacity * uOpacity * handoff, 0.0, 1.0);
+    if (finalAlpha <= 0.003) {
         discard;
     }
-    fragColor = vec4(
-            cloudColor,
-            clamp(vShellOpacity * uOpacity, 0.0, 1.0)
-    );
+    fragColor = vec4(cloudColor, finalAlpha);
 }

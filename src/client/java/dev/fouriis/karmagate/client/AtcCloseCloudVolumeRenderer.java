@@ -149,6 +149,10 @@ public final class AtcCloseCloudVolumeRenderer {
             );
             setUniform1f(uniforms.firstRadius, closeRadius);
             setUniform1f(uniforms.fadeWidth, handoffFadeWidth(spacingX, spacingZ));
+            setUniform1f(
+                    uniforms.gradientLayerSpacing,
+                    AtcCloudVolumeRenderer.CLOSE_GRADIENT_LAYER_SPACING.value()
+            );
             setUniform2f(
                     uniforms.cameraXZ,
                     (float) cameraPosition.x,
@@ -447,6 +451,7 @@ public final class AtcCloseCloudVolumeRenderer {
         private final GlUniform opacity;
         private final GlUniform firstRadius;
         private final GlUniform fadeWidth;
+        private final GlUniform gradientLayerSpacing;
         private final GlUniform cameraXZ;
         private final GlUniform cameraPos;
         private final GlUniform tileOrigin;
@@ -466,6 +471,7 @@ public final class AtcCloseCloudVolumeRenderer {
             opacity = program.getUniform("uOpacity");
             firstRadius = program.getUniform("uFirstRadius");
             fadeWidth = program.getUniform("uFadeWidth");
+            gradientLayerSpacing = program.getUniform("uGradientLayerSpacing");
             cameraXZ = program.getUniform("uCameraXZ");
             cameraPos = program.getUniform("uCameraPos");
             tileOrigin = program.getUniform("uTileOrigin");
