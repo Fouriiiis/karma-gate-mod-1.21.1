@@ -10,6 +10,7 @@ import net.minecraft.client.gl.VertexBuffer;
 import net.minecraft.client.render.BufferRenderer;
 import net.minecraft.client.render.Camera;
 import net.minecraft.client.render.Frustum;
+import net.minecraft.client.texture.AbstractTexture;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
@@ -19,6 +20,7 @@ import org.joml.Matrix4fStack;
 import org.joml.Vector3f;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 
 /** Draws cached native-resolution voxel cloud meshes on a stable world grid. */
 public final class AtcCloseCloudVolumeRenderer {
@@ -32,7 +34,15 @@ public final class AtcCloseCloudVolumeRenderer {
     private static final Identifier NOISE_TEXTURE =
             Identifier.of("karma-gate-mod", "clouds/noise-hq.png");
     private static final long CLOUD_TIME_WRAP_TICKS = 24_000L;
+    // Tile pattern coordinates select four profiles from shared world-grid
+    // lines; neighbouring tiles consequently reference the same profile on
+    // their common edge.
     private static final ArrayList<Tile> VISIBLE_TILES = new ArrayList<>(32);
+    private static final ArrayList<Tile> TILE_POOL = new ArrayList<>(32);
+    private static final Comparator<Tile> FAR_TO_NEAR = (left, right) ->
+            Float.compare(right.distanceSquared, left.distanceSquared);
+    private static final float VIEW_CULL_MARGIN_RADIANS = (float) Math.toRadians(2.0);
+    private static int tilePoolCursor;
 
     private static ShaderProgram cachedProgram;
     private static Uniforms cachedUniforms;
@@ -96,6 +106,21 @@ public final class AtcCloseCloudVolumeRenderer {
         float fovRadians = dynamicFovRadians(mc, camera, tickDelta);
         float aspect = (float) mc.getWindow().getFramebufferWidth()
                 / Math.max(1, mc.getWindow().getFramebufferHeight());
+        float horizontalHalfFov = (float) Math.atan(
+                Math.tan(fovRadians * 0.5f) * aspect
+        ) + VIEW_CULL_MARGIN_RADIANS;
+        Vector3f cameraForward = new Vector3f(0.0f, 0.0f, -1.0f)
+                .rotate(camera.getRotation());
+        float horizontalForwardLength = MathHelper.sqrt(
+                cameraForward.x * cameraForward.x
+                        + cameraForward.z * cameraForward.z
+        );
+        float forwardX = horizontalForwardLength > 0.05f
+                ? cameraForward.x / horizontalForwardLength
+                : 0.0f;
+        float forwardZ = horizontalForwardLength > 0.05f
+                ? cameraForward.z / horizontalForwardLength
+                : 0.0f;
         Matrix4f projection = cloudProjection(mc, fovRadians, aspect);
         Matrix4f view = viewMatrix(camera);
         Matrix4f frustumView = new Matrix4f().rotation(camera.getRotation()).transpose();
@@ -116,7 +141,11 @@ public final class AtcCloseCloudVolumeRenderer {
                 cloudBottom,
                 cloudHeight,
                 closeRadius,
-                northOffset
+                northOffset,
+                forwardX,
+                forwardZ,
+                Math.min(horizontalHalfFov, (float) Math.PI),
+                horizontalForwardLength > 0.05f
         );
 
         RenderSystem.setProjectionMatrix(projection, VertexSorter.BY_DISTANCE);
@@ -136,6 +165,9 @@ public final class AtcCloseCloudVolumeRenderer {
                 * AtcCloudVolumeRenderer.CLOSE_CLOUD_MOTION_SCALE.value();
         float light = dayLight(mc, cameraPosition, tickDelta);
         Matrix4f identityModel = new Matrix4f(RenderSystem.getModelViewMatrix());
+        AbstractTexture profileTexture0 = mc.getTextureManager().getTexture(PROFILE_TEXTURES[0]);
+        AbstractTexture profileTexture1 = mc.getTextureManager().getTexture(PROFILE_TEXTURES[1]);
+        AbstractTexture profileTexture2 = mc.getTextureManager().getTexture(PROFILE_TEXTURES[2]);
 
         try {
             program.bind();
@@ -173,51 +205,108 @@ public final class AtcCloseCloudVolumeRenderer {
                     atmosphere.z
             );
             setUniform3f(uniforms.cloudMultiply, multiply.x, multiply.y, multiply.z);
-            setUniform3f(uniforms.voxelGrid, 700.0f, 150.0f, 700.0f);
             float noiseInfluence = AtcCloudVolumeRenderer.CLOSE_VOXEL_NOISE_INFLUENCE.value();
             setUniform1f(
                     uniforms.warp,
                     AtcCloudVolumeRenderer.CLOSE_VOLUME_WARP.value() * noiseInfluence
             );
             setUniform1f(uniforms.noiseInfluence, noiseInfluence);
+            setUniform3f(uniforms.tileScale, tileWidth, cloudHeight, tileDepth);
+            setUniform2f(uniforms.profileOffset, 0.0f, 0.0f);
+            setUniform2f(
+                    uniforms.warpPhase,
+                    AtcCloseCloudVolumeBuilder.warpPhaseX(0, 0, 0),
+                    AtcCloseCloudVolumeBuilder.warpPhaseZ(0, 0, 0)
+            );
 
             BufferRenderer.resetCurrentVertexBuffer();
+            int boundSouth = -1;
+            int boundWest = -1;
+            int boundNorth = -1;
+            int boundEast = -1;
+            int boundGridX = -1;
+            int boundGridY = -1;
+            int boundGridZ = -1;
             for (Tile tile : VISIBLE_TILES) {
                 AtcCloseCloudVolumeCache.Entry entry = cache.entry(
                         0,
-                        tile.front,
-                        tile.side,
+                        tile.patternX,
+                        tile.patternZ,
                         0
                 );
                 if (entry == null || entry.buffer() == null || entry.buffer().isClosed()) {
                     continue;
                 }
-                RenderSystem.setShaderTexture(2, PROFILE_TEXTURES[tile.front]);
-                RenderSystem.setShaderTexture(3, PROFILE_TEXTURES[tile.side]);
-                program.addSampler(
-                        "Sampler2",
-                        mc.getTextureManager().getTexture(PROFILE_TEXTURES[tile.front])
-                );
-                program.addSampler(
-                        "Sampler3",
-                        mc.getTextureManager().getTexture(PROFILE_TEXTURES[tile.side])
-                );
+                if (boundSouth != entry.southProfile()) {
+                    boundSouth = entry.southProfile();
+                    bindProfileSampler(
+                            program,
+                            2,
+                            "Sampler2",
+                            boundSouth,
+                            profileTexture0,
+                            profileTexture1,
+                            profileTexture2
+                    );
+                }
+                if (boundWest != entry.westProfile()) {
+                    boundWest = entry.westProfile();
+                    bindProfileSampler(
+                            program,
+                            3,
+                            "Sampler3",
+                            boundWest,
+                            profileTexture0,
+                            profileTexture1,
+                            profileTexture2
+                    );
+                }
+                if (boundNorth != entry.northProfile()) {
+                    boundNorth = entry.northProfile();
+                    bindProfileSampler(
+                            program,
+                            4,
+                            "Sampler4",
+                            boundNorth,
+                            profileTexture0,
+                            profileTexture1,
+                            profileTexture2
+                    );
+                }
+                if (boundEast != entry.eastProfile()) {
+                    boundEast = entry.eastProfile();
+                    bindProfileSampler(
+                            program,
+                            5,
+                            "Sampler5",
+                            boundEast,
+                            profileTexture0,
+                            profileTexture1,
+                            profileTexture2
+                    );
+                }
                 setUniform3f(uniforms.tileOrigin, tile.x, cloudBottom, tile.z);
-                setUniform3f(uniforms.tileScale, tileWidth, cloudHeight, tileDepth);
-                setUniform2f(uniforms.profileOffset, tile.offsetU, tile.offsetW);
-                setUniform2f(
-                        uniforms.warpPhase,
-                        AtcCloseCloudVolumeBuilder.warpPhaseX(tile.front, tile.side, 0),
-                        AtcCloseCloudVolumeBuilder.warpPhaseZ(tile.front, tile.side, 0)
-                );
+                if (boundGridX != entry.gridSizeX()
+                        || boundGridY != entry.gridSizeY()
+                        || boundGridZ != entry.gridSizeZ()) {
+                    boundGridX = entry.gridSizeX();
+                    boundGridY = entry.gridSizeY();
+                    boundGridZ = entry.gridSizeZ();
+                    setUniform3f(
+                            uniforms.voxelGrid,
+                            boundGridX,
+                            boundGridY,
+                            boundGridZ
+                    );
+                }
                 VertexBuffer buffer = entry.buffer();
-                program.bind();
                 buffer.bind();
                 buffer.draw(identityModel, projection, program);
-                VertexBuffer.unbind();
             }
+            VertexBuffer.unbind();
             debugVisibleTileCount(mc, VISIBLE_TILES.size());
         } finally {
+            VertexBuffer.unbind();
             BufferRenderer.resetCurrentVertexBuffer();
             RenderSystem.disableBlend();
             RenderSystem.depthMask(true);
@@ -233,6 +322,8 @@ public final class AtcCloseCloudVolumeRenderer {
         cachedProgram = null;
         cachedUniforms = null;
         VISIBLE_TILES.clear();
+        TILE_POOL.clear();
+        tilePoolCursor = 0;
     }
 
     public static float closeRadius() {
@@ -253,71 +344,154 @@ public final class AtcCloseCloudVolumeRenderer {
                                             float cloudBottom,
                                             float cloudHeight,
                                             float closeRadius,
-                                            double northOffset) {
+                                            double northOffset,
+                                            float forwardX,
+                                            float forwardZ,
+                                            float horizontalHalfFov,
+                                            boolean useHorizontalViewCull) {
         VISIBLE_TILES.clear();
+        tilePoolCursor = 0;
+        float cameraX = (float) camera.x;
+        float cameraZ = (float) camera.z;
+        float closeRadiusSquared = closeRadius * closeRadius;
         for (int tileZ = minTileZ; tileZ <= maxTileZ; tileZ++) {
             for (int tileX = minTileX; tileX <= maxTileX; tileX++) {
-                Tile tile = tile(tileX, tileZ, spacingX, spacingZ, northOffset);
-                if (nearestDistanceToTile(
-                        (float) camera.x,
-                        (float) camera.z,
-                        tile,
+                float tileWorldX = tileX * spacingX;
+                float tileWorldZ = (float) (tileZ * (double) spacingZ + northOffset);
+                float nearestDistanceSquared = nearestDistanceSquaredToTile(
+                        cameraX,
+                        cameraZ,
+                        tileWorldX,
+                        tileWorldZ,
                         tileWidth,
                         tileDepth
-                ) > closeRadius) {
-                    continue;
-                }
-                Box bounds = new Box(
-                        tile.x - tileWidth * 0.5f,
-                        cloudBottom,
-                        tile.z - tileDepth * 0.5f,
-                        tile.x + tileWidth * 0.5f,
-                        cloudBottom + cloudHeight,
-                        tile.z + tileDepth * 0.5f
                 );
-                if (!bounds.contains(camera) && !frustum.isVisible(bounds)) {
+                if (nearestDistanceSquared > closeRadiusSquared) {
                     continue;
                 }
-                VISIBLE_TILES.add(tile);
+                boolean containsCamera = contains(
+                        camera,
+                        tileWorldX,
+                        tileWorldZ,
+                        tileWidth,
+                        tileDepth,
+                        cloudBottom,
+                        cloudHeight
+                );
+                if (!containsCamera
+                        && useHorizontalViewCull
+                        && !intersectsHorizontalView(
+                                cameraX,
+                                cameraZ,
+                                tileWorldX,
+                                tileWorldZ,
+                                tileWidth,
+                                tileDepth,
+                                forwardX,
+                                forwardZ,
+                                horizontalHalfFov
+                        )) {
+                    continue;
+                }
+                if (!containsCamera) {
+                    Box bounds = new Box(
+                            tileWorldX - tileWidth * 0.5f,
+                            cloudBottom,
+                            tileWorldZ - tileDepth * 0.5f,
+                            tileWorldX + tileWidth * 0.5f,
+                            cloudBottom + cloudHeight,
+                            tileWorldZ + tileDepth * 0.5f
+                    );
+                    if (!frustum.isVisible(bounds)) {
+                        continue;
+                    }
+                }
+                float centerX = tileWorldX - cameraX;
+                float centerZ = tileWorldZ - cameraZ;
+                VISIBLE_TILES.add(acquireTile(
+                        tileWorldX,
+                        tileWorldZ,
+                        Math.floorMod(tileX, AtcCloseCloudVolumeCache.LINE_PERIOD),
+                        Math.floorMod(tileZ, AtcCloseCloudVolumeCache.LINE_PERIOD),
+                        centerX * centerX + centerZ * centerZ
+                ));
             }
         }
-        VISIBLE_TILES.sort((left, right) -> {
-            float leftX = left.x - (float) camera.x;
-            float leftZ = left.z - (float) camera.z;
-            float rightX = right.x - (float) camera.x;
-            float rightZ = right.z - (float) camera.z;
-            float leftDistanceSquared = leftX * leftX + leftZ * leftZ;
-            float rightDistanceSquared = rightX * rightX + rightZ * rightZ;
-            return Float.compare(rightDistanceSquared, leftDistanceSquared);
-        });
+        VISIBLE_TILES.sort(FAR_TO_NEAR);
     }
 
-    private static Tile tile(int tileX,
-                             int tileZ,
-                             float spacingX,
-                             float spacingZ,
-                             double northOffset) {
-        long seed = hash(tileX, tileZ);
-        int front = profileIndex(samplerHash(tileX, tileZ, 0));
-        int side = profileIndex(samplerHash(tileX, tileZ, 1));
-        return new Tile(
-                tileX * spacingX,
-                (float) (tileZ * (double) spacingZ + northOffset),
-                front,
-                side,
-                hashUnit(seed ^ 0x43A31D7BL),
-                hashUnit(seed ^ 0x7F4A7C15L)
-        );
+    private static Tile acquireTile(float x,
+                                    float z,
+                                    int patternX,
+                                    int patternZ,
+                                    float distanceSquared) {
+        Tile tile;
+        if (tilePoolCursor < TILE_POOL.size()) {
+            tile = TILE_POOL.get(tilePoolCursor);
+        } else {
+            tile = new Tile();
+            TILE_POOL.add(tile);
+        }
+        tilePoolCursor++;
+        tile.set(x, z, patternX, patternZ, distanceSquared);
+        return tile;
     }
 
-    private static float nearestDistanceToTile(float cameraX,
-                                               float cameraZ,
-                                               Tile tile,
-                                               float tileWidth,
-                                               float tileDepth) {
-        float dx = Math.max(Math.abs(tile.x - cameraX) - tileWidth * 0.5f, 0.0f);
-        float dz = Math.max(Math.abs(tile.z - cameraZ) - tileDepth * 0.5f, 0.0f);
-        return MathHelper.sqrt(dx * dx + dz * dz);
+    private static float nearestDistanceSquaredToTile(float cameraX,
+                                                      float cameraZ,
+                                                      float tileX,
+                                                      float tileZ,
+                                                      float tileWidth,
+                                                      float tileDepth) {
+        float dx = Math.max(Math.abs(tileX - cameraX) - tileWidth * 0.5f, 0.0f);
+        float dz = Math.max(Math.abs(tileZ - cameraZ) - tileDepth * 0.5f, 0.0f);
+        return dx * dx + dz * dz;
+    }
+
+    private static boolean contains(Vec3d camera,
+                                    float tileX,
+                                    float tileZ,
+                                    float tileWidth,
+                                    float tileDepth,
+                                    float cloudBottom,
+                                    float cloudHeight) {
+        return Math.abs((float) camera.x - tileX) <= tileWidth * 0.5f
+                && Math.abs((float) camera.z - tileZ) <= tileDepth * 0.5f
+                && camera.y >= cloudBottom
+                && camera.y <= cloudBottom + cloudHeight;
+    }
+
+    /**
+     * Conservative XZ view-cone test. The tile's circumscribed circle makes
+     * this safe when all four corners are outside but the view passes through
+     * the middle of a large tile.
+     */
+    private static boolean intersectsHorizontalView(float cameraX,
+                                                    float cameraZ,
+                                                    float tileX,
+                                                    float tileZ,
+                                                    float tileWidth,
+                                                    float tileDepth,
+                                                    float forwardX,
+                                                    float forwardZ,
+                                                    float halfFov) {
+        float dx = tileX - cameraX;
+        float dz = tileZ - cameraZ;
+        float distanceSquared = dx * dx + dz * dz;
+        float halfWidth = tileWidth * 0.5f;
+        float halfDepth = tileDepth * 0.5f;
+        float radiusSquared = halfWidth * halfWidth + halfDepth * halfDepth;
+        if (distanceSquared <= radiusSquared) {
+            return true;
+        }
+        float distance = MathHelper.sqrt(distanceSquared);
+        float angularRadius = (float) Math.asin(Math.min(
+                1.0f,
+                MathHelper.sqrt(radiusSquared) / distance
+        ));
+        float allowedAngle = Math.min((float) Math.PI, halfFov + angularRadius);
+        float directionDot = (dx * forwardX + dz * forwardZ) / distance;
+        return directionDot >= MathHelper.cos(allowedAngle);
     }
 
     private static float handoffFadeWidth(float spacingX, float spacingZ) {
@@ -413,35 +587,40 @@ public final class AtcCloseCloudVolumeRenderer {
         if (uniform != null) uniform.set(value);
     }
 
-    private static long hash(int x, int z) {
-        long h = 1469598103934665603L;
-        h = (h ^ x) * 1099511628211L;
-        h = (h ^ z) * 1099511628211L;
-        h ^= h >>> 30;
-        h *= 0xBF58476D1CE4E5B9L;
-        h ^= h >>> 27;
-        h *= 0x94D049BB133111EBL;
-        return h ^ (h >>> 31);
+    private static void bindProfileSampler(ShaderProgram program,
+                                           int textureUnit,
+                                           String sampler,
+                                           int profile,
+                                           AbstractTexture profile0,
+                                           AbstractTexture profile1,
+                                           AbstractTexture profile2) {
+        RenderSystem.setShaderTexture(textureUnit, PROFILE_TEXTURES[profile]);
+        AbstractTexture texture = switch (profile) {
+            case 0 -> profile0;
+            case 1 -> profile1;
+            default -> profile2;
+        };
+        program.addSampler(sampler, texture);
     }
 
-    private static long samplerHash(int x, int z, int axis) {
-        return hash(x ^ (axis * 0x5bd1e995), z + axis * 97);
-    }
+    private static final class Tile {
+        private float x;
+        private float z;
+        private int patternX;
+        private int patternZ;
+        private float distanceSquared;
 
-    private static int profileIndex(long seed) {
-        return (int) Math.floorMod(seed, PROFILE_TEXTURES.length);
-    }
-
-    private static float hashUnit(long seed) {
-        return (seed >>> 40 & 0xFFFFFFL) / (float) 0x01000000;
-    }
-
-    private record Tile(float x,
-                        float z,
-                        int front,
-                        int side,
-                        float offsetU,
-                        float offsetW) {
+        private void set(float x,
+                         float z,
+                         int patternX,
+                         int patternZ,
+                         float distanceSquared) {
+            this.x = x;
+            this.z = z;
+            this.patternX = patternX;
+            this.patternZ = patternZ;
+            this.distanceSquared = distanceSquared;
+        }
     }
 
     private static final class Uniforms {

@@ -16,10 +16,6 @@ import net.minecraft.resource.ResourceManager;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.MathHelper;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.stream.IntStream;
-
 public final class AtcCloseCloudVolumeCache implements AutoCloseable {
     private static final Identifier[] PROFILE_IDS = {
             Identifier.of("karma-gate-mod", "clouds/clouds1.png"),
@@ -31,6 +27,9 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
             Identifier.of("karma-gate-mod", "clouds/noise-hq.png");
     private static final int LOD_COUNT = 1;
     private static final int FULL_BRIGHT = LightmapTextureManager.pack(15, 15);
+    static final int LINE_PERIOD = 3;
+    private static final int[] X_LINE_PROFILES = {0, 2, 1};
+    private static final int[] Z_LINE_PROFILES = {1, 0, 2};
 
     private static AtcCloseCloudVolumeCache active;
     private static long activeSettingsKey = Long.MIN_VALUE;
@@ -80,6 +79,7 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
         lastResourceManager = manager;
         long key = settingsKey();
         long start = System.nanoTime();
+        Entry[] pendingEntries = null;
         try {
             AtcCloudProfile[] profiles = new AtcCloudProfile[PROFILE_IDS.length];
             for (int i = 0; i < PROFILE_IDS.length; i++) {
@@ -90,20 +90,32 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
             long profileDone = System.nanoTime();
 
             int variants = AtcCloseCloudVolumeBuilder.VARIANTS_PER_PAIR;
-            int pairCount = profiles.length * profiles.length * variants;
-            MeshBuild[] meshBuilds = new MeshBuild[pairCount];
-            IntStream.range(0, pairCount).parallel().forEach(job -> {
-                int front = job / (profiles.length * variants);
-                int side = (job / variants) % profiles.length;
+            int patternCount = LINE_PERIOD * LINE_PERIOD * variants;
+            Entry[] entries = new Entry[
+                    LOD_COUNT * LINE_PERIOD * LINE_PERIOD * variants
+            ];
+            pendingEntries = entries;
+            long meshNanos = 0L;
+            long uploadNanos = 0L;
+            int totalVertices = 0;
+            int totalTriangles = 0;
+            for (int job = 0; job < patternCount; job++) {
+                int patternX = job / (LINE_PERIOD * variants);
+                int patternZ = (job / variants) % LINE_PERIOD;
                 int variant = job % variants;
+                int west = xLineProfile(patternX);
+                int east = xLineProfile(patternX + 1);
+                int south = zLineProfile(patternZ);
+                int north = zLineProfile(patternZ + 1);
+                long meshStart = System.nanoTime();
                 AtcCloudMesh mesh = new AtcCloseCloudVolumeBuilder().build(
-                        profiles[front],
-                        profiles[side],
+                        profiles[south],
+                        profiles[north],
+                        profiles[west],
+                        profiles[east],
                         noise,
-                        front,
-                        side,
                         variant,
-                        profiles[front].width(),
+                        AtcCloudVolumeRenderer.CLOSE_VOLUME_RESOLUTION.intValue(),
                         AtcCloudVolumeRenderer.CLOSE_VOLUME_ISO_LEVEL.value(),
                         AtcCloudVolumeRenderer.CLOSE_VOLUME_BREAKUP.value(),
                         AtcCloudVolumeRenderer.CLOSE_VOLUME_WARP.value(),
@@ -111,37 +123,45 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
                         AtcCloudVolumeRenderer.CLOSE_VOXEL_ROUNDING.value(),
                         AtcCloudVolumeRenderer.CLOSE_VOLUME_DEPTH_SCALE.value()
                 );
-                meshBuilds[job] = new MeshBuild(0, front, side, variant, mesh);
-            });
-            ArrayList<MeshBuild> builtMeshes = new ArrayList<>(List.of(meshBuilds));
-            long meshDone = System.nanoTime();
-
-            Entry[] entries = new Entry[builtMeshes.size()];
-            int totalVertices = 0;
-            int totalTriangles = 0;
-            for (int i = 0; i < builtMeshes.size(); i++) {
-                MeshBuild build = builtMeshes.get(i);
-                VertexBuffer buffer = upload(build.mesh);
-                entries[i] = new Entry(
-                        build.lod,
-                        build.front,
-                        build.side,
-                        build.variant,
-                        build.mesh,
+                meshNanos += System.nanoTime() - meshStart;
+                int vertexCount = mesh.vertexCount();
+                int triangleCount = mesh.triangleCount();
+                int gridSizeX = mesh.gridSizeX();
+                int gridSizeY = mesh.gridSizeY();
+                int gridSizeZ = mesh.gridSizeZ();
+                long uploadStart = System.nanoTime();
+                VertexBuffer buffer = upload(mesh);
+                uploadNanos += System.nanoTime() - uploadStart;
+                int entryIndex = (((0 * LINE_PERIOD + patternX)
+                        * LINE_PERIOD + patternZ) * variants + variant);
+                entries[entryIndex] = new Entry(
+                        0,
+                        patternX,
+                        patternZ,
+                        variant,
+                        south,
+                        north,
+                        west,
+                        east,
+                        vertexCount,
+                        triangleCount,
+                        gridSizeX,
+                        gridSizeY,
+                        gridSizeZ,
                         buffer
                 );
-                totalVertices += build.mesh.vertexCount();
-                totalTriangles += build.mesh.triangleCount();
+                mesh = null;
+                totalVertices += vertexCount;
+                totalTriangles += triangleCount;
             }
-            long uploadDone = System.nanoTime();
 
             AtcCloseCloudVolumeCache replacement = new AtcCloseCloudVolumeCache(
                     entries,
                     new Stats(
                             nanosToMillis(profileDone - start),
-                            nanosToMillis(meshDone - profileDone),
-                            nanosToMillis(uploadDone - meshDone),
-                            entries.length,
+                            nanosToMillis(meshNanos),
+                            nanosToMillis(uploadNanos),
+                            patternCount,
                             totalVertices,
                             totalTriangles
                     )
@@ -149,11 +169,21 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
             AtcCloseCloudVolumeCache previous = active;
             active = replacement;
             activeSettingsKey = key;
+            pendingEntries = null;
             if (previous != null) {
                 previous.close();
             }
             replacement.log();
+        } catch (OutOfMemoryError error) {
+            closeEntries(pendingEntries);
+            activeSettingsKey = Long.MIN_VALUE;
+            KarmaGateMod.LOGGER.error(
+                    "Not enough heap to rebuild close cloud meshes at resolution {}; keeping the previous cache and skipping close clouds if none exists",
+                    AtcCloudVolumeRenderer.CLOSE_VOLUME_RESOLUTION.intValue(),
+                    error
+            );
         } catch (Exception ex) {
+            closeEntries(pendingEntries);
             KarmaGateMod.LOGGER.error("Failed to rebuild close cloud volume cache", ex);
         }
     }
@@ -169,9 +199,9 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
         }
     }
 
-    public Entry entry(int lod, int front, int side, int variant) {
+    public Entry entry(int lod, int patternX, int patternZ, int variant) {
         int variantCount = AtcCloseCloudVolumeBuilder.VARIANTS_PER_PAIR;
-        int idx = (((lod * PROFILE_IDS.length + front) * PROFILE_IDS.length + side)
+        int idx = (((lod * LINE_PERIOD + patternX) * LINE_PERIOD + patternZ)
                 * variantCount + variant);
         if (idx < 0 || idx >= entries.length) {
             return null;
@@ -181,6 +211,13 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
 
     @Override
     public void close() {
+        closeEntries(entries);
+    }
+
+    private static void closeEntries(Entry[] entries) {
+        if (entries == null) {
+            return;
+        }
         for (Entry entry : entries) {
             if (entry != null && entry.buffer != null) {
                 try {
@@ -192,8 +229,15 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
     }
 
     private void log() {
-        int sampleVertices = entries.length > 0 ? entries[0].mesh.vertexCount() : 0;
-        int sampleTriangles = entries.length > 0 ? entries[0].mesh.triangleCount() : 0;
+        Entry sample = null;
+        for (Entry entry : entries) {
+            if (entry != null) {
+                sample = entry;
+                break;
+            }
+        }
+        int sampleVertices = sample != null ? sample.vertexCount : 0;
+        int sampleTriangles = sample != null ? sample.triangleCount : 0;
         KarmaGateMod.LOGGER.info(
                 "Close cloud cache built: profile analysis {} ms, mesh generation {} ms, mesh count {}, first mesh {} vertices / {} triangles, total cached vertices {}, total cached triangles {}, GPU upload {} ms",
                 stats.profileMs,
@@ -251,6 +295,7 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
     private static long settingsKey() {
         long h = 1469598103934665603L;
         h = mix(h, Float.floatToIntBits(AtcCloudVolumeRenderer.CLOSE_VOLUME_ISO_LEVEL.value()));
+        h = mix(h, AtcCloudVolumeRenderer.CLOSE_VOLUME_RESOLUTION.intValue());
         h = mix(h, Float.floatToIntBits(AtcCloudVolumeRenderer.CLOSE_VOLUME_BREAKUP.value()));
         h = mix(h, Float.floatToIntBits(AtcCloudVolumeRenderer.CLOSE_VOLUME_WARP.value()));
         h = mix(h, Float.floatToIntBits(AtcCloudVolumeRenderer.CLOSE_VOXEL_NOISE_INFLUENCE.value()));
@@ -263,23 +308,32 @@ public final class AtcCloseCloudVolumeCache implements AutoCloseable {
         return h * 1099511628211L;
     }
 
+    static int xLineProfile(int lineX) {
+        return X_LINE_PROFILES[Math.floorMod(lineX, LINE_PERIOD)];
+    }
+
+    static int zLineProfile(int lineZ) {
+        return Z_LINE_PROFILES[Math.floorMod(lineZ, LINE_PERIOD)];
+    }
+
     private static long nanosToMillis(long nanos) {
         return Math.max(0L, Math.round(nanos / 1_000_000.0));
     }
 
     public record Entry(int lod,
-                        int front,
-                        int side,
+                        int patternX,
+                        int patternZ,
                         int variant,
-                        AtcCloudMesh mesh,
+                        int southProfile,
+                        int northProfile,
+                        int westProfile,
+                        int eastProfile,
+                        int vertexCount,
+                        int triangleCount,
+                        int gridSizeX,
+                        int gridSizeY,
+                        int gridSizeZ,
                         VertexBuffer buffer) {
-    }
-
-    private record MeshBuild(int lod,
-                             int front,
-                             int side,
-                             int variant,
-                             AtcCloudMesh mesh) {
     }
 
     private record Stats(long profileMs,

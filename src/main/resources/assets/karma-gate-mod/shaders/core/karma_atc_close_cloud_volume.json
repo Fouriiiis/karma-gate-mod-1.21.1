@@ -6,7 +6,9 @@
     {"name": "Sampler0", "wrap": "repeat", "minfilter": "linear", "magfilter": "linear"},
     {"name": "Sampler1", "wrap": "repeat", "minfilter": "linear", "magfilter": "linear"},
     {"name": "Sampler2", "wrap": "repeat", "minfilter": "nearest", "magfilter": "nearest"},
-    {"name": "Sampler3", "wrap": "repeat", "minfilter": "nearest", "magfilter": "nearest"}
+    {"name": "Sampler3", "wrap": "repeat", "minfilter": "nearest", "magfilter": "nearest"},
+    {"name": "Sampler4", "wrap": "repeat", "minfilter": "nearest", "magfilter": "nearest"},
+    {"name": "Sampler5", "wrap": "repeat", "minfilter": "nearest", "magfilter": "nearest"}
   ],
   "uniforms": [
     {

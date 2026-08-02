@@ -51,6 +51,18 @@ public final class AtcCloudMesh {
         return indices.length / 3;
     }
 
+    public int gridSizeX() {
+        return densitySizeX;
+    }
+
+    public int gridSizeY() {
+        return densitySizeY;
+    }
+
+    public int gridSizeZ() {
+        return densitySizeZ;
+    }
+
     /** Samples the same cached scalar field used to extract this mesh. */
     public float sampleDensity(float u, float v, float w) {
         if (densityField.length == 0

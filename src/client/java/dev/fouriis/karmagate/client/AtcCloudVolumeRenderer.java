@@ -77,7 +77,7 @@ public final class AtcCloudVolumeRenderer {
     public static final TuningValue CLOUD_NORTH_SPEED =
             new TuningValue("Cloud North Speed", 2.0f, 0.0f, 20.0f, false);
     public static final TuningValue CLOSE_VOLUME_RESOLUTION =
-            new TuningValue("Close Voxel Native Resolution", 700.0f, 700.0f, 700.0f, true);
+            new TuningValue("Close Voxel Resolution", 350.0f, 128.0f, 700.0f, true);
     public static final TuningValue CLOSE_VOLUME_ISO_LEVEL =
             new TuningValue("Close Volume Iso Level", 0.38f, 0.15f, 0.80f, false, true);
     public static final TuningValue CLOSE_VOLUME_BREAKUP =

@@ -4,6 +4,8 @@ uniform sampler2D Sampler0;
 uniform sampler2D Sampler1;
 uniform sampler2D Sampler2;
 uniform sampler2D Sampler3;
+uniform sampler2D Sampler4;
+uniform sampler2D Sampler5;
 
 uniform float uTime;
 uniform float uLight;
@@ -49,6 +51,18 @@ float profileDensity(vec4 sampleColor) {
     return coverage * (0.68 + sampleColor.r * 0.32);
 }
 
+float layoutFbm(vec2 uv, vec2 phase) {
+    float first = dot(
+            texture(Sampler1, fract(uv + phase)).rgb,
+            vec3(0.2126, 0.7152, 0.0722)
+    );
+    float second = dot(texture(
+            Sampler1,
+            fract(uv * 2.03 + phase * 0.71 + vec2(0.19, -0.27))
+    ).rgb, vec3(0.2126, 0.7152, 0.0722));
+    return first * 0.67 + second * 0.33;
+}
+
 void main() {
     float radialDistance = length(vWorldPos.xz - uCameraXZ);
     float fadeStart = uFirstRadius - max(uFadeWidth, 1.0);
@@ -57,6 +71,10 @@ void main() {
                     / max(uFirstRadius - fadeStart, 1.0)
     );
     if (handoff <= 0.001) {
+        discard;
+    }
+    float finalAlpha = clamp(vShellOpacity * uOpacity * handoff, 0.0, 1.0);
+    if (finalAlpha <= 0.003) {
         discard;
     }
 
@@ -69,56 +87,121 @@ void main() {
     );
     ivec2 frontSize = textureSize(Sampler2, 0);
     ivec2 sideSize = textureSize(Sampler3, 0);
-    int voxelX = clamp(int(floor(samplePosition.x * float(frontSize.x))), 0, frontSize.x - 1);
-    int voxelY = clamp(int(floor(samplePosition.y * float(frontSize.y))), 0, frontSize.y - 1);
-    int voxelZ = clamp(int(floor(samplePosition.z * float(sideSize.x))), 0, sideSize.x - 1);
-    int geometryVoxelX = voxelX;
-    int geometryVoxelZ = voxelZ;
-    vec2 horizontalUv = (vec2(voxelX, voxelZ) + vec2(0.5))
-            / vec2(frontSize.x, sideSize.x);
-    float warpNoiseX = dot(
-            texture(Sampler1, fract(horizontalUv + uWarpPhase)).rgb,
-            vec3(0.2126, 0.7152, 0.0722)
+    ivec3 gridSize = max(ivec3(round(uVoxelGrid)), ivec3(1));
+    int geometryVoxelX = clamp(
+            int(floor(samplePosition.x * float(gridSize.x))),
+            0,
+            gridSize.x - 1
     );
-    float warpNoiseZ = dot(
-            texture(
-                    Sampler1,
-                    fract(horizontalUv + uWarpPhase + vec2(0.37, 0.61))
-            ).rgb,
-            vec3(0.2126, 0.7152, 0.0722)
+    int geometryVoxelY = clamp(
+            int(floor(samplePosition.y * float(gridSize.y))),
+            0,
+            gridSize.y - 1
     );
+    int geometryVoxelZ = clamp(
+            int(floor(samplePosition.z * float(gridSize.z))),
+            0,
+            gridSize.z - 1
+    );
+
+    // Geometry resolution is independently configurable. Map its voxel
+    // coordinates across the complete authored profiles instead of treating
+    // profile texels as mesh-grid coordinates. Keeping the two coordinate
+    // spaces separate is also required for correct world-space gradients.
+    int voxelX = int(round(
+            float(geometryVoxelX)
+                    / max(float(gridSize.x - 1), 1.0)
+                    * float(frontSize.x - 1)
+    ));
+    float geometryY = float(geometryVoxelY)
+            / max(float(gridSize.y - 1), 1.0);
+    int voxelZ = int(round(
+            float(geometryVoxelZ)
+                    / max(float(gridSize.z - 1), 1.0)
+                    * float(sideSize.x - 1)
+    ));
+    vec2 horizontalUv = vec2(voxelX, voxelZ)
+            / max(vec2(frontSize.x - 1, sideSize.x - 1), vec2(1.0));
+    float warpNoiseX = layoutFbm(horizontalUv, uWarpPhase);
+    float warpNoiseZ = layoutFbm(horizontalUv, uWarpPhase + vec2(0.37, 0.61));
     int maxWarpX = int(floor(
-            clamp(uWarp, 0.0, 1.0) * float(frontSize.x) * 0.08 + 0.5
+            clamp(uWarp, 0.0, 1.0) * float(frontSize.x) * 0.22 + 0.5
     ));
     int maxWarpZ = int(floor(
-            clamp(uWarp, 0.0, 1.0) * float(sideSize.x) * 0.08 + 0.5
+            clamp(uWarp, 0.0, 1.0) * float(sideSize.x) * 0.22 + 0.5
     ));
+    int frontPeriod = max(frontSize.x - 1, 1);
+    int sidePeriod = max(sideSize.x - 1, 1);
     voxelX = int(mod(
             float(voxelX + int(floor(
                     (warpNoiseX * 2.0 - 1.0) * float(maxWarpX) + 0.5
-            ))) + float(frontSize.x),
-            float(frontSize.x)
+            ))) + float(frontPeriod),
+            float(frontPeriod)
     ));
     voxelZ = int(mod(
             float(voxelZ + int(floor(
                     (warpNoiseZ * 2.0 - 1.0) * float(maxWarpZ) + 0.5
-            ))) + float(sideSize.x),
-            float(sideSize.x)
+            ))) + float(sidePeriod),
+            float(sidePeriod)
     ));
-    int frontY = frontSize.y - 1 - voxelY;
-    int sideY = sideSize.y - 1 - clamp(voxelY, 0, sideSize.y - 1);
-    vec4 frontSample = texelFetch(Sampler2, ivec2(voxelX, frontY), 0);
-    vec4 sideSample = texelFetch(Sampler3, ivec2(voxelZ, sideY), 0);
+    int frontY = int(round((1.0 - geometryY) * float(frontSize.y - 1)));
+    int sideY = int(round((1.0 - geometryY) * float(sideSize.y - 1)));
+    vec4 southSample = texelFetch(Sampler2, ivec2(voxelX, frontY), 0);
+    vec4 westSample = texelFetch(Sampler3, ivec2(voxelZ, sideY), 0);
+    vec4 northSample = texelFetch(Sampler4, ivec2(voxelX, frontY), 0);
+    vec4 eastSample = texelFetch(Sampler5, ivec2(voxelZ, sideY), 0);
+    float baseBlendX = float(geometryVoxelX)
+            / max(float(gridSize.x - 1), 1.0);
+    float baseBlendZ = float(geometryVoxelZ)
+            / max(float(gridSize.z - 1), 1.0);
+    float edgeLockX = pow(sin(3.14159265359 * baseBlendX), 2.0);
+    float edgeLockZ = pow(sin(3.14159265359 * baseBlendZ), 2.0);
+    float blendWarp = clamp(uWarp, 0.0, 1.0) * 0.32;
+    float blendX = clamp(
+            baseBlendX + (warpNoiseZ * 2.0 - 1.0) * blendWarp * edgeLockX,
+            0.0,
+            1.0
+    );
+    float blendZ = clamp(
+            baseBlendZ + (warpNoiseX * 2.0 - 1.0) * blendWarp * edgeLockZ,
+            0.0,
+            1.0
+    );
+    vec4 frontSample = mix(southSample, northSample, blendZ);
+    vec4 sideSample = mix(westSample, eastSample, blendX);
 
-    float frontDensity = profileDensity(frontSample);
-    float sideDensity = profileDensity(sideSample);
+    float frontDensity = mix(
+            profileDensity(southSample),
+            profileDensity(northSample),
+            blendZ
+    );
+    float sideDensity = mix(
+            profileDensity(westSample),
+            profileDensity(eastSample),
+            blendX
+    );
     float intersection = sqrt(max(0.0, frontDensity * sideDensity));
     float support = intersection * 0.80
             + min(frontDensity, sideDensity) * 0.20;
+    // Reuse the two horizontal FBM channels for formation selection. The
+    // previous third FBM repeated two full-resolution texture lookups for
+    // every fragment even though it represented the same low-frequency field.
+    float layoutNoise = clamp(warpNoiseX * 0.57 + warpNoiseZ * 0.43, 0.0, 1.0);
+    float noiseSelectedSupport = mix(
+            frontDensity,
+            sideDensity,
+            smooth01((layoutNoise - 0.12) / 0.76)
+    );
+    float degridStrength = clamp(uNoiseInfluence / 3.0, 0.0, 1.0);
+    support = max(support, noiseSelectedSupport * 0.66 * degridStrength);
 
     // All procedural lookups use the integer voxel coordinate. Adjacent
     // fragments on the same voxel therefore receive exactly the same colour.
-    vec3 voxelCoordinate = vec3(voxelX, voxelY, voxelZ);
+    vec3 voxelCoordinate = vec3(
+            geometryVoxelX,
+            geometryVoxelY,
+            geometryVoxelZ
+    );
     vec2 voxelXZ = (voxelCoordinate.xz + vec2(0.5)) / uVoxelGrid.xz;
     float noise = texture(
             Sampler1,
@@ -133,12 +216,13 @@ void main() {
 
     float detail1 = texture(
             Sampler0,
-            fract(vec2(voxelX, voxelY) / vec2(frontSize) * vec2(5.0, 1.5)
+            fract(vec2(float(voxelX) / float(frontSize.x), geometryY)
+                    * vec2(5.0, 1.5)
                     + uProfileOffset)
     ).r;
     float detail2 = texture(
             Sampler0,
-            fract(vec2(voxelZ, voxelY) / vec2(sideSize.x, sideSize.y)
+            fract(vec2(float(voxelZ) / float(sideSize.x), geometryY)
                     * vec2(8.0, 2.5)
                     + uProfileOffset.yx * 0.73)
     ).r;
@@ -174,7 +258,11 @@ void main() {
     cloudColor *= voxelLight;
     cloudColor *= mix(vec3(1.0), uCloudMultiply, 0.45);
 
-    vec3 geometryVoxelCoordinate = vec3(geometryVoxelX, voxelY, geometryVoxelZ);
+    vec3 geometryVoxelCoordinate = vec3(
+            geometryVoxelX,
+            geometryVoxelY,
+            geometryVoxelZ
+    );
     vec3 voxelCenterLocal = (geometryVoxelCoordinate + vec3(0.5)) / uVoxelGrid;
     vec3 voxelCenterWorld = (voxelCenterLocal - vec3(0.5, 0.0, 0.5))
             * uTileScale
@@ -200,9 +288,5 @@ void main() {
     // reproduces the C# layer fade without visible radial bands.
     float atmosphereDepth = csharpCloudDepth * 0.75;
     cloudColor = mix(cloudColor, uAtmosphereColor, atmosphereDepth);
-    float finalAlpha = clamp(vShellOpacity * uOpacity * handoff, 0.0, 1.0);
-    if (finalAlpha <= 0.003) {
-        discard;
-    }
     fragColor = vec4(cloudColor, finalAlpha);
 }
