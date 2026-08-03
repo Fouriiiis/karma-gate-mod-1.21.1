@@ -81,7 +81,7 @@ public final class AtcCloseCloudVolumeRenderer {
         float spacingX = Math.max(64.0f, tileWidth);
         float spacingZ = Math.max(64.0f, tileDepth);
         float closeRadius = closeRadius();
-        double northOffset = northOffset(mc, tickDelta);
+        double northOffset = AtcCloudVolumeRenderer.cloudNorthOffset(mc, tickDelta);
 
         int minTileX = (int) Math.floor(
                 (cameraPosition.x - closeRadius - tileWidth * 0.5f) / spacingX
@@ -496,12 +496,17 @@ public final class AtcCloseCloudVolumeRenderer {
 
     private static float handoffFadeWidth(float spacingX, float spacingZ) {
         float configured = AtcCloudVolumeRenderer.CLOSE_HANDOFF_FADE_WIDTH.value();
-        return configured <= 0.0f ? Math.max(spacingX, spacingZ) : configured;
-    }
-
-    private static double northOffset(MinecraftClient mc, float tickDelta) {
-        return -(mc.world.getTime() + tickDelta)
-                * (AtcCloudVolumeRenderer.CLOUD_NORTH_SPEED.value() / 20.0);
+        if (configured > 0.0f) {
+            return configured;
+        }
+        float overlap = AtcCloudVolumeRenderer.DISTANT_HANDOFF_OVERLAP.value();
+        if (overlap > 0.0f) {
+            return overlap;
+        }
+        return Math.min(
+                Math.max(spacingX, spacingZ),
+                AtcCloudVolumeRenderer.CLOUD_BAND_SPACING.value() * 2.0f
+        );
     }
 
     private static Matrix4f viewMatrix(Camera camera) {

@@ -63,7 +63,7 @@ public final class AtcCloudVolumeRenderer {
     public static final TuningValue CLOUD_BAND_SPACING =
             new TuningValue("Close Radius Spacing", 450.0f, 40.0f, 4000.0f, false);
     public static final TuningValue CLOSE_GRADIENT_LAYER_SPACING =
-            new TuningValue("Close Gradient Layer Spacing (blocks)", 30.0f, 1.0f, 4000.0f, false);
+            new TuningValue("Close Gradient Layer Spacing (blocks)", 450.0f, 1.0f, 4000.0f, false);
     public static final TuningValue DISTANT_LAYER_COUNT =
             new TuningValue("Distant Layers", 44.0f, 4.0f, 128.0f, true);
     public static final TuningValue DISTANT_MAX_DISTANCE =
@@ -71,13 +71,21 @@ public final class AtcCloudVolumeRenderer {
     public static final TuningValue DISTANT_WIDTH_SCALE =
             new TuningValue("Distant Asset Width Scale", 1.0f, 0.25f, 4.0f, false);
     public static final TuningValue DISTANT_OPACITY =
-            new TuningValue("Distant Opacity", 0.82f, 0.05f, 1.0f, false);
+            new TuningValue("Distant Opacity", 1.0f, 0.05f, 1.0f, false);
+    public static final TuningValue DISTANT_HANDOFF_OVERLAP =
+            new TuningValue("Distant Handoff Overlap", 900.0f, 0.0f, 4000.0f, false);
+    public static final TuningValue DISTANT_RING_DENSITY_CURVE =
+            new TuningValue("Distant Ring Spacing Curve", 1.0f, 0.65f, 2.0f, false);
     public static final TuningValue CLOSE_CLOUD_MOTION_SCALE =
             new TuningValue("Cloud Motion Scale", 0.01f, 0.0f, 1.0f, false);
     public static final TuningValue CLOUD_NORTH_SPEED =
-            new TuningValue("Cloud North Speed", 2.0f, 0.0f, 20.0f, false);
+            new TuningValue("Cloud North Speed", 9.0f, 0.0f, 20.0f, false);
+    // AboveCloudsView's closest cloud uses scaleX = 10. At the default
+    // 450-block layer-one distance and 1,800-block tile width, a 300-wide
+    // voxel grid projects to approximately ten pixels per voxel at the
+    // game's standard 70-degree FOV.
     public static final TuningValue CLOSE_VOLUME_RESOLUTION =
-            new TuningValue("Close Voxel Resolution", 350.0f, 128.0f, 700.0f, true);
+            new TuningValue("Close Voxel Resolution", 300.0f, 128.0f, 700.0f, true);
     public static final TuningValue CLOSE_VOLUME_ISO_LEVEL =
             new TuningValue("Close Volume Iso Level", 0.38f, 0.15f, 0.80f, false, true);
     public static final TuningValue CLOSE_VOLUME_BREAKUP =
@@ -85,7 +93,7 @@ public final class AtcCloudVolumeRenderer {
     public static final TuningValue CLOSE_VOLUME_WARP =
             new TuningValue("Close Voxel Horizontal Warp", 0.14f, 0.0f, 0.40f, false, true);
     public static final TuningValue CLOSE_VOXEL_NOISE_INFLUENCE =
-            new TuningValue("Close Voxel Noise Influence", 1.75f, 0.0f, 4.0f, false, true);
+            new TuningValue("Close Voxel Noise Influence", 2.75f, 0.0f, 4.0f, false, true);
     public static final TuningValue CLOSE_VOXEL_ROUNDING =
             new TuningValue("Close Voxel Rounding", 0.35f, 0.0f, 1.0f, false, true);
     public static final TuningValue CLOSE_VOLUME_DEPTH_SCALE =
@@ -93,9 +101,9 @@ public final class AtcCloudVolumeRenderer {
     public static final TuningValue CLOSE_TILE_WIDTH_X =
             new TuningValue("Close Tile Width X", 1800.0f, 128.0f, 4000.0f, false);
     public static final TuningValue CLOSE_TILE_WIDTH_Z =
-            new TuningValue("Close Tile Width Z", 1800.0f, 128.0f, 4000.0f, false);
+            new TuningValue("Close Tile Width Z", 2700.0f, 128.0f, 4000.0f, false);
     public static final TuningValue CLOSE_HANDOFF_FADE_WIDTH =
-            new TuningValue("Close Handoff Fade Width", 0.0f, 0.0f, 8000.0f, false);
+            new TuningValue("Close Handoff Fade Width", 900.0f, 0.0f, 8000.0f, false);
     public static final TuningValue CLOSE_VOLUME_OPACITY =
             new TuningValue("Close Volume Opacity", 1.0f, 0.05f, 1.0f, false);
     public static final TuningValue COWBOY_EASTER_EGG_X =
@@ -124,6 +132,8 @@ public final class AtcCloudVolumeRenderer {
             DISTANT_MAX_DISTANCE,
             DISTANT_WIDTH_SCALE,
             DISTANT_OPACITY,
+            DISTANT_HANDOFF_OVERLAP,
+            DISTANT_RING_DENSITY_CURVE,
             CLOSE_CLOUD_MOTION_SCALE,
             CLOUD_NORTH_SPEED,
             COWBOY_EASTER_EGG_X,
@@ -211,6 +221,7 @@ public final class AtcCloudVolumeRenderer {
         Matrix4f view = new Matrix4f(bobStack.peek().getPositionMatrix());
 
         float time = cloudAnimationTime(mc, tickDelta) * CLOSE_CLOUD_MOTION_SCALE.value();
+        double northOffset = cloudNorthOffset(mc, tickDelta);
         float light = dayLight(mc, camPos, tickDelta);
         AtcSkyRenderer.CloudPalette palette = AtcSkyRenderer.cloudPalette(tickDelta);
 
@@ -222,7 +233,8 @@ public final class AtcCloudVolumeRenderer {
                     mc.getBufferBuilders().getEntityVertexConsumers(),
                     program,
                     camPos,
-                    altitudeVisibility
+                    altitudeVisibility,
+                    northOffset
             );
         } finally {
             modelViewStack.set(savedModelView);
@@ -236,12 +248,18 @@ public final class AtcCloudVolumeRenderer {
     private static void drawDistantCloudRings(VertexConsumerProvider.Immediate immediate,
                                              ShaderProgram program,
                                              Vec3d camPos,
-                                             float altitudeVisibility) {
+                                             float altitudeVisibility,
+                                             double northOffset) {
         int ringCount = DISTANT_LAYER_COUNT.intValue();
         int closeLayerCount = CLOSE_LAYER_COUNT.intValue();
         float spacing = CLOUD_BAND_SPACING.value();
-        float firstRadius = spacing * (closeLayerCount + 0.5f);
-        float lastRadius = Math.max(DISTANT_MAX_DISTANCE.value(), firstRadius + spacing);
+        float handoffRadius = spacing * (closeLayerCount + 0.5f);
+        float overlap = Math.min(
+                DISTANT_HANDOFF_OVERLAP.value(),
+                Math.max(0.0f, handoffRadius - spacing)
+        );
+        float firstRadius = handoffRadius - overlap;
+        float lastRadius = Math.max(DISTANT_MAX_DISTANCE.value(), handoffRadius + spacing);
         float bottomY = CLOUD_BOTTOM_Y.value();
         float topY = Math.max(CLOUD_TOP_Y.value(), bottomY + 1.0f);
         float bandHeight = topY - bottomY;
@@ -250,7 +268,16 @@ public final class AtcCloudVolumeRenderer {
             float t = ringCount <= 1 ? 0.0f : ringIndex / (float) (ringCount - 1);
             int csharpLayerIndex = MathHelper.clamp(Math.round(t * 10.0f), 0, 10);
             Billboard billboard = distantBillboard(t, csharpLayerIndex, altitudeVisibility);
-            float radius = MathHelper.lerp((float) Math.pow(t, 1.5), firstRadius, lastRadius);
+            // Space concentric rings geometrically rather than by linear
+            // world distance. Equal radius ratios produce nearly equal screen-
+            // space separation and avoid the widening annular gaps that become
+            // visible from high above the cloud deck. The optional curve keeps
+            // the default mathematically uniform while allowing live tuning.
+            float radialT = (float) Math.pow(t, DISTANT_RING_DENSITY_CURVE.value());
+            float radius = firstRadius * (float) Math.pow(
+                    lastRadius / Math.max(firstRadius, 1.0f),
+                    radialT
+            );
 
             int textureIndex = Math.min((int) (hash01(ringIndex, 307) * CLOUD_LAYERS.length), CLOUD_LAYERS.length - 1);
             int atmosphereDepth = colorByte(billboard.atmosphereDepth());
@@ -267,14 +294,11 @@ public final class AtcCloudVolumeRenderer {
                             * billboard.widthScale()
                             / Math.max(billboard.spriteHeightScale(), 0.001f)
             );
-            float circumference = 2.0f * (float) Math.PI * radius;
-            float repeatCount = circumference / csharpTileWidth;
-            float seamAngle = hash01(ringIndex, 419) * 2.0f * (float) Math.PI;
-
             program.bind();
             VertexConsumer vc = immediate.getBuffer(CLOUD_LAYERS[textureIndex]);
             emitCloudRing(vc, (float) camPos.x, (float) camPos.z, radius, bottomY, topY,
-                    atmosphereDepth, phase, flattening, alpha, repeatCount, seamAngle);
+                    atmosphereDepth, phase, flattening, alpha,
+                    csharpTileWidth, northOffset);
             immediate.draw(CLOUD_LAYERS[textureIndex]);
         }
     }
@@ -286,9 +310,10 @@ public final class AtcCloudVolumeRenderer {
         }
         float shaderFlattening = MathHelper.lerp(0.5f, spriteHeightScale, 1.0f);
         float atmosphereDepth = MathHelper.lerp(t, 0.75f, 0.95f);
-        float alpha = DISTANT_OPACITY.value()
-                * MathHelper.lerp(t, 1.0f, 0.72f)
-                * altitudeVisibility;
+        // AboveCloudsView gives all eleven DistantCloud sprites vertex alpha
+        // 1.0. Atmospheric depth changes their colour and the shader derives
+        // cutout alpha from density; distance does not fade vertex opacity.
+        float alpha = DISTANT_OPACITY.value() * altitudeVisibility;
         return new Billboard(DISTANT_WIDTH_SCALE.value(), spriteHeightScale, shaderFlattening, atmosphereDepth, alpha);
     }
 
@@ -302,20 +327,29 @@ public final class AtcCloudVolumeRenderer {
                                       int phase,
                                       int flattening,
                                       int alpha,
-                                      float repeatCount,
-                                      float seamAngle) {
+                                      float profileWorldWidth,
+                                      double northOffset) {
         float angleStep = 2.0f * (float) Math.PI / DISTANT_RING_SEGMENTS;
-        float uStep = repeatCount / (float) DISTANT_RING_SEGMENTS;
+        double safeProfileWidth = Math.max(profileWorldWidth, 1.0f);
+        // Only the repeating phase is relevant. Keeping the time component
+        // small avoids losing UV precision in very old worlds.
+        double wrappedNorthOffset = northOffset % safeProfileWidth;
 
         for (int segment = 0; segment < DISTANT_RING_SEGMENTS; segment++) {
-            float angle0 = seamAngle + segment * angleStep;
-            float angle1 = seamAngle + (segment + 1) * angleStep;
+            // Start exactly at north so north and south are real shared ring
+            // vertices rather than lying inside a segment.
+            float angle0 = segment * angleStep;
+            float angle1 = (segment + 1) * angleStep;
             float x0 = centerX + MathHelper.sin(angle0) * radius;
             float z0 = centerZ - MathHelper.cos(angle0) * radius;
             float x1 = centerX + MathHelper.sin(angle1) * radius;
             float z1 = centerZ - MathHelper.cos(angle1) * radius;
-            float u0 = segment * uStep;
-            float u1 = (segment + 1) * uStep;
+            // A world-Z profile is naturally mirrored across the north/south
+            // axis: east and west vertices at the same Z receive identical U.
+            // Subtracting the same offset used by close tiles makes features
+            // move north on both sides and converge at the north pole.
+            float u0 = (float) ((z0 - wrappedNorthOffset) / safeProfileWidth);
+            float u1 = (float) ((z1 - wrappedNorthOffset) / safeProfileWidth);
 
             vc.vertex(x0, bottomY, z0).color(depth, phase, flattening, alpha).texture(u0, 1.0f).light(FULL_BRIGHT);
             vc.vertex(x0, topY, z0).color(depth, phase, flattening, alpha).texture(u0, 0.0f).light(FULL_BRIGHT);
@@ -368,10 +402,18 @@ public final class AtcCloudVolumeRenderer {
         return (float) Math.toRadians(fov);
     }
 
-    private static Matrix4f cloudProjection(MinecraftClient mc, float fovRadians, float aspect) {
+    static Matrix4f cloudProjection(MinecraftClient mc, float fovRadians, float aspect) {
+        return new Matrix4f().setPerspective(
+                fovRadians,
+                aspect,
+                0.05f,
+                cloudProjectionFar(mc)
+        );
+    }
+
+    static float cloudProjectionFar(MinecraftClient mc) {
         float far = Math.max(128.0f, (float) mc.options.getClampedViewDistance() * 16.0f) * 100.0f;
-        far = Math.max(far, DISTANT_MAX_DISTANCE.value() * 1.1f);
-        return new Matrix4f().setPerspective(fovRadians, aspect, 0.05f, far);
+        return Math.max(far, DISTANT_MAX_DISTANCE.value() * 1.1f);
     }
 
     private static float dayLight(MinecraftClient mc, Vec3d camPos, float tickDelta) {
@@ -386,6 +428,11 @@ public final class AtcCloudVolumeRenderer {
     private static float cloudAnimationTime(MinecraftClient mc, float tickDelta) {
         long wrappedTicks = Math.floorMod(mc.world.getTime(), CLOUD_TIME_WRAP_TICKS);
         return wrappedTicks + tickDelta;
+    }
+
+    static double cloudNorthOffset(MinecraftClient mc, float tickDelta) {
+        return -(mc.world.getTime() + tickDelta)
+                * (CLOUD_NORTH_SPEED.value() / 20.0);
     }
 
     private static int colorByte(float value) {

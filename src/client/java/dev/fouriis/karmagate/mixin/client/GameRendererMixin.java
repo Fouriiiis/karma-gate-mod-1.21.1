@@ -33,8 +33,13 @@ public class GameRendererMixin {
 
         
         float tickDelta = tickCounter.getTickDelta(true);
-        AtcCloudVolumeRenderer.renderDistantCloudLayer(tickDelta, camera);
+        // Distant structure bases establish depth first. Cloud rings then
+        // depth-test normally against those bases. Submit the emissive
+        // lightning pass after every distant ring so lightning remains visible
+        // over the cloud deck, while its own LEQUAL test still respects world
+        // and structure depth.
         DistantStructuresRenderer.renderLate(tickDelta, camera);
+        AtcCloudVolumeRenderer.renderDistantCloudLayer(tickDelta, camera);
         DistantStructuresRenderer.renderLightningLate(tickDelta, camera);
         AtcCowboyEasterEggRenderer.render(tickDelta, camera);
         AtcCloudVolumeRenderer.renderVolumeClouds(tickDelta, camera);

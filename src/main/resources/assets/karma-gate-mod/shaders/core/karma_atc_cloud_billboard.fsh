@@ -47,16 +47,41 @@ vec3 paletteColor(float shade) {
     float posterizedShade = floor(shade * 4.0 + 0.5) * 0.25;
     vec3 paletteBase = vec3(0.70, 0.73, 0.80);
     vec3 color = pow(paletteBase, vec3(mix(1.6, 0.4, posterizedShade)));
-    color *= mix(vec3(1.08), uCloudMultiply, 0.35);
+    // Tint the palette, not the completed atmospheric result. This keeps the
+    // close silver highlights visible at night while distant layers converge
+    // on Rain World's independently animated atmosphere colour.
+    color *= mix(vec3(1.0), uCloudMultiply, 0.72);
+
+    const vec3 nightCloudDark = vec3(14.0, 15.0, 22.0) / 255.0;
+    const vec3 nightCloudLight = vec3(59.0, 63.0, 69.0) / 255.0;
+    float fullNightRed = 4.0 / 51.0;
+    float nightAmount = clamp(
+            (1.0 - uCloudMultiply.r) / (1.0 - fullNightRed),
+            0.0,
+            1.0
+    );
+    color = mix(
+            color,
+            mix(nightCloudDark, nightCloudLight, posterizedShade),
+            nightAmount
+    );
     color = mix(color, uAtmosphereColor, clamp(vColor.r, 0.0, 0.96));
-    return color * mix(0.88, 1.06, clamp(uLight, 0.0, 1.0));
+    color *= mix(0.88, 1.06, clamp(uLight, 0.0, 1.0));
+    return color;
 }
 
 void main() {
     float flattening = max(vColor.b, 1.0 / 255.0);
     float wind = uTime;
 
-    float tileU = fract(vColor.g + vUV.x - 0.00070 * wind * (1.0 - vColor.r));
+    // Distant rings receive a world-Z UV from Java so their two hemispheres
+    // mirror and translate north together. Retain the legacy shader scroll
+    // only for non-distant cards; applying both would double the movement and
+    // turn the world-space motion back into an apparent rotation.
+    float shaderProfileScroll = uDistantStyle > 0.5
+            ? 0.0
+            : 0.00070 * wind * (1.0 - vColor.r);
+    float tileU = fract(vColor.g + vUV.x - shaderProfileScroll);
     vec2 sampleCoord = vec2(tileU, min(vUV.y, 0.99));
 
     if (uDistantStyle > 0.5) {
@@ -75,13 +100,19 @@ void main() {
         float detailedDensity = overlay(profileDensity, clouds);
 
         float shade = mainTex.g * clamp((detailedDensity - 0.3) * 6.0, 0.5, 1.0);
-        // Detail shades the cutout but never edits its coverage.
-        float bodyAlpha = mix(
-                2.0 / 3.0,
-                1.0,
-                smoothstep(0.08, 0.78, profileDensity)
-        );
-        float alpha = coverage * bodyAlpha * vColor.a;
+        // CloudDistant quantizes density opacity into thirds. Restoring this
+        // is important to the illustrated layer gradient: thin detail remains
+        // translucent while dense formations stay solid.
+        float densityAlpha = round((
+                pow(
+                        clamp(detailedDensity, 0.0, 1.0),
+                        mix(1.2, 0.05, clouds)
+                ) * 1.25
+                        - (1.0 - clouds) * 0.2
+        ) * 3.0) / 3.0;
+        float alpha = coverage
+                * clamp(densityAlpha, 0.0, 1.0)
+                * vColor.a;
         if (alpha <= 0.003) {
             discard;
         }

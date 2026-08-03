@@ -58,6 +58,7 @@ public final class AtcSkyRenderer {
         float wDay = weights.day();
         float wNg = weights.night();
         float wDk = weights.dusk();
+        Vector3f textureGrade = authoredTextureMultiply(weights);
 
         // Clear potential black sky fog before drawing our full-screen mesh
         BackgroundRenderer.clearFog();
@@ -94,9 +95,11 @@ public final class AtcSkyRenderer {
         Matrix4f invProj = new Matrix4f(projection).invert();
 
         // Multiply each layer’s alpha by heightVis
-        if (wDay > 0.004f)  drawSkyGrid(DAY,   wDay * heightVis, invProj, invViewBob);
-        if (wDk  > 0.004f)  drawSkyGrid(DUSK,  wDk  * heightVis, invProj, invViewBob);
-        if (wNg  > 0.004f)  drawSkyGrid(NIGHT, wNg  * heightVis, invProj, invViewBob);
+        // The night panorama already contains its final dark grade. Retain the
+        // warm C# dusk tint, but return to neutral as the night asset takes over.
+        if (wDay > 0.004f)  drawSkyGrid(DAY,   wDay * heightVis, textureGrade, invProj, invViewBob);
+        if (wDk  > 0.004f)  drawSkyGrid(DUSK,  wDk  * heightVis, textureGrade, invProj, invViewBob);
+        if (wNg  > 0.004f)  drawSkyGrid(NIGHT, wNg  * heightVis, textureGrade, invProj, invViewBob);
 
         // Restore matrices
         mvStack.set(savedMV);
@@ -105,14 +108,15 @@ public final class AtcSkyRenderer {
         RenderSystem.setProjectionMatrix(savedProj, VertexSorter.BY_DISTANCE);
     }
 
-    private static void drawSkyGrid(Identifier tex, float alpha, Matrix4f invProj, Matrix4f invViewBob) {
+    private static void drawSkyGrid(Identifier tex, float alpha, Vector3f textureGrade,
+                                    Matrix4f invProj, Matrix4f invViewBob) {
         MinecraftClient mc = MinecraftClient.getInstance();
         VertexConsumerProvider.Immediate immediate = mc.getBufferBuilders().getEntityVertexConsumers();
         VertexConsumer vc = immediate.getBuffer(skyLayer(tex));
 
         // opacity driven uniformly since POSITION_TEXTURE has no vertex color
         float clampedA = MathHelper.clamp(alpha, 0f, 1f);
-        RenderSystem.setShaderColor(1f, 1f, 1f, clampedA);
+        RenderSystem.setShaderColor(textureGrade.x, textureGrade.y, textureGrade.z, clampedA);
 
         for (int iy = 0; iy < GRID; iy++) {
             float y0 = -1f + 2f * (iy    / (float)GRID);
@@ -203,6 +207,9 @@ public final class AtcSkyRenderer {
         }
 
         SkyWeights weights = skyWeights(mc, tickDelta);
+        // AboveCloudsView animates this independently from _MultiplyColor:
+        // (41,59,81) -> (132,83,104) -> (12,13,17). Keep it independent from
+        // Minecraft biome fog so the authored cloud palette remains exact.
         Vector3f atmosphere = blendCloudColor(
                 CLOUD_ATMOSPHERE_DAY,
                 CLOUD_ATMOSPHERE_DUSK,
@@ -211,9 +218,6 @@ public final class AtcSkyRenderer {
                 weights.dusk(),
                 weights.night()
         );
-        Vector3f fogColor = biomeFogColor(mc, tickDelta);
-        float fogInfluence = MathHelper.clamp(0.46f + weights.night() * 0.16f - weights.dusk() * 0.08f, 0.34f, 0.62f);
-        atmosphere = mixCloudColor(atmosphere, fogColor, fogInfluence);
 
         Vector3f multiply = blendCloudColor(
                 CLOUD_MULTIPLY_DAY,
@@ -224,6 +228,24 @@ public final class AtcSkyRenderer {
                 weights.night()
         );
         return new CloudPalette(atmosphere, multiply);
+    }
+
+    /** Dusk-only grade for authored sprites whose night colouring is baked in. */
+    static Vector3f authoredTextureMultiply(float tickDelta) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.world == null) {
+            return new Vector3f(1.0f, 1.0f, 1.0f);
+        }
+        return authoredTextureMultiply(skyWeights(mc, tickDelta));
+    }
+
+    private static Vector3f authoredTextureMultiply(SkyWeights weights) {
+        float dusk = weights.dusk();
+        return new Vector3f(
+                MathHelper.lerp(dusk, 1.0f, CLOUD_MULTIPLY_DUSK.x),
+                MathHelper.lerp(dusk, 1.0f, CLOUD_MULTIPLY_DUSK.y),
+                MathHelper.lerp(dusk, 1.0f, CLOUD_MULTIPLY_DUSK.z)
+        );
     }
 
     private static Vector3f biomeFogColor(MinecraftClient mc, float tickDelta) {

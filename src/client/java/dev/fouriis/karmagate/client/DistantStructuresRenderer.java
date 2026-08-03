@@ -93,6 +93,7 @@ public final class DistantStructuresRenderer {
         if (heightVis <= 0.001f) return; // entirely hidden
         AtcSkyRenderer.CloudPalette cloudPalette = AtcSkyRenderer.cloudPalette(tickDelta);
         Vector3f atmosphere = cloudPalette.atmosphere();
+        Vector3f textureGrade = AtcSkyRenderer.authoredTextureMultiply(tickDelta);
 
         // Build VIEW = R^{-1} * T(-camPos)
         Vec3d camPos = camera.getPos();
@@ -115,9 +116,12 @@ public final class DistantStructuresRenderer {
         float fovRad = (float) Math.toRadians(dynFovDeg);
 
         float aspect = (float) mc.getWindow().getFramebufferWidth() / Math.max(1, mc.getWindow().getFramebufferHeight());
-        float near = 0.0001f;
-        float far  = (float) (mc.options.getClampedViewDistance() * 16.0 * 100.0);
-        Matrix4f extendedProj = new Matrix4f().setPerspective(fovRad, aspect, near, far);
+        Matrix4f extendedProj = AtcCloudVolumeRenderer.cloudProjection(
+                mc,
+                fovRad,
+                aspect
+        );
+        float far = AtcCloudVolumeRenderer.cloudProjectionFar(mc);
 
         Matrix4f savedProj = new Matrix4f(RenderSystem.getProjectionMatrix());
         Matrix4fStack mvStack = RenderSystem.getModelViewStack();
@@ -194,6 +198,9 @@ public final class DistantStructuresRenderer {
             int sr = lerpByte(cr, MathHelper.clamp((int) (atmosphere.x * 255.0f) + 36, 0, 255), colorFog);
             int sg = lerpByte(cg, MathHelper.clamp((int) (atmosphere.y * 255.0f) + 34, 0, 255), colorFog);
             int sb = lerpByte(cb, MathHelper.clamp((int) (atmosphere.z * 255.0f) + 30, 0, 255), colorFog);
+            sr = MathHelper.clamp(Math.round(sr * textureGrade.x), 0, 255);
+            sg = MathHelper.clamp(Math.round(sg * textureGrade.y), 0, 255);
+            sb = MathHelper.clamp(Math.round(sb * textureGrade.z), 0, 255);
             float alphaFog = MathHelper.lerp(structureFog, 0.92f, 0.48f);
 
             matrices.push();

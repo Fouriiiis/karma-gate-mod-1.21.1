@@ -256,7 +256,24 @@ void main() {
     );
     float voxelLight = mix(0.88, 1.05, clamp(uLight, 0.0, 1.0));
     cloudColor *= voxelLight;
-    cloudColor *= mix(vec3(1.0), uCloudMultiply, 0.45);
+    // Preserve Rain World's brighter nearby night highlights. Applying the
+    // full dusk/night multiplier after atmospheric blending crushed every
+    // depth to black and removed the illustrated close-to-far separation.
+    cloudColor *= mix(vec3(1.0), uCloudMultiply, 0.72);
+
+    // Measured from AboveCloudsView's night output. At full night the tonal
+    // variation within one layer spans this charcoal-to-silver range rather
+    // than being a uniformly multiplied daytime palette.
+    const vec3 nightCloudDark = vec3(14.0, 15.0, 22.0) / 255.0;
+    const vec3 nightCloudLight = vec3(59.0, 63.0, 69.0) / 255.0;
+    float fullNightRed = 4.0 / 51.0;
+    float nightAmount = clamp(
+            (1.0 - uCloudMultiply.r) / (1.0 - fullNightRed),
+            0.0,
+            1.0
+    );
+    vec3 nightCloudColor = mix(nightCloudDark, nightCloudLight, posterized);
+    cloudColor = mix(cloudColor, nightCloudColor, nightAmount);
 
     vec3 geometryVoxelCoordinate = vec3(
             geometryVoxelX,
