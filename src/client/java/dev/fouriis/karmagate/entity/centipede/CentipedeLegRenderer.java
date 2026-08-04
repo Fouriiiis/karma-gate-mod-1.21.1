@@ -1,7 +1,7 @@
 package dev.fouriis.karmagate.entity.centipede;
 
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
-import net.brickcraftdream.librainworldmc.client.atlas.AtlasSpriteModel;
+import net.brickcraftdream.librainworldmc.client.atlas.FAtlasSpriteModel;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
 import net.minecraft.client.render.VertexConsumer;
@@ -27,8 +27,8 @@ import org.joml.Matrix4f;
  */
 public final class CentipedeLegRenderer {
 
-    private static AtlasSpriteModel legAModel = null;
-    private static AtlasSpriteModel legBModel = null;
+    private static FAtlasSpriteModel legAModel = null;
+    private static FAtlasSpriteModel legBModel = null;
 
     // 1 RW pixel -> MC blocks
     private static final float PX = 0.05f;
@@ -583,14 +583,14 @@ public final class CentipedeLegRenderer {
     // Sprite model rendering
     // =========================================================================
 
-    private static float modelHalfWidth(double limbLen, AtlasSpriteModel model, float legScale) {
+    private static float modelHalfWidth(double limbLen, FAtlasSpriteModel model, float legScale) {
         float modelHeight = Math.max(model.height(), 1f);
         return (float) (limbLen * (model.width() / modelHeight) * 0.5f) * legScale;
     }
 
     private static void renderLegModel(MatrixStack matrices, VertexConsumerProvider vcProvider, int light,
                                        Vec3d startLocal, Vec3d endLocal, float halfWidth,
-                                       AtlasSpriteModel model,
+                                       FAtlasSpriteModel model,
                                        Vec3d faceHint,
                                        int topR, int topG, int topB,
                                        int botR, int botG, int botB) {
@@ -622,7 +622,7 @@ public final class CentipedeLegRenderer {
         Matrix4f mat = matrices.peek().getPositionMatrix();
         VertexConsumer vc = vcProvider.getBuffer(RenderLayer.getEntityCutoutNoCull(model.element().textureIdentifier));
 
-        for (AtlasSpriteModel.Quad quad : model.quads()) {
+        for (FAtlasSpriteModel.Quad quad : model.quads()) {
             Vec3d normal = transformNormal(widthDir, tangent, face, quad.normalX(), quad.normalY(), quad.normalZ());
             emitModelVertex(mat, vc, light, modelWidth, modelHeight, xScale, yScale, zScale,
                     startLocal, widthDir, tangent, face, normal, quad.a(), topR, topG, topB, botR, botG, botB);
@@ -648,7 +648,7 @@ public final class CentipedeLegRenderer {
                                         float modelWidth, float modelHeight,
                                         float xScale, float yScale, float zScale,
                                         Vec3d startLocal, Vec3d widthDir, Vec3d tangent, Vec3d face, Vec3d normal,
-                                        AtlasSpriteModel.Vertex vertex,
+                                        FAtlasSpriteModel.Vertex vertex,
                                         int topR, int topG, int topB,
                                         int botR, int botG, int botB) {
         float x = (vertex.x() - modelWidth * 0.5f) * xScale;

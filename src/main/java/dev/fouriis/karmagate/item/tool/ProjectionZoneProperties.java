@@ -19,4 +19,6 @@ public class ProjectionZoneProperties extends AreaProperties {
 
     /** Whether to draw the projection grid in this zone. */
     public boolean drawGrid = true;
+
+    public boolean drawStarMatrix = true;
 }

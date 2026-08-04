@@ -6,7 +6,9 @@ import dev.fouriis.karmagate.entity.karmagate.HeatCoilBlockEntity;
 import dev.fouriis.karmagate.entity.karmagate.WaterfallBlockEntity;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.SteamAudioController;
+import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
+import net.brickcraftdream.librainworldmc.client.render.shader.Shaders;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.client.render.BufferBuilder;
@@ -37,7 +39,7 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
             Identifier.of("librainworldmc", "grabtex");
 
     private static final Identifier NOISE_TEXTURE =
-            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise-hq.png");
+            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise.png");
 
     private static final Identifier MINECRAFT_WATER_FLOW =
             Identifier.of("minecraft", "textures/block/water_flow.png");
@@ -78,15 +80,17 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
             return;
         }
 
-        renderWaterfallCrossedStreamsImmediate(
-                be,
-                tickDelta,
-                matrices,
-                light,
-                topY,
-                bottomY,
-                visualDensity
-        );
+        RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall((camera) -> {
+            renderWaterfallCrossedStreamsImmediate(
+                    be,
+                    tickDelta,
+                    matrices,
+                    light,
+                    topY,
+                    bottomY,
+                    visualDensity
+            );
+        }, false), 900);
     }
 
     private void renderWaterfallCrossedStreamsImmediate(
@@ -99,16 +103,21 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
             float visualDensity
     ) {
         try {
-            CoreShaderRenderer.bindShader$WaterFall(
-                    WATERFALL_SURFACE_SCALE,
-                    LEVEL_TEXTURE,
-                    NOISE_TEXTURE,
-                    Identifier.ofVanilla("textures/misc/underwater.png"),
-                    null,
-                    null,
-                    false,
-                    false
-            );
+            //CoreShaderRenderer.bindShader$WaterFall(
+            //        WATERFALL_SURFACE_SCALE,
+            //        LEVEL_TEXTURE,
+            //        NOISE_TEXTURE,
+            //        Identifier.ofVanilla("textures/misc/underwater.png"),
+            //        null,
+            //        null,
+            //        false,
+            //        false
+            //);
+            Shaders.WATER_FALL.setSurfacescale(WATERFALL_SURFACE_SCALE);
+            Shaders.WATER_FALL.setSampler1_LevelTex(LEVEL_TEXTURE);
+            Shaders.WATER_FALL.setSampler2_MainTex(NOISE_TEXTURE);
+            Shaders.WATER_FALL.setSampler4_PalTex(Identifier.ofVanilla("textures/misc/underwater.png"));
+            Shaders.WATER_FALL.apply();
 
             float impactY = Math.min(bottomY, -0.001f);
             float topEdge = edgeValue(1.0f, impactY, topY);
@@ -159,14 +168,14 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
             matrices.pop();
 
             RenderSystem.depthMask(true);
-        } catch (Throwable t) {
-            System.err.println("[Karmagate/Waterfall] Exception while rendering crossed streams at "
-                    + be.getPos()
-                    + " topY=" + topY
-                    + " bottomY=" + bottomY
-                    + " visualDensity=" + visualDensity
-                    + " surfaceScale=" + WATERFALL_SURFACE_SCALE);
-            t.printStackTrace();
+        } catch (Exception e) {
+            //System.err.println("[Karmagate/Waterfall] Exception while rendering crossed streams at "
+            //        + be.getPos()
+            //        + " topY=" + topY
+            //        + " bottomY=" + bottomY
+            //        + " visualDensity=" + visualDensity
+            //        + " surfaceScale=" + WATERFALL_SURFACE_SCALE);
+            e.printStackTrace();
             RenderSystem.depthMask(true);
         }
     }

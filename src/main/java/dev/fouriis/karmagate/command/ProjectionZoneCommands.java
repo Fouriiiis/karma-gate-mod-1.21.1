@@ -121,7 +121,7 @@ public class ProjectionZoneCommands {
         }
         
         ProjectionZoneManager manager = ProjectionZoneManager.get(source.getServer());
-        ProjectionZoneData zone = ProjectionZoneData.of(name, x1, y1, z1, x2, y2, z2, swarmerCount, drawCircles, drawGrid);
+        ProjectionZoneData zone = ProjectionZoneData.of(name, x1, y1, z1, x2, y2, z2, swarmerCount, drawCircles, drawGrid, false);
         
         boolean isNew = manager.addZone(zone);
         

@@ -6,6 +6,7 @@ import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.codec.PacketCodecs;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.BlockPos;
 
 /**
  * Client-to-server payload for creating a ProjectionZone from the selection tool.
@@ -17,7 +18,8 @@ public record CreateProjectionZonePayload(
         int x2, int y2, int z2,
         int swarmerCount,
         boolean drawCircles,
-        boolean drawGrid
+        boolean drawGrid,
+        boolean drawStarMatrix
 ) implements CustomPayload {
 
     public static final CustomPayload.Id<CreateProjectionZonePayload> ID =
@@ -36,7 +38,8 @@ public record CreateProjectionZonePayload(
             int swarmerCount = buf.readInt();
             boolean drawCircles = buf.readBoolean();
             boolean drawGrid = buf.readBoolean();
-            return new CreateProjectionZonePayload(name, x1, y1, z1, x2, y2, z2, swarmerCount, drawCircles, drawGrid);
+            boolean drawStarMatrix = buf.readBoolean();
+            return new CreateProjectionZonePayload(name, x1, y1, z1, x2, y2, z2, swarmerCount, drawCircles, drawGrid, drawStarMatrix);
         }
 
         @Override
@@ -51,6 +54,7 @@ public record CreateProjectionZonePayload(
             buf.writeInt(payload.swarmerCount());
             buf.writeBoolean(payload.drawCircles());
             buf.writeBoolean(payload.drawGrid());
+            buf.writeBoolean(payload.drawStarMatrix());
         }
     };
 

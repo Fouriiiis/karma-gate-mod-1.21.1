@@ -33,6 +33,7 @@ public class ProjectionZoneScreen extends Screen {
     private LabeledIntFieldWidget swarmerCountField;
     private LabeledCheckboxWidget drawCirclesCheckbox;
     private LabeledCheckboxWidget drawGridCheckbox;
+    private LabeledCheckboxWidget drawStarMatrixCheckbox;
     private LabeledFormWidget form;
 
     private String oldName = "";
@@ -101,6 +102,15 @@ public class ProjectionZoneScreen extends Screen {
         );
         form.addRow(drawGridCheckbox);
 
+        drawStarMatrixCheckbox = new LabeledCheckboxWidget(
+                0, 0, halfWidth, WIDGET_HEIGHT,
+                Text.literal("Draw Star Matrix"),
+                Text.literal("Disabled"),
+                props.drawStarMatrix,
+                List.of(Text.literal("Whether to draw the projection grid")),
+                (widget, value) -> props.drawStarMatrix = value
+        );
+
         LabeledButtonWidget confirmButton = new LabeledButtonWidget(
                 0, 0, halfWidth, WIDGET_HEIGHT,
                 Text.literal(""),
@@ -116,6 +126,7 @@ public class ProjectionZoneScreen extends Screen {
                     props.zoneName = name;
                     props.drawCircles = drawCirclesCheckbox.isChecked();
                     props.drawGrid = drawGridCheckbox.isChecked();
+                    props.drawStarMatrix = drawStarMatrixCheckbox.isChecked();
                     Integer sc = swarmerCountField.getValue();
                     if (sc != null) props.swarmerCount = sc;
 
@@ -130,7 +141,8 @@ public class ProjectionZoneScreen extends Screen {
                             first.getMaxX(), first.getMaxY(), first.getMaxZ(),
                             props.swarmerCount,
                             props.drawCircles,
-                            props.drawGrid
+                            props.drawGrid,
+                            props.drawStarMatrix
                     ));
 
                     ClientNetworkActions.saveArea(area);

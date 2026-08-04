@@ -232,7 +232,8 @@ public class ModNetworking {
                         payload.x2(), payload.y2(), payload.z2(),
                         payload.swarmerCount(),
                         payload.drawCircles(),
-                        payload.drawGrid()
+                        payload.drawGrid(),
+                        payload.drawStarMatrix()
                 );
                 manager.addZone(zone);
                 syncToAll(context.server());

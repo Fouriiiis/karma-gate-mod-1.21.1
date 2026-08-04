@@ -7,7 +7,7 @@ import net.minecraft.util.math.BlockPos;
  * This is the authoritative source of truth for projection zones.
  */
 public record ProjectionZoneData(String name, BlockPos corner1, BlockPos corner2,
-                                  int swarmerCount, boolean drawCircles, boolean drawGrid) {
+                                  int swarmerCount, boolean drawCircles, boolean drawGrid, boolean drawStarMatrix) {
     
     /** Default swarmer count when not specified. */
     public static final int DEFAULT_SWARMER_COUNT = 600;
@@ -16,16 +16,16 @@ public record ProjectionZoneData(String name, BlockPos corner1, BlockPos corner2
      * Creates zone data from coordinate values with all parameters.
      */
     public static ProjectionZoneData of(String name, int x1, int y1, int z1, int x2, int y2, int z2,
-                                         int swarmerCount, boolean drawCircles, boolean drawGrid) {
+                                         int swarmerCount, boolean drawCircles, boolean drawGrid, boolean drawStarMatrix) {
         return new ProjectionZoneData(name, new BlockPos(x1, y1, z1), new BlockPos(x2, y2, z2),
-                                      swarmerCount, drawCircles, drawGrid);
+                                      swarmerCount, drawCircles, drawGrid, drawStarMatrix);
     }
     
     /**
      * Creates zone data from coordinate values with defaults (backwards compatible).
      */
     public static ProjectionZoneData of(String name, int x1, int y1, int z1, int x2, int y2, int z2) {
-        return of(name, x1, y1, z1, x2, y2, z2, DEFAULT_SWARMER_COUNT, true, true);
+        return of(name, x1, y1, z1, x2, y2, z2, DEFAULT_SWARMER_COUNT, true, true, false);
     }
     
     /**
