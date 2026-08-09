@@ -239,6 +239,12 @@ public final class AtcSkyRenderer {
         return authoredTextureMultiply(skyWeights(mc, tickDelta));
     }
 
+    /** Night-stage interpolation used by AboveCloudsView's Five Pebbles lightning. */
+    static float nightWeight(float tickDelta) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        return mc.world == null ? 0.0f : skyWeights(mc, tickDelta).night();
+    }
+
     private static Vector3f authoredTextureMultiply(SkyWeights weights) {
         float dusk = weights.dusk();
         return new Vector3f(

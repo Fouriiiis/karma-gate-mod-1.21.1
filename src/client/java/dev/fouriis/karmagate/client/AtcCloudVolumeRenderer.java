@@ -99,7 +99,7 @@ public final class AtcCloudVolumeRenderer {
     public static final TuningValue CLOSE_VOLUME_DEPTH_SCALE =
             new TuningValue("Close Voxel Depth Scale", 1.0f, 1.0f, 1.0f, false);
     public static final TuningValue CLOSE_TILE_WIDTH_X =
-            new TuningValue("Close Tile Width X", 1800.0f, 128.0f, 4000.0f, false);
+            new TuningValue("Close Tile Width X", 2700.0f, 128.0f, 4000.0f, false);
     public static final TuningValue CLOSE_TILE_WIDTH_Z =
             new TuningValue("Close Tile Width Z", 2700.0f, 128.0f, 4000.0f, false);
     public static final TuningValue CLOSE_HANDOFF_FADE_WIDTH =
@@ -344,12 +344,16 @@ public final class AtcCloudVolumeRenderer {
             float z0 = centerZ - MathHelper.cos(angle0) * radius;
             float x1 = centerX + MathHelper.sin(angle1) * radius;
             float z1 = centerZ - MathHelper.cos(angle1) * radius;
-            // A world-Z profile is naturally mirrored across the north/south
-            // axis: east and west vertices at the same Z receive identical U.
-            // Subtracting the same offset used by close tiles makes features
-            // move north on both sides and converge at the north pole.
-            float u0 = (float) ((z0 - wrappedNorthOffset) / safeProfileWidth);
-            float u1 = (float) ((z1 - wrappedNorthOffset) / safeProfileWidth);
+            // Measure U along each half of the ring rather than projecting it
+            // onto world Z. The Z derivative approaches zero at the north and
+            // south poles, which stretched the profile horizontally as clouds
+            // approached their convergence point. Mirrored arc distance keeps
+            // a constant texel-to-world ratio on both sides while retaining
+            // the shared northward motion and seamless meeting at the poles.
+            float arcDistance0 = radius * Math.min(angle0, 2.0f * (float) Math.PI - angle0);
+            float arcDistance1 = radius * Math.min(angle1, 2.0f * (float) Math.PI - angle1);
+            float u0 = (float) ((arcDistance0 - wrappedNorthOffset) / safeProfileWidth);
+            float u1 = (float) ((arcDistance1 - wrappedNorthOffset) / safeProfileWidth);
 
             vc.vertex(x0, bottomY, z0).color(depth, phase, flattening, alpha).texture(u0, 1.0f).light(FULL_BRIGHT);
             vc.vertex(x0, topY, z0).color(depth, phase, flattening, alpha).texture(u0, 0.0f).light(FULL_BRIGHT);

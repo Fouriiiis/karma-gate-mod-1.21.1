@@ -5,6 +5,8 @@ import com.google.gson.*;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.systems.VertexSorter;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gl.GlUniform;
+import net.minecraft.client.gl.ShaderProgram;
 import net.minecraft.client.render.*;
 import net.minecraft.client.render.RenderPhase.Texture;
 import net.minecraft.client.texture.NativeImage;
@@ -12,11 +14,9 @@ import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.resource.Resource;
 import net.minecraft.resource.ResourceManager;
 import net.minecraft.util.Identifier;
-import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.RotationAxis;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.LightType;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fStack;
 import org.joml.Vector3f;
@@ -46,6 +46,12 @@ public final class DistantStructuresRenderer {
     private static final Identifier CLOUD_EDGE = Identifier.of("karma-gate-mod", "clouds/distantclouds.png");
     private static final int CLOUD_EDGE_SEGMENTS = 28;
     private static final long CLOUD_EDGE_TIME_WRAP_TICKS = 24_000L;
+    private static final int FULL_BRIGHT = LightmapTextureManager.pack(15, 15);
+    // The previous renderer's 42,000-block full-fog distance corresponds to
+    // AboveCloudsView's 600-depth endpoint, giving 70 world blocks per C#
+    // background-scene depth unit.
+    private static final float CSHARP_DEPTH_WORLD_SCALE = 70.0f;
+    private static final float CSHARP_ATMOSPHERE_END_DEPTH = 600.0f;
 
     // Per-entry lightning state (RW-like)
     private static final Map<Entry, Lightning> LIGHTNING = new ConcurrentHashMap<>();
@@ -53,7 +59,9 @@ public final class DistantStructuresRenderer {
     // Cache source image sizes to preserve overlay/base size ratio
     private static final Map<Identifier, int[]> TEX_SIZE = new ConcurrentHashMap<>();
 
-    private static final float GLOW_Z_PUSH = -0.0025f; // render just behind the base
+    // Keep the coplanar light illustration just in front of the depth-writing
+    // base. A negative bias allowed the base to reject much of its own glow.
+    private static final float GLOW_Z_PUSH = 0.05f;
     private static NativeImage cloudEdgeImage;
     private static int cloudEdgeW;
     private static int cloudEdgeH;
@@ -87,13 +95,20 @@ public final class DistantStructuresRenderer {
 
         MinecraftClient mc = MinecraftClient.getInstance();
 
+        // DistantLightning.Update runs once per game tick and DrawSprites calls
+        // LightIntensity once per rendered frame, even when its altitude gate
+        // makes the sprite invisible. Preserve both timelines independently.
+        if (renderGlow && mc.world != null) {
+            prepareLightningFrame(mc.world.getTime(), tickDelta);
+        }
+
         // --- Height-based visibility (camera Y) ---
         float camY = (float) camera.getPos().y;
         float heightVis = AtcCloudVolumeRenderer.aboveCloudsVisibility(camY);
         if (heightVis <= 0.001f) return; // entirely hidden
         AtcSkyRenderer.CloudPalette cloudPalette = AtcSkyRenderer.cloudPalette(tickDelta);
         Vector3f atmosphere = cloudPalette.atmosphere();
-        Vector3f textureGrade = AtcSkyRenderer.authoredTextureMultiply(tickDelta);
+        Vector3f multiplyColor = cloudPalette.multiply();
 
         // Build VIEW = R^{-1} * T(-camPos)
         Vec3d camPos = camera.getPos();
@@ -133,30 +148,14 @@ public final class DistantStructuresRenderer {
 
         VertexConsumerProvider.Immediate immediate = mc.getBufferBuilders().getEntityVertexConsumers();
 
-        // Ambient grayscale (day/night brightness) without hue tint
-        float ambient01 = 1f;
-        int cr = 255, cg = 255, cb = 255;
-        if (mc.world != null) {
-            Vec3d sky = mc.world.getSkyColor(camPos, tickDelta);
-            float r = MathHelper.clamp((float) sky.x, 0f, 1f);
-            float g = MathHelper.clamp((float) sky.y, 0f, 1f);
-            float b = MathHelper.clamp((float) sky.z, 0f, 1f);
-            float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-            float minNight = 0.12f;
-            float scale    = 0.95f;
-            float ambient  = MathHelper.clamp(minNight + scale * luma, minNight, 1.0f);
-            ambient01 = ambient;
-            int gray = (int) (ambient * 255f);
-            cr = gray; cg = gray; cb = gray;
+        // Only Five Pebbles uses an external intensity multiplier in C#: it
+        // rises during the dusk-to-night stage. Ordinary structure lightning
+        // remains at multiplier 1 throughout the cycle.
+        float nightFactor = AtcSkyRenderer.nightWeight(tickDelta);
+
+        if (renderBase) {
+            bindStructurePalette(atmosphere, multiplyColor);
         }
-
-        // Night factor: 0 (day) -> 1 (night)
-        float nightFactor = smoothstep(0.65f, 0.15f, ambient01);
-
-        // +50% daytime boost to lightning; fades at night
-        float baseMult = 0.25f + 1.25f * nightFactor;
-        float dayBoostAdd = 0.125f * (1.0f - nightFactor);
-        float globalGlowMultiplier = MathHelper.clamp(baseMult + dayBoostAdd, 0.25f, 1.5f);
 
         // Back-to-front sort for translucency
         List<Entry> sorted = new ArrayList<>(ENTRIES);
@@ -164,14 +163,6 @@ public final class DistantStructuresRenderer {
                 camPos.squaredDistanceTo(b.x, b.y, b.z),
                 camPos.squaredDistanceTo(a.x, a.y, a.z)
         ));
-
-        // tick timeline (precision-safe)
-        long nowTicks = 0L;
-        if (mc.world != null) {
-            long base = mc.world.getTime();
-            int frac = MathHelper.floor(tickDelta * 20.0f + 0.5f);
-            nowTicks = base + frac;
-        }
 
         for (Entry e : sorted) {
             Vec3d target = new Vec3d(e.x, e.y, e.z);
@@ -193,42 +184,26 @@ public final class DistantStructuresRenderer {
             if (Float.isNaN(yawRad)) yawRad = 0f;
 
             float dist = (float) rel.length();
-            float structureFog = smoothstep(5_000.0f, 42_000.0f, dist);
-            float colorFog = structureFog * 0.68f;
-            int sr = lerpByte(cr, MathHelper.clamp((int) (atmosphere.x * 255.0f) + 36, 0, 255), colorFog);
-            int sg = lerpByte(cg, MathHelper.clamp((int) (atmosphere.y * 255.0f) + 34, 0, 255), colorFog);
-            int sb = lerpByte(cb, MathHelper.clamp((int) (atmosphere.z * 255.0f) + 30, 0, 255), colorFog);
-            sr = MathHelper.clamp(Math.round(sr * textureGrade.x), 0, 255);
-            sg = MathHelper.clamp(Math.round(sg * textureGrade.y), 0, 255);
-            sb = MathHelper.clamp(Math.round(sb * textureGrade.z), 0, 255);
-            float alphaFog = MathHelper.lerp(structureFog, 0.92f, 0.48f);
+            int atmosphereDepth = colorByte(csharpAtmosphereDepth(dist, e.texture()));
 
             matrices.push();
             matrices.translate((float) place.x, (float) place.y, (float) place.z);
             matrices.multiply(RotationAxis.POSITIVE_Y.rotation(yawRad));
 
-            float cloudEdgePhase = edgePhase(nowTicks, tickDelta, e);
+            float cloudEdgePhase = edgePhase(mc.world != null ? mc.world.getTime() : 0L, tickDelta, e);
+            float structureWidth = structureWorldWidth(e);
             if (renderBase) {
                 // ---- Base, non-emissive pass ----
                 matrices.push();
-                matrices.scale(e.width, e.height, 1f);
+                matrices.scale(structureWidth, e.height, 1f);
                 VertexConsumer vcBase = immediate.getBuffer(baseLayer(e.texture()));
-                int packedLight;
-                var world = mc.world;
-                if (world != null) {
-                    int bx = MathHelper.floor(place.x);
-                    int by = MathHelper.floor(place.y);
-                    int bz = MathHelper.floor(place.z);
-                    int block = world.getLightLevel(LightType.BLOCK, new BlockPos(bx, by, bz));
-                    int sky   = world.getLightLevel(LightType.SKY,   new BlockPos(bx, by, bz));
-                    packedLight = LightmapTextureManager.pack(block, sky);
-                } else {
-                    packedLight = LightmapTextureManager.pack(0, 0);
-                }
-                int baseA = MathHelper.clamp((int)(255f * heightVis * alphaFog), 0, 255);
+                int baseA = MathHelper.clamp((int)(255f * heightVis), 0, 255);
                 float cutY = (AtcCloudVolumeRenderer.distantStructureCloudCutY() - (float) place.y) / e.height;
                 float cloudFadeHeight = cloudEdgeFadeHeight(e.height);
-                renderQuadAbove(vcBase, matrices, 1f, 1f, cutY, packedLight, sr, sg, sb, baseA, cloudEdgePhase, cloudFadeHeight);
+                // DistantBkgObject reads atmospheric depth from vertex red;
+                // green and blue are intentionally unused by the shader.
+                renderQuadAbove(vcBase, matrices, 1f, 1f, cutY, FULL_BRIGHT,
+                        atmosphereDepth, 0, 0, baseA, cloudEdgePhase, cloudFadeHeight);
                 matrices.pop(); // base scale
             }
 
@@ -236,27 +211,29 @@ public final class DistantStructuresRenderer {
             Identifier lightTex = overlayFor(e.texture());
             if (renderGlow && lightTex != null && mc.world != null) {
                 Lightning L = LIGHTNING.computeIfAbsent(e, DistantStructuresRenderer::makeLightning);
-                L.updateTo(nowTicks);
+                // Preserve the original renderer's day-to-night brightness
+                // range, but lower its final sprite-alpha scale by 20% so the
+                // flashes retain their presence without washing out the art.
+                L.intensityMultiplier = MathHelper.lerp(nightFactor, 0.375f, 1.5f);
+                float positionVisibility = heightVis;
 
-                // fold the height fade into glow as well
-                L.globalMultiplier = globalGlowMultiplier * heightVis;
-
-                float alpha = L.lightIntensity(tickDelta) * 0.50f; // keep clear visibility
-                if (alpha > 0.003f) {
+                float alpha = L.frameIntensity * L.intensityMultiplier * 0.40f * positionVisibility;
+                int ia = MathHelper.clamp((int) (alpha * 255.0f), 0, 255);
+                if (ia > 0) {
                     float[] ratio = overlayScaleRatio(e.texture(), lightTex);
                     float sx = ratio[0];
                     float sy = ratio[1];
 
-                    int ia = MathHelper.clamp((int)(alpha * 255f * MathHelper.lerp(structureFog, 1.0f, 0.55f)), 0, 255);
-                    int fullbright = LightmapTextureManager.pack(15, 15);
-
                     matrices.push();
-                    float yOffset = -(e.height * (sy - 1f) * 0.5f);
+                    float yOffset = lightningYOffset(e);
                     matrices.translate(0f, yOffset, +GLOW_Z_PUSH);
-                    matrices.scale(e.width * sx, e.height * sy, 1f);
+                    // Use the base texture's height-derived pixel scale for
+                    // both lightning axes. This keeps its larger source canvas
+                    // aligned without reintroducing the configured width.
+                    matrices.scale(structureWidth * sx, e.height * sy, 1f);
 
                     VertexConsumer vcGlow = immediate.getBuffer(glowLayer(lightTex));
-                    renderQuad(vcGlow, matrices, 1f, 1f, fullbright, 255, 255, 255, ia);
+                    renderQuad(vcGlow, matrices, 1f, 1f, FULL_BRIGHT, 255, 255, 255, ia);
                     matrices.pop();
                 }
             }
@@ -274,6 +251,19 @@ public final class DistantStructuresRenderer {
     /* ----------------------------------------------------------------------
        Texture ratio helpers
        ---------------------------------------------------------------------- */
+
+    /**
+     * Width is derived exclusively from the configured height and the source
+     * image aspect ratio. Entry.width remains readable for config compatibility
+     * but does not affect either the base or lightning visuals.
+     */
+    private static float structureWorldWidth(Entry entry) {
+        int[] size = getTextureSize(entry.texture());
+        if (size[0] <= 0 || size[1] <= 0) {
+            return entry.height();
+        }
+        return entry.height() * size[0] / (float) size[1];
+    }
 
     private static float[] overlayScaleRatio(Identifier baseTex, Identifier overlayTex) {
         int[] base = getTextureSize(baseTex);     // [w,h]
@@ -314,6 +304,20 @@ public final class DistantStructuresRenderer {
         return new Lightning(seed);
     }
 
+    private static void prepareLightningFrame(long worldTick, float minecraftTickDelta) {
+        // Keep the original Minecraft cadence: one state update per 20 TPS
+        // world tick, with normal partial-tick interpolation between states.
+        float timeStacker = MathHelper.clamp(minecraftTickDelta, 0.0f, 1.0f);
+        for (Entry entry : ENTRIES) {
+            if (overlayFor(entry.texture()) == null) {
+                continue;
+            }
+            Lightning lightning = LIGHTNING.computeIfAbsent(entry, DistantStructuresRenderer::makeLightning);
+            lightning.updateTo(worldTick);
+            lightning.frameIntensity = lightning.lightIntensity(timeStacker);
+        }
+    }
+
     private static long seedFrom(Entry e) {
         long h = 1469598103934665603L;
         h ^= e.texture.toString().hashCode(); h *= 1099511628211L;
@@ -332,6 +336,29 @@ public final class DistantStructuresRenderer {
         return null;
     }
 
+    /** Exact DrawSprites Y offsets, converted from source pixels to blocks. */
+    private static float lightningYOffset(Entry entry) {
+        float pixelOffset;
+        String path = entry.texture().getPath();
+        if (path.endsWith("atc_structure1.png")) {
+            pixelOffset = -34.0f;
+        } else if (path.endsWith("atc_structure2.png")) {
+            pixelOffset = -16.0f;
+        } else if (path.endsWith("atc_structure3.png")) {
+            pixelOffset = -8.0f;
+        } else if (path.endsWith("atc_fivepebbles.png")) {
+            pixelOffset = 30.0f;
+        } else {
+            return 0.0f;
+        }
+
+        int[] baseSize = getTextureSize(entry.texture());
+        if (baseSize[1] <= 0) {
+            return 0.0f;
+        }
+        return pixelOffset * entry.height() / baseSize[1];
+    }
+
     private static final class Lightning {
         final Random rng;
 
@@ -347,39 +374,33 @@ public final class DistantStructuresRenderer {
 
         float lastIntensity;
         float intensity;
+        float frameIntensity;
 
-        boolean nonPositionBasedIntensity = true;
         float intensityMultiplier = 1f;
-        float globalMultiplier    = 1f;
 
         long lastTickAdvanced = Long.MIN_VALUE;
 
         Lightning(long seed) {
             this.rng = new Random(seed);
             this.tinyThunderWait = 5;
-            resetBurst();
-            this.thunder = 0;
-            this.tinyThunder = 0;
-            this.tinyThunderLength = 0;
-            this.randomLevel = rng.nextFloat();
-            this.randomLevelChange = 1 + rng.nextInt(5);
-            this.lastIntensity = 0f;
-            this.intensity = 0f;
-            this.lastTickAdvanced = Long.MIN_VALUE;
         }
 
         private void resetBurst() {
-            this.wait = lerpInt(10, 440, rng.nextFloat());
+            this.wait = (int) lerp(10.0f, 440.0f, rng.nextFloat());
             this.power = lerp(0.7f, 1.0f, rng.nextFloat());
-            this.thunderLength = 1 + rng.nextInt(Math.max(1, (int) lerp(10f, 32f, power)));
+            int maxExclusive = (int) lerp(10.0f, 32.0f, power);
+            this.thunderLength = randomRange(1, maxExclusive);
         }
 
         void updateTo(long nowTick) {
             if (lastTickAdvanced == Long.MIN_VALUE) {
-                lastTickAdvanced = nowTick;
-                return;
+                // The C# object receives Update before its first DrawSprites.
+                lastTickAdvanced = nowTick - 1L;
             }
-            if (nowTick <= lastTickAdvanced) return;
+            if (nowTick < lastTickAdvanced) {
+                lastTickAdvanced = nowTick - 1L;
+            }
+            if (nowTick == lastTickAdvanced) return;
 
             for (long t = lastTickAdvanced + 1; t <= nowTick; t++) stepOneTick();
             lastTickAdvanced = nowTick;
@@ -407,8 +428,8 @@ public final class DistantStructuresRenderer {
             if (tinyThunderWait > 0) {
                 tinyThunderWait--;
                 if (tinyThunderWait < 1) {
-                    tinyThunderWait = 10 + rng.nextInt(71);
-                    tinyThunderLength = 5 + rng.nextInt(tinyThunderWait - 4);
+                    tinyThunderWait = randomRange(10, 80);
+                    tinyThunderLength = randomRange(5, tinyThunderWait);
                     tinyThunder = tinyThunderLength;
                 }
             }
@@ -428,7 +449,7 @@ public final class DistantStructuresRenderer {
                 tinyThunder--;
                 float tinyFac = 1f - (float) tinyThunder / (float) Math.max(1, tinyThunderLength);
                 float expo = lerp(3f, 0.1f, (float) Math.sin(tinyFac * Math.PI));
-                b = (float) Math.pow(rng.nextFloat(), expo) * 0.7f;
+                b = (float) Math.pow(rng.nextFloat(), expo) * 0.4f;
             }
 
             intensity = Math.max(a, b);
@@ -440,23 +461,91 @@ public final class DistantStructuresRenderer {
                 float target = (rng.nextFloat() < 0.5f) ? 1f : 0f;
                 num = lerp(num, target, rng.nextFloat() * num);
             }
-            float shaped = sCurve(num);
-            shaped = (float)Math.pow(shaped, 0.7f);
-            return shaped * intensityMultiplier * globalMultiplier;
+            return sCurve(num, 0.5f);
         }
 
         private static float lerp(float a, float b, float t) { return a + (b - a) * t; }
-        private static int lerpInt(int a, int b, float t) { return Math.round(a + (b - a) * t); }
         private static float clamp01(float x) { return Math.max(0f, Math.min(1f, x)); }
-        private static float sCurve(float x) {
-            x = clamp01(x);
-            return x * x * (3f - 2f * x);
+
+        /** Direct port of RWCustom.Custom.SCurve. */
+        private static float sCurve(float x, float k) {
+            x = x * 2.0f - 1.0f;
+            if (x < 0.0f) {
+                x = Math.abs(1.0f + x);
+                return k * x / (k - x + 1.0f) * 0.5f;
+            }
+            k = -1.0f - k;
+            return 0.5f + k * x / (k - x + 1.0f) * 0.5f;
+        }
+
+        /** UnityEngine.Random.Range(int, int): inclusive min, exclusive max. */
+        private int randomRange(int minInclusive, int maxExclusive) {
+            if (maxExclusive <= minInclusive) {
+                return minInclusive;
+            }
+            return minInclusive + rng.nextInt(maxExclusive - minInclusive);
         }
     }
 
     /* ----------------------------------------------------------------------
        Render helpers
        ---------------------------------------------------------------------- */
+    private static void bindStructurePalette(Vector3f atmosphere, Vector3f multiplyColor) {
+        ShaderProgram program = AtcCloudShaders.STRUCTURE_PROGRAM;
+        if (program == null) {
+            return;
+        }
+        program.bind();
+        setUniform3f(program.getUniform("uAtmosphereColor"),
+                atmosphere.x, atmosphere.y, atmosphere.z);
+        setUniform3f(program.getUniform("uMultiplyColor"),
+                multiplyColor.x, multiplyColor.y, multiplyColor.z);
+    }
+
+    /** Direct port of DistantBuilding.DrawSprites' red-channel shader input. */
+    private static float csharpAtmosphereDepth(float worldDistance, Identifier texture) {
+        float depth = worldDistance / CSHARP_DEPTH_WORLD_SCALE;
+        float adjustedDepth = depth + csharpAtmosphereDepthAdd(texture);
+        float normalizedDepth = MathHelper.clamp(
+                adjustedDepth / CSHARP_ATMOSPHERE_END_DEPTH,
+                0.0f,
+                1.0f
+        );
+        return (float) Math.pow(normalizedDepth, 0.3f) * 0.9f;
+    }
+
+    /** atmosphericalDepthAdd values assigned in AboveCloudsView.cs. */
+    private static float csharpAtmosphereDepthAdd(Identifier texture) {
+        String path = texture.getPath();
+        if (path.endsWith("atc_structure1.png")) return -20.0f;
+        if (path.endsWith("atc_structure2.png")) return 0.0f;
+        if (path.endsWith("atc_structure3.png")) return -100.0f;
+        if (path.endsWith("atc_structure4.png")) return -200.0f;
+        if (path.endsWith("atc_structure5.png")) return -350.0f;
+        if (path.endsWith("atc_structure6.png")) return -350.0f;
+        if (path.endsWith("atc_spire1.png")) return -60.0f;
+        if (path.endsWith("atc_spire2.png")) return 10.0f;
+        if (path.endsWith("atc_spire3.png")) return 0.0f;
+        if (path.endsWith("atc_spire4.png")) return 80.0f;
+        if (path.endsWith("atc_spire5.png")) return -100.0f;
+        if (path.endsWith("atc_spire6.png")) return 0.0f;
+        if (path.endsWith("atc_spire7.png")) return -85.0f;
+        if (path.endsWith("atc_spire8.png")) return -50.0f;
+        if (path.endsWith("atc_spire9.png")) return -50.0f;
+        if (path.endsWith("atc_fivepebbles.png")) return -100.0f;
+        return 0.0f;
+    }
+
+    private static int colorByte(float value) {
+        return MathHelper.clamp(Math.round(value * 255.0f), 0, 255);
+    }
+
+    private static void setUniform3f(GlUniform uniform, float x, float y, float z) {
+        if (uniform != null) {
+            uniform.set(x, y, z);
+        }
+    }
+
     private static void renderQuad(VertexConsumer vc, MatrixStack matrices, float width, float height,
                                    int light, int r, int g, int b, int a) {
         renderQuadAbove(vc, matrices, width, height, 0.0f, light, r, g, b, a, 0.0f, 0.0f);
@@ -544,7 +633,9 @@ public final class DistantStructuresRenderer {
             true,
             RenderLayer.MultiPhaseParameters.builder()
                     .program(POSITION_COLOR_TEXTURE_LIGHTMAP_PROGRAM)
-                    .texture(new Texture(texture, false, true))
+                    // DistantLightning loads its illustrations with
+                    // crispPixels=true and no mipmapped filtering.
+                    .texture(new Texture(texture, false, false))
                     .transparency(TRANSLUCENT_TRANSPARENCY)
                     .cull(DISABLE_CULLING)
                     .lightmap(ENABLE_LIGHTMAP)
@@ -688,7 +779,4 @@ public final class DistantStructuresRenderer {
         return t * t * (3f - 2f * t);
     }
 
-    private static int lerpByte(int from, int to, float t) {
-        return MathHelper.clamp((int) MathHelper.lerp(MathHelper.clamp(t, 0.0f, 1.0f), from, to), 0, 255);
-    }
 }

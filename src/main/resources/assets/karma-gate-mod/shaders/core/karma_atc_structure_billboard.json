@@ -32,6 +32,18 @@
       "type": "matrix4x4",
       "count": 16,
       "values": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    },
+    {
+      "name": "uAtmosphereColor",
+      "type": "float",
+      "count": 3,
+      "values": [0.16078432, 0.23137255, 0.31764707]
+    },
+    {
+      "name": "uMultiplyColor",
+      "type": "float",
+      "count": 3,
+      "values": [1.0, 1.0, 1.0]
     }
   ]
 }
