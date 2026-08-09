@@ -38,11 +38,15 @@ public class GameRendererMixin {
         // lightning pass after every distant ring so lightning remains visible
         // over the cloud deck, while its own LEQUAL test still respects world
         // and structure depth.
+        // The solid horizon cover is a background element in C#, so submit it
+        // before every structure regardless of that structure's distance.
+        AtcCloudVolumeRenderer.renderHorizonBackground(tickDelta, camera);
         DistantStructuresRenderer.renderLate(tickDelta, camera);
         AtcCloudVolumeRenderer.renderDistantCloudLayer(tickDelta, camera);
         DistantStructuresRenderer.renderLightningLate(tickDelta, camera);
         AtcCowboyEasterEggRenderer.render(tickDelta, camera);
         AtcCloudVolumeRenderer.renderVolumeClouds(tickDelta, camera);
+        AtcCloudVolumeRenderer.renderGeneralFog(tickDelta, camera);
         GridProjectRenderer.renderLate(tickDelta, camera);
     }
 }

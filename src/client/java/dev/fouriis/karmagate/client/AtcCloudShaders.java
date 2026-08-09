@@ -15,8 +15,10 @@ import net.minecraft.util.Identifier;
 public final class AtcCloudShaders implements ClientModInitializer {
     public static ShaderProgram PROGRAM;
     public static ShaderProgram STRUCTURE_PROGRAM;
+    public static ShaderProgram HORIZON_ATMOSPHERE_PROGRAM;
     public static final Identifier ID = Identifier.of("karma-gate-mod", "karma_atc_cloud_billboard");
     public static final Identifier STRUCTURE_ID = Identifier.of("karma-gate-mod", "karma_atc_structure_billboard");
+    public static final Identifier HORIZON_ATMOSPHERE_ID = Identifier.of("karma-gate-mod", "karma_atc_horizon_atmosphere");
 
     @Override
     public void onInitializeClient() {
@@ -25,6 +27,8 @@ public final class AtcCloudShaders implements ClientModInitializer {
             ctx.register(AtcCloseCloudShaders.ID, VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL,
                     program -> AtcCloseCloudShaders.PROGRAM = program);
             ctx.register(STRUCTURE_ID, VertexFormats.POSITION_COLOR_TEXTURE_LIGHT, program -> STRUCTURE_PROGRAM = program);
+            ctx.register(HORIZON_ATMOSPHERE_ID, VertexFormats.POSITION_COLOR,
+                    program -> HORIZON_ATMOSPHERE_PROGRAM = program);
         });
         ResourceManagerHelper.get(ResourceType.CLIENT_RESOURCES)
                 .registerReloadListener(new SimpleSynchronousResourceReloadListener() {
@@ -50,5 +54,9 @@ public final class AtcCloudShaders implements ClientModInitializer {
 
     public static RenderPhase.ShaderProgram structurePhase() {
         return new RenderPhase.ShaderProgram(() -> STRUCTURE_PROGRAM);
+    }
+
+    public static RenderPhase.ShaderProgram horizonAtmospherePhase() {
+        return new RenderPhase.ShaderProgram(() -> HORIZON_ATMOSPHERE_PROGRAM);
     }
 }

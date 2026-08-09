@@ -245,6 +245,11 @@ public final class AtcSkyRenderer {
         return mc.world == null ? 0.0f : skyWeights(mc, tickDelta).night();
     }
 
+    /** Java equivalent of AboveCloudsView Fog's active RoomPalette.skyColor. */
+    static Vector3f fogColor(float tickDelta) {
+        return biomeFogColor(MinecraftClient.getInstance(), tickDelta);
+    }
+
     private static Vector3f authoredTextureMultiply(SkyWeights weights) {
         float dusk = weights.dusk();
         return new Vector3f(

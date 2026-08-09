@@ -27,6 +27,7 @@ import java.util.List;
 import static net.minecraft.client.render.RenderPhase.COLOR_MASK;
 import static net.minecraft.client.render.RenderPhase.DISABLE_CULLING;
 import static net.minecraft.client.render.RenderPhase.ENABLE_LIGHTMAP;
+import static net.minecraft.client.render.RenderPhase.ALWAYS_DEPTH_TEST;
 import static net.minecraft.client.render.RenderPhase.LEQUAL_DEPTH_TEST;
 import static net.minecraft.client.render.RenderPhase.TRANSLUCENT_TRANSPARENCY;
 
@@ -48,6 +49,8 @@ public final class AtcCloudVolumeRenderer {
             billboardLayer("karma_atc_cloud_billboard_2", CLOUD_2),
             billboardLayer("karma_atc_cloud_billboard_3", CLOUD_3)
     };
+    private static final RenderLayer HORIZON_ATMOSPHERE_LAYER = horizonAtmosphereLayer();
+    private static final RenderLayer GENERAL_FOG_LAYER = generalFogLayer();
 
     private static final int FULL_BRIGHT = LightmapTextureManager.pack(15, 15);
     public static final float CLOUD_ASPECT = 700.0f / 150.0f;
@@ -106,10 +109,8 @@ public final class AtcCloudVolumeRenderer {
             new TuningValue("Close Handoff Fade Width", 900.0f, 0.0f, 8000.0f, false);
     public static final TuningValue CLOSE_VOLUME_OPACITY =
             new TuningValue("Close Volume Opacity", 1.0f, 0.05f, 1.0f, false);
-    public static final TuningValue COWBOY_EASTER_EGG_X =
-            new TuningValue("Cowboy X", 0.0f, -100000.0f, 100000.0f, false);
-    public static final TuningValue COWBOY_EASTER_EGG_Z =
-            new TuningValue("Cowboy Z", 0.0f, -100000.0f, 100000.0f, false);
+    public static final TuningValue COWBOY_EASTER_EGG_ANGLE =
+            new TuningValue("Cowboy Angle (degrees)", 0.0f, -180.0f, 180.0f, false);
 
     private static final List<TuningValue> TUNING_VALUES = List.of(
             CLOUD_BOTTOM_Y,
@@ -136,8 +137,7 @@ public final class AtcCloudVolumeRenderer {
             DISTANT_RING_DENSITY_CURVE,
             CLOSE_CLOUD_MOTION_SCALE,
             CLOUD_NORTH_SPEED,
-            COWBOY_EASTER_EGG_X,
-            COWBOY_EASTER_EGG_Z
+            COWBOY_EASTER_EGG_ANGLE
     );
 
     private static ShaderProgram cachedProgram;
@@ -170,15 +170,86 @@ public final class AtcCloudVolumeRenderer {
         return cloudBottomY();
     }
 
+    /** Radius of the closest distant-cloud ring around the current camera. */
+    static float firstDistantRingRadius() {
+        float spacing = CLOUD_BAND_SPACING.value();
+        float handoffRadius = spacing * (CLOSE_LAYER_COUNT.intValue() + 0.5f);
+        float overlap = Math.min(
+                DISTANT_HANDOFF_OVERLAP.value(),
+                Math.max(0.0f, handoffRadius - spacing)
+        );
+        return handoffRadius - overlap;
+    }
+
+    public static void renderHorizonBackground(float tickDelta, Camera camera) {
+        renderDistantLayer(tickDelta, camera, true, false);
+    }
+
     public static void renderDistantCloudLayer(float tickDelta, Camera camera) {
-        renderDistantBillboards(tickDelta, camera);
+        renderDistantLayer(tickDelta, camera, false, true);
     }
 
     public static void renderVolumeClouds(float tickDelta, Camera camera) {
         renderCloseVolumeTiles(tickDelta, camera);
     }
 
+    /** Draws AboveCloudsView's foreground FullScreenSingleColor fog element. */
+    public static void renderGeneralFog(float tickDelta, Camera camera) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.world == null || camera == null || AtcCloudShaders.HORIZON_ATMOSPHERE_PROGRAM == null) {
+            return;
+        }
+
+        float cameraY = (float) camera.getPos().y;
+        float altitudeVisibility = cloudLayerVisibility(cameraY);
+        float halfFade = Math.max(1.0f, (CLOUD_TOP_Y.value() - CLOUD_BOTTOM_Y.value()) * 0.18f);
+        float fogAltitude = 1.0f - MathHelper.clamp(
+                (cameraY - (CLOUD_BOTTOM_Y.value() - halfFade)) / (halfFade * 2.0f),
+                0.0f,
+                1.0f
+        );
+        // Java's cloud and structure shaders already contain the C# depth
+        // atmosphere blend. Only a light finishing wash is needed here; using
+        // the C# sprite's raw 0.6 cap a second time obscures the whole scene.
+        int alpha = colorByte(fogAltitude * 0.18f * altitudeVisibility);
+        if (alpha <= 0) {
+            return;
+        }
+
+        Vector3f fogColor = AtcSkyRenderer.fogColor(tickDelta);
+        int red = colorByte(MathHelper.clamp(fogColor.x, 0.0f, 1.0f));
+        int green = colorByte(MathHelper.clamp(fogColor.y, 0.0f, 1.0f));
+        int blue = colorByte(MathHelper.clamp(fogColor.z, 0.0f, 1.0f));
+
+        Matrix4f savedProjection = new Matrix4f(RenderSystem.getProjectionMatrix());
+        Matrix4fStack modelViewStack = RenderSystem.getModelViewStack();
+        modelViewStack.pushMatrix();
+        Matrix4f savedModelView = new Matrix4f(modelViewStack);
+        modelViewStack.identity();
+        RenderSystem.applyModelViewMatrix();
+        RenderSystem.setProjectionMatrix(new Matrix4f().identity(), VertexSorter.BY_DISTANCE);
+        RenderSystem.enableBlend();
+        RenderSystem.depthMask(false);
+        try {
+            VertexConsumerProvider.Immediate immediate = mc.getBufferBuilders().getEntityVertexConsumers();
+            VertexConsumer vc = immediate.getBuffer(GENERAL_FOG_LAYER);
+            Matrix4f identity = new Matrix4f();
+            vc.vertex(identity, -1.0f, -1.0f, 0.0f).color(red, green, blue, alpha);
+            vc.vertex(identity, 1.0f, -1.0f, 0.0f).color(red, green, blue, alpha);
+            vc.vertex(identity, 1.0f, 1.0f, 0.0f).color(red, green, blue, alpha);
+            vc.vertex(identity, -1.0f, 1.0f, 0.0f).color(red, green, blue, alpha);
+            immediate.draw(GENERAL_FOG_LAYER);
+        } finally {
+            modelViewStack.set(savedModelView);
+            modelViewStack.popMatrix();
+            RenderSystem.applyModelViewMatrix();
+            RenderSystem.depthMask(true);
+            RenderSystem.setProjectionMatrix(savedProjection, VertexSorter.BY_DISTANCE);
+        }
+    }
+
     public static void renderLate(float tickDelta, Camera camera) {
+        renderHorizonBackground(tickDelta, camera);
         renderDistantCloudLayer(tickDelta, camera);
         renderVolumeClouds(tickDelta, camera);
     }
@@ -187,10 +258,15 @@ public final class AtcCloudVolumeRenderer {
         AtcCloseCloudVolumeRenderer.render(tickDelta, camera);
     }
 
-    private static void renderDistantBillboards(float tickDelta, Camera camera) {
+    private static void renderDistantLayer(float tickDelta,
+                                           Camera camera,
+                                           boolean drawHorizon,
+                                           boolean drawClouds) {
         MinecraftClient mc = MinecraftClient.getInstance();
         ShaderProgram program = AtcCloudShaders.PROGRAM;
-        if (mc.world == null || camera == null || program == null) {
+        if (mc.world == null || camera == null
+                || (drawClouds && program == null)
+                || (drawHorizon && AtcCloudShaders.HORIZON_ATMOSPHERE_PROGRAM == null)) {
             return;
         }
 
@@ -228,14 +304,26 @@ public final class AtcCloudVolumeRenderer {
         RenderSystem.enableBlend();
         RenderSystem.depthMask(false);
         try {
-            bindFrame(program, mc, view, time, light, palette);
-            drawDistantCloudRings(
-                    mc.getBufferBuilders().getEntityVertexConsumers(),
-                    program,
-                    camPos,
-                    altitudeVisibility,
-                    northOffset
-            );
+            if (drawHorizon) {
+                drawHorizonAtmosphere(
+                        mc.getBufferBuilders().getEntityVertexConsumers(),
+                        view,
+                        camPos,
+                        palette,
+                        light,
+                        altitudeVisibility
+                );
+            }
+            if (drawClouds) {
+                bindFrame(program, mc, view, time, light, palette);
+                drawDistantCloudRings(
+                        mc.getBufferBuilders().getEntityVertexConsumers(),
+                        program,
+                        camPos,
+                        altitudeVisibility,
+                        northOffset
+                );
+            }
         } finally {
             modelViewStack.set(savedModelView);
             modelViewStack.popMatrix();
@@ -254,11 +342,7 @@ public final class AtcCloudVolumeRenderer {
         int closeLayerCount = CLOSE_LAYER_COUNT.intValue();
         float spacing = CLOUD_BAND_SPACING.value();
         float handoffRadius = spacing * (closeLayerCount + 0.5f);
-        float overlap = Math.min(
-                DISTANT_HANDOFF_OVERLAP.value(),
-                Math.max(0.0f, handoffRadius - spacing)
-        );
-        float firstRadius = handoffRadius - overlap;
+        float firstRadius = firstDistantRingRadius();
         float lastRadius = Math.max(DISTANT_MAX_DISTANCE.value(), handoffRadius + spacing);
         float bottomY = CLOUD_BOTTOM_Y.value();
         float topY = Math.max(CLOUD_TOP_Y.value(), bottomY + 1.0f);
@@ -315,6 +399,73 @@ public final class AtcCloudVolumeRenderer {
         // cutout alpha from density; distance does not fade vertex opacity.
         float alpha = DISTANT_OPACITY.value() * altitudeVisibility;
         return new Billboard(DISTANT_WIDTH_SCALE.value(), spriteHeightScale, shaderFlattening, atmosphereDepth, alpha);
+    }
+
+    /**
+     * Recreates DistantCloud's solid Background sprite. The original 2D scene
+     * always covered the sky beneath each distant cloud; without that pass the
+     * converted panorama's equatorial seam appears as a bright horizon line.
+     */
+    private static void drawHorizonAtmosphere(VertexConsumerProvider.Immediate immediate,
+                                              Matrix4f view,
+                                              Vec3d camPos,
+                                              AtcSkyRenderer.CloudPalette palette,
+                                              float daylight,
+                                              float altitudeVisibility) {
+        float radius = Math.max(1.0f, firstDistantRingRadius() * 0.94f);
+        float bandHeight = Math.max(1.0f, CLOUD_TOP_Y.value() - CLOUD_BOTTOM_Y.value());
+        float cameraY = (float) camPos.y;
+
+        // Keep the opaque portion within a few screen pixels of the panorama
+        // seam. The prior broad shoulder turned most of the lower sky into a
+        // flat atmosphere-coloured wall.
+        float seamHalfWidth = Math.max(2.5f, radius * 0.006f);
+        float[] heights = {
+                cameraY - radius * 0.70f,
+                Math.min(CLOUD_BOTTOM_Y.value(), cameraY - bandHeight * 0.22f),
+                cameraY - seamHalfWidth,
+                cameraY,
+                cameraY + seamHalfWidth,
+                cameraY + bandHeight * 0.12f
+        };
+        float[] alphas = {
+                0.035f,
+                0.08f,
+                0.16f,
+                0.92f,
+                0.07f,
+                0.0f
+        };
+
+        Vector3f atmosphere = palette.atmosphere();
+        float lift = 0.025f + 0.025f * MathHelper.clamp(daylight, 0.0f, 1.0f);
+        int red = colorByte(MathHelper.clamp(atmosphere.x + lift, 0.0f, 1.0f));
+        int green = colorByte(MathHelper.clamp(atmosphere.y + lift * 0.92f, 0.0f, 1.0f));
+        int blue = colorByte(MathHelper.clamp(atmosphere.z + lift * 0.78f, 0.0f, 1.0f));
+
+        VertexConsumer vc = immediate.getBuffer(HORIZON_ATMOSPHERE_LAYER);
+        float angleStep = 2.0f * (float) Math.PI / DISTANT_RING_SEGMENTS;
+        for (int band = 0; band < heights.length - 1; band++) {
+            int alpha0 = colorByte(alphas[band] * altitudeVisibility);
+            int alpha1 = colorByte(alphas[band + 1] * altitudeVisibility);
+            if (alpha0 <= 0 && alpha1 <= 0) {
+                continue;
+            }
+            for (int segment = 0; segment < DISTANT_RING_SEGMENTS; segment++) {
+                float angle0 = segment * angleStep;
+                float angle1 = (segment + 1) * angleStep;
+                float x0 = (float) camPos.x + MathHelper.sin(angle0) * radius;
+                float z0 = (float) camPos.z - MathHelper.cos(angle0) * radius;
+                float x1 = (float) camPos.x + MathHelper.sin(angle1) * radius;
+                float z1 = (float) camPos.z - MathHelper.cos(angle1) * radius;
+
+                vc.vertex(view, x0, heights[band], z0).color(red, green, blue, alpha0);
+                vc.vertex(view, x1, heights[band], z1).color(red, green, blue, alpha0);
+                vc.vertex(view, x1, heights[band + 1], z1).color(red, green, blue, alpha1);
+                vc.vertex(view, x0, heights[band + 1], z0).color(red, green, blue, alpha1);
+            }
+        }
+        immediate.draw(HORIZON_ATMOSPHERE_LAYER);
     }
 
     private static void emitCloudRing(VertexConsumer vc,
@@ -474,6 +625,42 @@ public final class AtcCloudVolumeRenderer {
                 false,
                 true,
                 params
+        );
+    }
+
+    private static RenderLayer horizonAtmosphereLayer() {
+        return RenderLayer.of(
+                "karma_atc_horizon_atmosphere",
+                VertexFormats.POSITION_COLOR,
+                VertexFormat.DrawMode.QUADS,
+                16 * 1024,
+                false,
+                true,
+                RenderLayer.MultiPhaseParameters.builder()
+                        .program(AtcCloudShaders.horizonAtmospherePhase())
+                        .transparency(TRANSLUCENT_TRANSPARENCY)
+                        .cull(DISABLE_CULLING)
+                        .depthTest(LEQUAL_DEPTH_TEST)
+                        .writeMaskState(COLOR_MASK)
+                        .build(false)
+        );
+    }
+
+    private static RenderLayer generalFogLayer() {
+        return RenderLayer.of(
+                "karma_atc_general_fog",
+                VertexFormats.POSITION_COLOR,
+                VertexFormat.DrawMode.QUADS,
+                256,
+                false,
+                true,
+                RenderLayer.MultiPhaseParameters.builder()
+                        .program(AtcCloudShaders.horizonAtmospherePhase())
+                        .transparency(TRANSLUCENT_TRANSPARENCY)
+                        .cull(DISABLE_CULLING)
+                        .depthTest(ALWAYS_DEPTH_TEST)
+                        .writeMaskState(COLOR_MASK)
+                        .build(false)
         );
     }
 

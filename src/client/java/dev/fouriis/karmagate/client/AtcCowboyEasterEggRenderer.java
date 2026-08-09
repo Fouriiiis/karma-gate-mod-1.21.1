@@ -127,10 +127,15 @@ public final class AtcCowboyEasterEggRenderer {
 
         Vector3f right = new Vector3f(1.0f, 0.0f, 0.0f).rotate(camera.getRotation());
         Vector3f up = new Vector3f(0.0f, 1.0f, 0.0f).rotate(camera.getRotation());
+        Vec3d cameraPos = camera.getPos();
+        float angleRadians = (float) Math.toRadians(
+                AtcCloudVolumeRenderer.COWBOY_EASTER_EGG_ANGLE.value()
+        );
+        float ringRadius = AtcCloudVolumeRenderer.firstDistantRingRadius();
         Vector3f center = new Vector3f(
-                AtcCloudVolumeRenderer.COWBOY_EASTER_EGG_X.value(),
+                (float) cameraPos.x + MathHelper.sin(angleRadians) * ringRadius,
                 AtcCloudVolumeRenderer.cloudBottomY() + (halfH / 2),
-                AtcCloudVolumeRenderer.COWBOY_EASTER_EGG_Z.value()
+                (float) cameraPos.z - MathHelper.cos(angleRadians) * ringRadius
         );
 
         Vector3f bl = corner(center, right, up, -halfW, -halfH);
