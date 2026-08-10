@@ -34,6 +34,7 @@ public class WaterfallBlockEntity extends BlockEntity {
     private float prevBottomPos = SOURCE_TOP_Y;
     private float bottomVelocity = 0.0f;
     private boolean clientStateInitialized = false;
+    private long lastSteamParticleTick = Long.MIN_VALUE;
 
     public WaterfallBlockEntity(BlockPos pos, BlockState state) {
         this(ModBlockEntities.WATERFALL_BLOCK_ENTITY, pos, state);
@@ -91,6 +92,14 @@ public class WaterfallBlockEntity extends BlockEntity {
 
     public float getInterpolatedBottomLocalY(float tickDelta) {
         return lerp(prevBottomPos, bottomPos, tickDelta);
+    }
+
+    public boolean beginSteamParticleTick(long worldTick) {
+        if (lastSteamParticleTick == worldTick) {
+            return false;
+        }
+        lastSteamParticleTick = worldTick;
+        return true;
     }
 
     public void ensureClientVisualState(float impactY) {

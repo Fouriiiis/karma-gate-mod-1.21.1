@@ -18,6 +18,7 @@ public class SteamEmitterBlockEntity extends BlockEntity {
     private boolean enabled = false;
     private float intensity = 0.9f; // base
     private final Random rng = new Random();
+    private int clientSteamCooldown = 0;
 
     public SteamEmitterBlockEntity(BlockPos pos, BlockState state) {
         super(ModBlockEntities.STEAM_EMITTER_BLOCK_ENTITY, pos, state);
@@ -43,9 +44,8 @@ public class SteamEmitterBlockEntity extends BlockEntity {
             float jitter = (float)(be.rng.nextGaussian() * 0.08);
             float inten = Math.max(0f, Math.min(1f, be.intensity + jitter));
 
-            // spawn a few steam puffs per tick
-            int puffs = 1 + be.rng.nextInt(2);
-            for (int i = 0; i < puffs; i++) {
+            if (be.clientSteamCooldown-- <= 0) {
+                be.clientSteamCooldown = 9 + be.rng.nextInt(8);
                 // Spawn anywhere within the block's X/Z bounds (inclusive of lower edge, exclusive of upper), never outside
                 double ox = pos.getX() + be.rng.nextDouble();
                 double oy = pos.getY() + 0.6 + be.rng.nextDouble() * 0.2;

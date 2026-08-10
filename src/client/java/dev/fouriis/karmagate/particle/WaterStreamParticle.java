@@ -99,16 +99,13 @@ public class WaterStreamParticle extends SpriteBillboardParticle {
                 if (be instanceof HeatCoilBlockEntity coil) {
                     float heat = MathHelper.clamp(coil.getHeat(), 0f, 1f);
                     if (heat > 0.01f) {
-                        // Spawn two steam particles with slight random offset
-                        for (int i = 0; i < 2; i++) {
-                            double offsetX = (this.random.nextDouble() - 0.5) * 0.08;
-                            double offsetZ = (this.random.nextDouble() - 0.5) * 0.08;
-                            this.world.addParticle(
-                                    ModParticles.STEAM,
-                                    this.x + offsetX, this.y + 0.05, this.z + offsetZ,
-                                    0.0, heat, 0.0 // encode intensity in vy
-                            );
-                        }
+                        double offsetX = (this.random.nextDouble() - 0.5) * 0.08;
+                        double offsetZ = (this.random.nextDouble() - 0.5) * 0.08;
+                        this.world.addParticle(
+                                ModParticles.STEAM,
+                                this.x + offsetX, this.y + 0.05, this.z + offsetZ,
+                                0.0, heat, 0.0 // encode intensity in vy
+                        );
                         SteamAudioController.get().onSteamBurst(BlockPos.ofFloored(this.x, this.y, this.z), heat);
                         coil.drainHeat(0.02f * heat);
                         // Client-side visual flicker: sharp, randomized dip, then fast recovery

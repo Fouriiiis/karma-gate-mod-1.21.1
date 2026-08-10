@@ -259,6 +259,7 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
 
         BlockPos pos = be.getPos();
         double clientTime = world.getTime() + tickDelta;
+        boolean canSpawnSteam = be.beginSteamParticleTick(world.getTime());
         int maxIndex = (int) blocksDown + 1;
 
         for (int i = 1; i <= maxIndex; i++) {
@@ -279,7 +280,7 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
                         float intensity = heat * flow;
                         SteamAudioController.get().onSteamBurst(hitPos, intensity);
 
-                        if (world.random.nextFloat() < intensity * 0.8f) {
+                        if (canSpawnSteam && world.random.nextFloat() < intensity * 0.08f) {
                             double px = hitPos.getX() + 0.5 + (world.random.nextDouble() - 0.5) * 0.8;
                             double py = hitPos.getY() + 1.0;
                             double pz = hitPos.getZ() + 0.5 + (world.random.nextDouble() - 0.5) * 0.8;

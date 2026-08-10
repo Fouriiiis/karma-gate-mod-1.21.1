@@ -116,7 +116,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 		BlockEntityRendererFactories.register(ModBlockEntities.WATER_STREAM_BLOCK_ENTITY, WaterfallBlockRenderer::new);
 
 		ParticleFactoryRegistry.getInstance().register(ModParticles.WATER_STREAM, sprites -> new WaterStreamParticle.Factory(sprites));
-		ParticleFactoryRegistry.getInstance().register(ModParticles.STEAM, sprites -> new SteamParticle.Factory(sprites));
+		ParticleFactoryRegistry.getInstance().register(ModParticles.STEAM, new SteamParticle.Factory());
 
 		// Register neuron swarmer renderer
 		NeuronSwarmerRenderer.register();
