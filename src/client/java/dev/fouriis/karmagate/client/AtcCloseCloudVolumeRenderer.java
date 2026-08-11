@@ -198,11 +198,18 @@ public final class AtcCloseCloudVolumeRenderer {
             );
             Vector3f atmosphere = palette.atmosphere();
             Vector3f multiply = palette.multiply();
+            Vector3f biomeFog = AtcSkyRenderer.currentBiomeFogColor();
             setUniform3f(
                     uniforms.atmosphereColor,
                     atmosphere.x,
                     atmosphere.y,
                     atmosphere.z
+            );
+            setUniform3f(
+                    uniforms.biomeFogColor,
+                    biomeFog.x,
+                    biomeFog.y,
+                    biomeFog.z
             );
             setUniform3f(uniforms.cloudMultiply, multiply.x, multiply.y, multiply.z);
             float noiseInfluence = AtcCloudVolumeRenderer.CLOSE_VOXEL_NOISE_INFLUENCE.value();
@@ -646,6 +653,7 @@ public final class AtcCloseCloudVolumeRenderer {
         private final GlUniform warpPhase;
         private final GlUniform noiseInfluence;
         private final GlUniform atmosphereColor;
+        private final GlUniform biomeFogColor;
         private final GlUniform cloudMultiply;
 
         private Uniforms(ShaderProgram program) {
@@ -666,6 +674,7 @@ public final class AtcCloseCloudVolumeRenderer {
             warpPhase = program.getUniform("uWarpPhase");
             noiseInfluence = program.getUniform("uNoiseInfluence");
             atmosphereColor = program.getUniform("uAtmosphereColor");
+            biomeFogColor = program.getUniform("uBiomeFogColor");
             cloudMultiply = program.getUniform("uCloudMultiply");
         }
     }

@@ -23,6 +23,7 @@ uniform vec3 uTileOrigin;
 uniform vec3 uTileScale;
 uniform vec3 uVoxelGrid;
 uniform vec3 uAtmosphereColor;
+uniform vec3 uBiomeFogColor;
 uniform vec3 uCloudMultiply;
 
 in vec3 vWorldPos;
@@ -249,7 +250,10 @@ void main() {
     colorLevel = mix(colorLevel, 0.5, lowerDeck);
     float posterized = floor(clamp(colorLevel, 0.0, 1.0) * 4.0 + 0.5) * 0.25;
 
-    vec3 paletteBase = vec3(0.70, 0.73, 0.80);
+    // Cloud.shader samples the room palette colour first, raises it by the
+    // posterized shade exponent, then applies the atmospheric-depth lerp.
+    // Minecraft's biome fog colour supplies that room-specific palette input.
+    vec3 paletteBase = clamp(uBiomeFogColor, vec3(1.0 / 255.0), vec3(1.0));
     vec3 cloudColor = pow(
             paletteBase,
             vec3(mix(1.6, 0.4, posterized))

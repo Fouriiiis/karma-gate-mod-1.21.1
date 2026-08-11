@@ -250,6 +250,17 @@ public final class AtcSkyRenderer {
         return biomeFogColor(MinecraftClient.getInstance(), tickDelta);
     }
 
+    /** Raw fog colour authored by the biome at the active camera position. */
+    static Vector3f currentBiomeFogColor() {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.world == null) {
+            return new Vector3f(DEFAULT_FOG_COLOR);
+        }
+        Vec3d pos = mc.gameRenderer.getCamera().getPos();
+        RegistryEntry<Biome> biome = mc.world.getBiome(BlockPos.ofFloored(pos));
+        return colorFromRgb(biome.value().getEffects().getFogColor());
+    }
+
     private static Vector3f authoredTextureMultiply(SkyWeights weights) {
         float dusk = weights.dusk();
         return new Vector3f(
@@ -264,9 +275,7 @@ public final class AtcSkyRenderer {
             return new Vector3f(DEFAULT_FOG_COLOR);
         }
         Vec3d pos = mc.gameRenderer.getCamera().getPos();
-        RegistryEntry<Biome> biome = mc.world.getBiome(BlockPos.ofFloored(pos));
-        int fog = biome.value().getEffects().getFogColor();
-        Vector3f biomeFog = colorFromRgb(fog);
+        Vector3f biomeFog = currentBiomeFogColor();
         Vec3d sky = mc.world.getSkyColor(pos, tickDelta);
         Vector3f skyFog = new Vector3f(
                 MathHelper.clamp((float) sky.x, 0.0f, 1.0f),
