@@ -3,6 +3,7 @@ package dev.fouriis.karmagate.client;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.systems.VertexSorter;
 import dev.fouriis.karmagate.mixin.client.GameRendererAccessor;
+import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.GlUniform;
 import net.minecraft.client.gl.ShaderProgram;
@@ -518,9 +519,7 @@ public final class AtcCloseCloudVolumeRenderer {
 
     private static Matrix4f viewMatrix(Camera camera) {
         Vec3d cameraPosition = camera.getPos();
-        return new Matrix4f()
-                .rotation(camera.getRotation())
-                .transpose()
+        return new Matrix4f(RenderUtils.getCameraMatrix(camera))
                 .translate(
                         (float) -cameraPosition.x,
                         (float) -cameraPosition.y,

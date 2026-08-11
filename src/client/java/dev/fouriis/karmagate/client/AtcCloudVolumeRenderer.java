@@ -412,21 +412,29 @@ public final class AtcCloudVolumeRenderer {
                                               AtcSkyRenderer.CloudPalette palette,
                                               float daylight,
                                               float altitudeVisibility) {
-        float radius = Math.max(1.0f, firstDistantRingRadius() * 0.94f);
-        float bandHeight = Math.max(1.0f, CLOUD_TOP_Y.value() - CLOUD_BOTTOM_Y.value());
+        MinecraftClient mc = MinecraftClient.getInstance();
+
+        // This pass is a true background. Keep it beyond every distant cloud
+        // ring so Voxy/vanilla terrain at any nearer depth can occlude it, but
+        // leave a little headroom before the custom cloud projection's far plane.
+        float radius = Math.max(1.0f, Math.min(
+                DISTANT_MAX_DISTANCE.value() * 1.05f,
+                cloudProjectionFar(mc) * 0.98f
+        ));
         float cameraY = (float) camPos.y;
 
-        // Keep the opaque portion within a few screen pixels of the panorama
-        // seam. The prior broad shoulder turned most of the lower sky into a
-        // flat atmosphere-coloured wall.
-        float seamHalfWidth = Math.max(2.5f, radius * 0.006f);
+        // The old horizon lived only a few thousand blocks from the camera and
+        // mixed radius-relative and fixed world-space heights. Once moved to the
+        // true background that would make the band enormous and could even fold
+        // its upper quads over themselves. Expressing every height as an angle
+        // relative to radius preserves the intended screen-space silhouette.
         float[] heights = {
                 cameraY - radius * 0.70f,
-                Math.min(CLOUD_BOTTOM_Y.value(), cameraY - bandHeight * 0.22f),
-                cameraY - seamHalfWidth,
+                cameraY - radius * 0.037f,
+                cameraY - radius * 0.006f,
                 cameraY,
-                cameraY + seamHalfWidth,
-                cameraY + bandHeight * 0.12f
+                cameraY + radius * 0.006f,
+                cameraY + radius * 0.020f
         };
         float[] alphas = {
                 0.035f,
