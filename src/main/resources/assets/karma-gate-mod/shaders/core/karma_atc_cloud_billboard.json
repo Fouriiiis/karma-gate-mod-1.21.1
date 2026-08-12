@@ -76,6 +76,12 @@
       "values": [0.16078432, 0.23137255, 0.31764706]
     },
     {
+      "name": "uBiomeFogColor",
+      "type": "float",
+      "count": 3,
+      "values": [0.55, 0.66, 0.78]
+    },
+    {
       "name": "uCloudMultiply",
       "type": "float",
       "count": 3,

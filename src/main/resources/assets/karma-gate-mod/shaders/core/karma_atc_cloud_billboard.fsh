@@ -8,6 +8,7 @@ uniform float uTime;
 uniform float uLight;
 uniform float uDistantStyle;
 uniform vec3 uAtmosphereColor;
+uniform vec3 uBiomeFogColor;
 uniform vec3 uCloudMultiply;
 
 // Matches AboveCloudsView's sprite-color payload:
@@ -45,7 +46,10 @@ vec4 sampleProfile(vec2 uv) {
 
 vec3 paletteColor(float shade) {
     float posterizedShade = floor(shade * 4.0 + 0.5) * 0.25;
-    vec3 paletteBase = vec3(0.70, 0.73, 0.80);
+    // Cloud.shader and CloudDistant.shader sample the same room-palette texel.
+    // Sharing the biome fog input with the close-volume shader is essential:
+    // both sides of the handoff have atmospheric depth 0.75 in C#.
+    vec3 paletteBase = clamp(uBiomeFogColor, vec3(1.0 / 255.0), vec3(1.0));
     vec3 color = pow(paletteBase, vec3(mix(1.6, 0.4, posterizedShade)));
     // Tint the palette, not the completed atmospheric result. This keeps the
     // close silver highlights visible at night while distant layers converge
@@ -65,8 +69,8 @@ vec3 paletteColor(float shade) {
             mix(nightCloudDark, nightCloudLight, posterizedShade),
             nightAmount
     );
-    color = mix(color, uAtmosphereColor, clamp(vColor.r, 0.0, 0.96));
     color *= mix(0.88, 1.06, clamp(uLight, 0.0, 1.0));
+    color = mix(color, uAtmosphereColor, clamp(vColor.r, 0.0, 0.96));
     return color;
 }
 

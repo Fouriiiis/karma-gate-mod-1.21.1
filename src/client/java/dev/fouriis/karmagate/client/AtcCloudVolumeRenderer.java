@@ -310,7 +310,6 @@ public final class AtcCloudVolumeRenderer {
                         view,
                         camPos,
                         palette,
-                        light,
                         altitudeVisibility
                 );
             }
@@ -410,24 +409,17 @@ public final class AtcCloudVolumeRenderer {
                                               Matrix4f view,
                                               Vec3d camPos,
                                               AtcSkyRenderer.CloudPalette palette,
-                                              float daylight,
                                               float altitudeVisibility) {
-        MinecraftClient mc = MinecraftClient.getInstance();
-
-        // This pass is a true background. Keep it beyond every distant cloud
-        // ring so Voxy/vanilla terrain at any nearer depth can occlude it, but
-        // leave a little headroom before the custom cloud projection's far plane.
-        float radius = Math.max(1.0f, Math.min(
-                DISTANT_MAX_DISTANCE.value() * 1.05f,
-                cloudProjectionFar(mc) * 0.98f
-        ));
+        // Keep the geometry close enough for stable projection. The dedicated
+        // vertex shader writes it to far-plane depth, so existing terrain still
+        // occludes it while structures submitted afterward remain in front.
+        // Moving this cylinder beside the far clip plane made its narrow band
+        // disappear from clipping and depth precision loss.
+        float radius = Math.max(1.0f, firstDistantRingRadius() * 0.94f);
         float cameraY = (float) camPos.y;
 
-        // The old horizon lived only a few thousand blocks from the camera and
-        // mixed radius-relative and fixed world-space heights. Once moved to the
-        // true background that would make the band enormous and could even fold
-        // its upper quads over themselves. Expressing every height as an angle
-        // relative to radius preserves the intended screen-space silhouette.
+        // Express every height as an angle relative to radius so the band keeps
+        // the same screen-space silhouette as tuning changes its ring distance.
         float[] heights = {
                 cameraY - radius * 0.70f,
                 cameraY - radius * 0.037f,
@@ -446,10 +438,14 @@ public final class AtcCloudVolumeRenderer {
         };
 
         Vector3f atmosphere = palette.atmosphere();
-        float lift = 0.025f + 0.025f * MathHelper.clamp(daylight, 0.0f, 1.0f);
-        int red = colorByte(MathHelper.clamp(atmosphere.x + lift, 0.0f, 1.0f));
-        int green = colorByte(MathHelper.clamp(atmosphere.y + lift * 0.92f, 0.0f, 1.0f));
-        int blue = colorByte(MathHelper.clamp(atmosphere.z + lift * 0.78f, 0.0f, 1.0f));
+        Vector3f biomeFog = AtcSkyRenderer.currentBiomeFogColor();
+        // DistantCloud's nearest solid Background sprite uses precisely the
+        // same 0.75 palette-to-atmosphere transition as its cloud cutout.
+        // Matching that boundary colour avoids a separate blue horizon band.
+        float atmosphereDepth = 0.75f;
+        int red = colorByte(MathHelper.lerp(atmosphereDepth, biomeFog.x, atmosphere.x));
+        int green = colorByte(MathHelper.lerp(atmosphereDepth, biomeFog.y, atmosphere.y));
+        int blue = colorByte(MathHelper.lerp(atmosphereDepth, biomeFog.z, atmosphere.z));
 
         VertexConsumer vc = immediate.getBuffer(HORIZON_ATMOSPHERE_LAYER);
         float angleStep = 2.0f * (float) Math.PI / DISTANT_RING_SEGMENTS;
@@ -539,8 +535,10 @@ public final class AtcCloudVolumeRenderer {
         setUniform1f(uniforms.light, light);
         setUniform1f(uniforms.distantStyle, 1.0f);
         Vector3f atmosphere = palette.atmosphere();
+        Vector3f biomeFog = AtcSkyRenderer.currentBiomeFogColor();
         Vector3f multiply = palette.multiply();
         setUniform3f(uniforms.atmosphereColor, atmosphere.x, atmosphere.y, atmosphere.z);
+        setUniform3f(uniforms.biomeFogColor, biomeFog.x, biomeFog.y, biomeFog.z);
         setUniform3f(uniforms.cloudMultiply, multiply.x, multiply.y, multiply.z);
     }
 
@@ -703,6 +701,7 @@ public final class AtcCloudVolumeRenderer {
         private final GlUniform light;
         private final GlUniform distantStyle;
         private final GlUniform atmosphereColor;
+        private final GlUniform biomeFogColor;
         private final GlUniform cloudMultiply;
 
         private BillboardUniforms(ShaderProgram program) {
@@ -711,6 +710,7 @@ public final class AtcCloudVolumeRenderer {
             light = program.getUniform("uLight");
             distantStyle = program.getUniform("uDistantStyle");
             atmosphereColor = program.getUniform("uAtmosphereColor");
+            biomeFogColor = program.getUniform("uBiomeFogColor");
             cloudMultiply = program.getUniform("uCloudMultiply");
         }
     }
