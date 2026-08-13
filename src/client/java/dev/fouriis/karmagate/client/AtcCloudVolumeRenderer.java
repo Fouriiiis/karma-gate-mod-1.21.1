@@ -410,39 +410,64 @@ public final class AtcCloudVolumeRenderer {
                                               Vec3d camPos,
                                               AtcSkyRenderer.CloudPalette palette,
                                               float altitudeVisibility) {
-        // Keep the geometry close enough for stable projection. The dedicated
-        // vertex shader writes it to far-plane depth, so existing terrain still
-        // occludes it while structures submitted afterward remain in front.
-        // Moving this cylinder beside the far clip plane made its narrow band
-        // disappear from clipping and depth precision loss.
+        // Use nearby, camera-relative geometry for numerical stability. Its
+        // shader pins depth behind the world; only its projected direction is
+        // relevant.
         float radius = Math.max(1.0f, firstDistantRingRadius() * 0.94f);
+        float handoffRadius = CLOUD_BAND_SPACING.value() * (CLOSE_LAYER_COUNT.intValue() + 0.5f);
+        float outerRingRadius = Math.max(
+                DISTANT_MAX_DISTANCE.value(),
+                handoffRadius + CLOUD_BAND_SPACING.value()
+        );
         float cameraY = (float) camPos.y;
 
-        // Express every height as an angle relative to radius so the band keeps
-        // the same screen-space silhouette as tuning changes its ring distance.
+        // Project the edge of the outermost ring onto this stable local
+        // cylinder. If the camera is above the cloud band its top is the edge;
+        // below the band its bottom is the edge; from within the band the ring
+        // already reaches the mathematical horizon.
+        float cloudEdgeY;
+        if (cameraY > CLOUD_TOP_Y.value()) {
+            cloudEdgeY = CLOUD_TOP_Y.value();
+        } else if (cameraY < CLOUD_BOTTOM_Y.value()) {
+            cloudEdgeY = CLOUD_BOTTOM_Y.value();
+        } else {
+            cloudEdgeY = cameraY;
+        }
+        float projectedCloudEdge = (cloudEdgeY - cameraY) * radius / outerRingRadius;
+        float seamHalfWidth = Math.max(2.5f, radius * 0.006f);
+        if (Math.abs(projectedCloudEdge) < seamHalfWidth) {
+            projectedCloudEdge = projectedCloudEdge <= 0.0f ? -seamHalfWidth : seamHalfWidth;
+        }
+        float gapBottom = Math.min(projectedCloudEdge, 0.0f);
+        float gapTop = Math.max(projectedCloudEdge, 0.0f);
+        float overlap = Math.max(2.0f, radius * 0.004f);
+
+        Matrix4f horizonView = new Matrix4f(view).translate(
+                (float) camPos.x,
+                (float) camPos.y,
+                (float) camPos.z
+        );
+
+        // Fill the complete projected gap, fade into the far ring at one end,
+        // and cross the skybox equator slightly at the other to cover its seam.
         float[] heights = {
-                cameraY - radius * 0.70f,
-                cameraY - radius * 0.037f,
-                cameraY - radius * 0.006f,
-                cameraY,
-                cameraY + radius * 0.006f,
-                cameraY + radius * 0.020f
+                gapBottom - overlap,
+                gapBottom,
+                gapTop,
+                gapTop + seamHalfWidth
         };
         float[] alphas = {
-                0.035f,
-                0.08f,
-                0.16f,
+                0.0f,
+                0.88f,
                 0.92f,
-                0.07f,
                 0.0f
         };
 
         Vector3f atmosphere = palette.atmosphere();
         Vector3f biomeFog = AtcSkyRenderer.currentBiomeFogColor();
-        // DistantCloud's nearest solid Background sprite uses precisely the
-        // same 0.75 palette-to-atmosphere transition as its cloud cutout.
-        // Matching that boundary colour avoids a separate blue horizon band.
-        float atmosphereDepth = 0.75f;
+        // This joins the farthest DistantCloud, whose C# atmosphere depth is
+        // lerp(0.75, 0.95, 1) = 0.95.
+        float atmosphereDepth = 0.95f;
         int red = colorByte(MathHelper.lerp(atmosphereDepth, biomeFog.x, atmosphere.x));
         int green = colorByte(MathHelper.lerp(atmosphereDepth, biomeFog.y, atmosphere.y));
         int blue = colorByte(MathHelper.lerp(atmosphereDepth, biomeFog.z, atmosphere.z));
@@ -458,15 +483,15 @@ public final class AtcCloudVolumeRenderer {
             for (int segment = 0; segment < DISTANT_RING_SEGMENTS; segment++) {
                 float angle0 = segment * angleStep;
                 float angle1 = (segment + 1) * angleStep;
-                float x0 = (float) camPos.x + MathHelper.sin(angle0) * radius;
-                float z0 = (float) camPos.z - MathHelper.cos(angle0) * radius;
-                float x1 = (float) camPos.x + MathHelper.sin(angle1) * radius;
-                float z1 = (float) camPos.z - MathHelper.cos(angle1) * radius;
+                float x0 = MathHelper.sin(angle0) * radius;
+                float z0 = -MathHelper.cos(angle0) * radius;
+                float x1 = MathHelper.sin(angle1) * radius;
+                float z1 = -MathHelper.cos(angle1) * radius;
 
-                vc.vertex(view, x0, heights[band], z0).color(red, green, blue, alpha0);
-                vc.vertex(view, x1, heights[band], z1).color(red, green, blue, alpha0);
-                vc.vertex(view, x1, heights[band + 1], z1).color(red, green, blue, alpha1);
-                vc.vertex(view, x0, heights[band + 1], z0).color(red, green, blue, alpha1);
+                vc.vertex(horizonView, x0, heights[band], z0).color(red, green, blue, alpha0);
+                vc.vertex(horizonView, x1, heights[band], z1).color(red, green, blue, alpha0);
+                vc.vertex(horizonView, x1, heights[band + 1], z1).color(red, green, blue, alpha1);
+                vc.vertex(horizonView, x0, heights[band + 1], z0).color(red, green, blue, alpha1);
             }
         }
         immediate.draw(HORIZON_ATMOSPHERE_LAYER);
