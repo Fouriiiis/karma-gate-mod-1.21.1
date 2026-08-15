@@ -10,7 +10,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Similar to {@link HoloFrameIndex} but reads the sprite sheet image to determine
+ * Reads the sprite sheet image to determine
  * the sheet size automatically and provides a helper to extract a cropped
  * {@link NativeImage} for a named frame from the sheet.
  */

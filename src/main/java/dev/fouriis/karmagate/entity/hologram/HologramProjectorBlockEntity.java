@@ -15,6 +15,8 @@ import net.minecraft.registry.RegistryWrapper;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 
+import java.util.Random;
+
 public class HologramProjectorBlockEntity extends BlockEntity {
     // server-authoritative selected symbol (0..5 plus D mapped to 6)
     // 0..5 => gateSymbol0.png..gateSymbol5.png, 6 => gateSymbolD.png
@@ -22,16 +24,29 @@ public class HologramProjectorBlockEntity extends BlockEntity {
     // derived key used by the client renderer (computed from karma/symbol)
     private String symbolKey = keyFor(KarmaLevel.LEVEL_0);
 
-    private float glow = 1f;       // 0..1
-    private float flicker = 0f;    // 0..1
-    private float staticLevel = 0f;// 0..1
-    private float targetLevel = 0.5f;// 0..1
+    // Client-only GateKarmaGlyph simulation state. Rain World updates this at
+    // 40 Hz, so the Minecraft ticker advances it twice per game tick.
+    private float fade = 1.0f;
+    private float previousFade = 1.0f;
+    private float goalFade = 1.0f;
+    private float flicker;
+    private float sinAdder;
+    private float redSine;
+    private float colorRed = 1.0f;
+    private float colorGreen = 1.0f;
+    private float colorBlue = 1.0f;
+    private float previousColorRed = 1.0f;
+    private float previousColorGreen = 1.0f;
+    private float previousColorBlue = 1.0f;
+    private boolean visualStateInitialized;
+    private final Random visualRandom;
+    private float targetLevel = 0.0f;
 
     // Authoritative enum (no raw float/int for karma kept as state)
     private KarmaLevel karmaLevel = KarmaLevel.LEVEL_0;
 
-    // base RGB tint for the hologram (default bluish 0x59CCFF), alpha driven by renderer logic
-    private int colorRGB = 0x59CCFF;
+    // palette1 (13,0), the shortcut color used by the water-gate glyph.
+    private int colorRGB = 0xFFFFFF;
     // red for low power mode
     private int lowPowerRGB = 0xFF0000;
     private boolean lowPower = false;
@@ -40,6 +55,7 @@ public class HologramProjectorBlockEntity extends BlockEntity {
 
     public HologramProjectorBlockEntity(BlockPos pos, BlockState state) {
         super(ModBlockEntities.HOLOGRAM_PROJECTOR, pos, state);
+        visualRandom = new Random(pos.asLong() ^ 52091L);
     }
 
     private static String keyFor(KarmaLevel k) {
@@ -74,15 +90,21 @@ public class HologramProjectorBlockEntity extends BlockEntity {
     public String getSymbolKey() { return symbolKey; }
     public int getSymbolIndex() { return symbolIdx; }
 
-    public float getGlow() { return glow; }
-    public float getFlicker() { return flicker; }
-
-    public float getStaticLevel() { return staticLevel; }
+    public float getStaticLevel() { return targetLevel; }
     public void setStaticLevel(float v) {
-        this.staticLevel = Math.max(0f, Math.min(1f, v));
-        // Intentionally NOT syncing: staticLevel is now a client-only visual interpolation value.
-        // Avoid markDirtySync here to prevent server from sending stale 0 back and snapping animation.
+        this.targetLevel = Math.max(0f, Math.min(1f, v));
         markDirtySync();
+    }
+
+    public float getInterpolatedFade(float tickDelta) {
+        return previousFade + (fade - previousFade) * tickDelta;
+    }
+
+    public int getInterpolatedGlyphColor(float tickDelta) {
+        int red = Math.round(clamp01(previousColorRed + (colorRed - previousColorRed) * tickDelta) * 255.0f);
+        int green = Math.round(clamp01(previousColorGreen + (colorGreen - previousColorGreen) * tickDelta) * 255.0f);
+        int blue = Math.round(clamp01(previousColorBlue + (colorBlue - previousColorBlue) * tickDelta) * 255.0f);
+        return red << 16 | green << 8 | blue;
     }
 
     /** Authoritative enum accessor. */
@@ -104,46 +126,6 @@ public class HologramProjectorBlockEntity extends BlockEntity {
     @Deprecated
     public float getKarmaLevelValue() { return karmaLevel.asFloat(); }
 
-    // either return colorRGB or colorRGB depending on low power mode
-    public int getColorRGB() {
-        return lowPower ? lowPowerRGB : colorRGB;
-    }
-
-    /**
-     * Visual display color (client-only). If not in low power mode, returns the current normal color.
-     * In low power mode, smoothly alternates between the normal color and low-power color using a
-     * triangle wave over a 2-second period (1 second fade each direction).
-     * @param tickDelta partial ticks for smooth interpolation
-     */
-    public int getDisplayColor(float tickDelta) {
-        if (!lowPower || world == null) return getColorRGB();
-
-    // time in seconds (bounded). We only need the phase within a 2-second cycle because
-    // alpha uses cos(pi * t) which itself has a 2s period at 20 TPS (pi * (t+2) = pi*t + 2pi).
-    // Using modulo keeps the cosine argument small and avoids precision issues when
-    // world.getTime() reaches very large values (hundreds of millions of ticks on long uptime servers).
-    long cycleTicks = world.getTime() % 40L; // 40 ticks = 2 seconds at 20 TPS
-    double tSec = (cycleTicks + tickDelta) / 20.0; // 0.0 <= tSec < 2.0
-
-        // Cosine-based smooth triangle (0 -> 1 -> 0) with a 2s period:
-        // alpha = 0.5 * (1 - cos(pi * t))  => period 2 because cos(pi*(t+2)) = cos(pi*t)
-    float alpha = 0.5f * (1.0f - (float)Math.cos(Math.PI * tSec));
-
-        int r1 = (colorRGB >> 16) & 0xFF;
-        int g1 = (colorRGB >>  8) & 0xFF;
-        int b1 =  colorRGB        & 0xFF;
-
-        int r2 = (lowPowerRGB >> 16) & 0xFF;
-        int g2 = (lowPowerRGB >>  8) & 0xFF;
-        int b2 =  lowPowerRGB        & 0xFF;
-
-        int r = (int)(r1 * (1 - alpha) + r2 * alpha);
-        int g = (int)(g1 * (1 - alpha) + g2 * alpha);
-        int b = (int)(b1 * (1 - alpha) + b2 * alpha);
-
-        return (r << 16) | (g << 8) | b;
-    }
-
     /** Set hologram color as 0xRRGGBB; server-side authoritative; syncs to clients. */
     public void setColorRGB(int rgb) {
         if (world != null && world.isClient) return;
@@ -154,35 +136,9 @@ public class HologramProjectorBlockEntity extends BlockEntity {
         }
     }
 
-    // simple flicker / scanline driver
     public static void tick(net.minecraft.world.World w, BlockPos p, BlockState s, HologramProjectorBlockEntity be) {
         if (w.isClient) {
-            be.flicker *= 0.9f;
-            if (w.getRandom().nextFloat() < 1f / 120f) {
-                be.flicker = Math.max(be.flicker, w.getRandom().nextFloat()); // occasional pop
-            }
-            be.glow = 0.8f + 0.2f * (float)Math.sin(w.getTime() * 0.12);
-
-            // Adjust staticLevel towards targetLevel by 0.01 per tick,
-            // BUT if the next value would leave [0,1], clamp to the nearest endpoint (0 or 1)
-            float step = 0.01f;
-            float sLvl = be.staticLevel;
-            float tLvl = be.targetLevel;
-            if (tLvl > sLvl) {
-                float next = sLvl + step;
-                if (next < 0f || next > 1f) {
-                    be.staticLevel = (next <= 0.5f) ? 0f : 1f; // closest bound
-                } else {
-                    be.staticLevel = Math.min(next, tLvl);     // avoid overshoot past target
-                }
-            } else if (tLvl < sLvl) {
-                float next = sLvl - step;
-                if (next < 0f || next > 1f) {
-                    be.staticLevel = (next <= 0.5f) ? 0f : 1f; // closest bound
-                } else {
-                    be.staticLevel = Math.max(next, tLvl);     // avoid overshoot past target
-                }
-            }
+            be.updateClientVisuals();
         }
         // Server-side lazy controller resolution
         if (!w.isClient && be.controller == null && be.pendingControllerPos != null) {
@@ -194,6 +150,79 @@ public class HologramProjectorBlockEntity extends BlockEntity {
                 }
             }
         }
+    }
+
+    private void updateClientVisuals() {
+        if (!visualStateInitialized) {
+            float[] base = unpack(colorRGB);
+            colorRed = previousColorRed = base[0];
+            colorGreen = previousColorGreen = base[1];
+            colorBlue = previousColorBlue = base[2];
+            fade = previousFade = lowPower ? 0.82f : 1.0f - targetLevel;
+            visualStateInitialized = true;
+        }
+
+        previousFade = fade;
+        previousColorRed = colorRed;
+        previousColorGreen = colorGreen;
+        previousColorBlue = colorBlue;
+        // RegionGateGlyph3D runs at 40 updates per second.
+        updateClientVisualStep();
+        updateClientVisualStep();
+    }
+
+    private void updateClientVisualStep() {
+        goalFade = lowPower ? 0.82f : 1.0f - targetLevel;
+        fade = lerpAndTick(fade, Math.min(goalFade, 1.0f - flicker), 0.01f, 0.05f);
+
+        float period = flicker == 0.0f ? lerp(30.0f, 780.0f, goalFade) : 30.0f;
+        if (visualRandom.nextFloat() < 1.0f / period) flicker = visualRandom.nextFloat();
+        if (lowPower && visualRandom.nextFloat() < 1.0f / 70.0f) {
+            flicker = Math.max(flicker, visualRandom.nextFloat());
+        }
+        if (flicker > 0.0f) flicker = Math.max(0.0f, flicker - 0.05f);
+
+        float[] target = unpack(colorRGB);
+        if (lowPower) {
+            sinAdder += 1.0f;
+            float redMix = clamp01(0.4f + 0.5f * (float) Math.sin(sinAdder / 12.0f));
+            float[] low = unpack(lowPowerRGB);
+            target[0] = lerp(target[0], low[0], redMix);
+            target[1] = lerp(target[1], low[1], redMix);
+            target[2] = lerp(target[2], low[2], redMix);
+        }
+        colorRed = lerp(colorRed, target[0], 0.2f);
+        colorGreen = lerp(colorGreen, target[1], 0.2f);
+        colorBlue = lerp(colorBlue, target[2], 0.2f);
+
+        if (karmaLevel == KarmaLevel.LEVEL_D) {
+            redSine += 1.0f;
+            float pulse = (float) Math.sin(redSine / 25.0f) * 0.5f + 0.5f;
+            colorRed = 1.0f;
+            colorGreen = pulse;
+            colorBlue = pulse;
+        }
+    }
+
+    private static float lerpAndTick(float from, float to, float lerp, float tick) {
+        float value = HologramProjectorBlockEntity.lerp(from, to, lerp);
+        return value < to ? Math.min(value + tick, to) : Math.max(value - tick, to);
+    }
+
+    private static float lerp(float from, float to, float amount) {
+        return from + (to - from) * amount;
+    }
+
+    private static float clamp01(float value) {
+        return Math.max(0.0f, Math.min(1.0f, value));
+    }
+
+    private static float[] unpack(int rgb) {
+        return new float[] {
+                ((rgb >>> 16) & 0xFF) / 255.0f,
+                ((rgb >>> 8) & 0xFF) / 255.0f,
+                (rgb & 0xFF) / 255.0f
+        };
     }
 
     public void setTargetLevel(float v) {
@@ -223,8 +252,6 @@ public class HologramProjectorBlockEntity extends BlockEntity {
     public void writeNbt(NbtCompound nbt, RegistryWrapper.WrapperLookup lookup) {
         super.writeNbt(nbt, lookup);
         nbt.putInt("symbolIdx", symbolIdx);
-        // staticLevel no longer persisted; it is purely a client interpolated value derived from targetLevel.
-        // Persist targetLevel so server syncs don't reset client interpolation target.
         nbt.putFloat("targetLevel", targetLevel);
         nbt.putString("karmaLevel", karmaLevel.name());
         nbt.putInt("colorRGB", colorRGB);
@@ -247,7 +274,6 @@ public class HologramProjectorBlockEntity extends BlockEntity {
         this.symbolIdx = Math.max(0, Math.min(6, nbt.getInt("symbolIdx")));
         this.symbolKey = keyFor(KarmaLevel.fromIndex(this.symbolIdx));
 
-        // staticLevel intentionally not read (client will rebuild towards targetLevel each session)
         if (nbt.contains("targetLevel")) {
             this.targetLevel = Math.max(0f, Math.min(1f, nbt.getFloat("targetLevel")));
         }
@@ -268,7 +294,12 @@ public class HologramProjectorBlockEntity extends BlockEntity {
         // Ensure visuals match authoritative karma
         setSymbolFromKarma(this.karmaLevel);
 
-        if (nbt.contains("colorRGB")) this.colorRGB = nbt.getInt("colorRGB") & 0xFFFFFF;
+        if (nbt.contains("colorRGB")) {
+            this.colorRGB = nbt.getInt("colorRGB") & 0xFFFFFF;
+            // Migrate the former hard-coded blue default to Rain World's actual
+            // palette shortcut color. Explicit custom colors remain untouched.
+            if (this.colorRGB == 0x59CCFF) this.colorRGB = 0xFFFFFF;
+        }
         if (nbt.contains("lowPower")) this.lowPower = nbt.getBoolean("lowPower");
         if (nbt.contains("lowPowerRGB")) this.lowPowerRGB = nbt.getInt("lowPowerRGB") & 0xFFFFFF;
         // read controller position and link (if possible)

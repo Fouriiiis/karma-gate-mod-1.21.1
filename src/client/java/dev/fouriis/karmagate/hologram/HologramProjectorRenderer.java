@@ -1,326 +1,187 @@
-// dev/fouriis/karmagate/client/hologram/HologramProjectorRenderer.java
 package dev.fouriis.karmagate.hologram;
 
-import dev.fouriis.karmagate.entity.hologram.HologramProjectorBlockEntity;
+import com.mojang.blaze3d.systems.RenderSystem;
 import dev.fouriis.karmagate.block.hologram.HologramProjectorBlock;
+import dev.fouriis.karmagate.entity.hologram.HologramProjectorBlockEntity;
+import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
+import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
+import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
+import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
+import net.brickcraftdream.librainworldmc.client.render.shader.ShaderRenderer;
+import net.brickcraftdream.librainworldmc.client.render.shader.Shaders;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.*;
+import net.minecraft.client.render.BufferBuilder;
+import net.minecraft.client.render.BufferRenderer;
+import net.minecraft.client.render.Camera;
+import net.minecraft.client.render.GameRenderer;
+import net.minecraft.client.render.LightmapTextureManager;
+import net.minecraft.client.render.Tessellator;
+import net.minecraft.client.render.VertexConsumerProvider;
+import net.minecraft.client.render.VertexFormat;
+import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactory;
-import net.minecraft.client.texture.NativeImage;
 import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.client.world.ClientWorld;
-import net.minecraft.resource.Resource;
-import net.minecraft.resource.ResourceManager;
+import net.minecraft.client.texture.SpriteAtlasTexture;
 import net.minecraft.util.Identifier;
-import net.minecraft.util.math.RotationAxis;
-import net.minecraft.util.math.ColorHelper;
-import net.minecraft.entity.player.PlayerEntity;
-import org.joml.*;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
+import org.joml.Matrix4f;
 
-import java.lang.Math;
+import java.util.HashMap;
+import java.util.Map;
 
-public class HologramProjectorRenderer implements BlockEntityRenderer<HologramProjectorBlockEntity> {
+/** World-space adaptation of Rain World's GateKarmaGlyph/GateHologram. */
+public final class HologramProjectorRenderer
+        implements BlockEntityRenderer<HologramProjectorBlockEntity> {
+    private static final float PIXELS_PER_BLOCK = 20.0f;
+    private static final float ANCHOR_Y_PIXELS = 112.0f;
+    private static final float GLYPH_FROM_WALL_PIXELS = 3.4f;
+    private static final float HOLOGRAM_THRESHOLD = 0.5f;
+    private static final int FULL_BRIGHT = LightmapTextureManager.MAX_LIGHT_COORDINATE;
 
-    private static final Identifier SHEET = Identifier.of("karma-gate-mod", "textures/hologram/gate_sheet.png");
-    private static final String FRAMES_JSON_PATH = "karma-gate-mod:hologram/gate_sheet_frames.json";
+    // The glyph is intentionally before steam and grab-texture distortion passes,
+    // allowing all of the libMod effects to compose in scene order.
+    private static final int GLYPH_PRIORITY = 925;
+    private static final Identifier NOISE_TEXTURE =
+            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise2.png");
+    private static final Map<String, FAtlasElement> GLYPHS = new HashMap<>();
 
-    private static final Identifier NOISE = Identifier.of("karma-gate-mod", "textures/hologram/noise.png");
-
-    private static final float PANEL_W_BLOCKS = 4.0f;
-    private static final float PANEL_H_BLOCKS = 8.0f;
-
-    private static final float NOISE_SCROLL_CYCLES_PER_TICK = 0.045f; // unchanged feel
-
-    // Fallback geometry subdivision used ONLY if noise not yet loaded. Once loaded we use noise width/height.
-    private static final int FALLBACK_GRID_X = 64;
-    private static final int FALLBACK_GRID_Y = 64;
-
-    // Performance guard: maximum number of noise sample pixels (gridX * gridY) before we downscale.
-    // This prevents pathological vertex counts when the trimmed glyph spans many blocks.
-    private static final int MAX_NOISE_PIXELS = 32_000; // adjustable (empirically safe vs FPS)
-
-    // Additional performance tunables
-    private static final int FRAME_SKIP_NEAR = 0;      // frames to skip when close (0 = no skip)
-    private static final int FRAME_SKIP_FAR  = 1;      // frames to skip when far (update every other frame)
-    private static final double FAR_DIST_SQ  = 32 * 32; // beyond 32 blocks we consider far for skipping
-    private static final double LOD1_DIST_SQ = 18 * 18; // distance thresholds for LOD
-    private static final double LOD2_DIST_SQ = 26 * 26;
-    // LOD factors: how much to downscale sampling resolution (1 = full, 2 = half, 4 = quarter)
-
-    // Simple per-renderer tick counter (client side only)
-    private static long clientFrameCounter = 0;
-
-    private static HoloFrameIndex FRAMES;
-    private static NativeImage NOISE_IMG;
-    private static int NOISE_W, NOISE_H;
-
-    public HologramProjectorRenderer(BlockEntityRendererFactory.Context ctx) {
-        if (FRAMES == null) {
-            FRAMES = HoloFrameIndex.load(SHEET.toString(), FRAMES_JSON_PATH);
-        }
-        ensureNoiseLoaded();
+    public HologramProjectorRenderer(BlockEntityRendererFactory.Context context) {
     }
 
     @Override
-    public void render(HologramProjectorBlockEntity be, float tickDelta, MatrixStack ms, VertexConsumerProvider buf, int light, int overlay) {
-        clientFrameCounter++;
+    public void render(HologramProjectorBlockEntity glyph, float tickDelta, MatrixStack matrices,
+                       VertexConsumerProvider consumers, int light, int overlay) {
+        if (glyph.getWorld() == null) return;
+        FAtlasElement element = getGlyph(glyph.getSymbolKey());
+        if (element == null || element.textureIdentifier == null) return;
 
-        var frame = FRAMES.get(be.getSymbolKey());
-        if (frame == null) return;
+        float fade = MathHelper.clamp(glyph.getInterpolatedFade(tickDelta), 0.0f, 1.0f);
+        if (fade <= 0.001f) return;
+        int color = glyph.getInterpolatedGlyphColor(tickDelta);
+        Direction facing = glyph.getCachedState().get(HologramProjectorBlock.FACING);
+        double anchorX = glyph.getPos().getX() + 0.5;
+        double anchorY = glyph.getPos().getY() + ANCHOR_Y_PIXELS / PIXELS_PER_BLOCK;
+        double anchorZ = glyph.getPos().getZ() + 0.5;
+        float rain = (glyph.getWorld().getTime() + tickDelta) / 100.0f;
 
-        // === Time / effects ===
-        ClientWorld world = MinecraftClient.getInstance().world;
-        long mcTime = (world != null) ? world.getTime() : 0L;
-        double time = mcTime + (double) tickDelta;
-        float flicker = be.getFlicker();
-        float glow = be.getGlow();
-        float brightness = 0.85f * (0.9f - 0.6f * flicker);
-        // Bound sine argument to avoid precision loss at large times
-        double angle = (time * 0.35) % (Math.PI * 2.0);
-        if (angle < 0) angle += Math.PI * 2.0;
-        float wobble = (float) (Math.sin(angle) * 0.0025f * (0.5f + 0.5f * flicker));
+        RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall(camera ->
+                renderGlyph(camera, facing, anchorX, anchorY, anchorZ,
+                        element, fade, color, rain), false), GLYPH_PRIORITY);
+    }
 
-        // === Transform: center the 4×8 panel at the block and face the block's direction ===
-        ms.push();
-        ms.translate(0.5, PANEL_H_BLOCKS * 0.5f, 0.5);
+    private static void renderGlyph(Camera camera, Direction facing,
+                                    double anchorX, double anchorY, double anchorZ,
+                                    FAtlasElement element, float fade, int color, float rain) {
+        float sourceWidth = positive(element.sourcePixelSize.x, element.sourceRect.width);
+        float sourceHeight = positive(element.sourcePixelSize.y, element.sourceRect.height);
+        float width = positive(element.sourceRect.width, sourceWidth);
+        float height = positive(element.sourceRect.height, sourceHeight);
 
-        int rotDeg = 0;
+        // Futile's trimmed-sprite layout: anchor=(.5,.75), with sourceRect Y
+        // measured down from the top of the original 62x149 logical image.
+        float left = (-0.5f * sourceWidth + element.sourceRect.x) / PIXELS_PER_BLOCK;
+        float bottom = (-0.75f * sourceHeight
+                + sourceHeight - element.sourceRect.y - height) / PIXELS_PER_BLOCK;
+        float right = left + width / PIXELS_PER_BLOCK;
+        float top = bottom + height / PIXELS_PER_BLOCK;
+
+        Vec3d cameraPos = camera.getPos();
+        float nx = facing.getOffsetX();
+        float nz = facing.getOffsetZ();
+        float hx = nz;
+        float hz = -nx;
+        float forward = GLYPH_FROM_WALL_PIXELS / PIXELS_PER_BLOCK;
+        float centerX = (float) (anchorX + nx * forward - cameraPos.x);
+        float centerY = (float) (anchorY - cameraPos.y);
+        float centerZ = (float) (anchorZ + nz * forward - cameraPos.z);
+        Matrix4f view = new Matrix4f(RenderUtils.getCameraMatrix(camera));
+        int red = (color >>> 16) & 0xFF;
+        int green = (color >>> 8) & 0xFF;
+        int blue = color & 0xFF;
+        int alpha = Math.round(fade * 0.9f * 255.0f);
+
+        BufferBuilder buffer = Tessellator.getInstance().begin(
+                VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR_TEXTURE_LIGHT);
+        glyphVertex(buffer, view, centerX + hx * left, centerY + top, centerZ + hz * left,
+                red, green, blue, alpha, 0.0f, 0.0f);
+        glyphVertex(buffer, view, centerX + hx * right, centerY + top, centerZ + hz * right,
+                red, green, blue, alpha, 1.0f, 0.0f);
+        glyphVertex(buffer, view, centerX + hx * right, centerY + bottom, centerZ + hz * right,
+                red, green, blue, alpha, 1.0f, 1.0f);
+        glyphVertex(buffer, view, centerX + hx * left, centerY + bottom, centerZ + hz * left,
+                red, green, blue, alpha, 0.0f, 1.0f);
+
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthMask(false);
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.disableCull();
+        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
+        boolean shaderApplied = false;
         try {
-            var state = be.getCachedState();
-            if (state != null && state.contains(HologramProjectorBlock.FACING)) {
-                switch (state.get(HologramProjectorBlock.FACING)) {
-                    case SOUTH -> rotDeg = 0;
-                    case NORTH -> rotDeg = 180;
-                    case WEST  -> rotDeg = 90;
-                    case EAST  -> rotDeg = 270;
-                    default -> rotDeg = 0;
-                }
+            if (Shaders.GATE_HOLOGRAM != null && Shaders.GATE_HOLOGRAM.getProgram() != null) {
+                CoreShaderRenderer.bindShader$GateHologram(
+                        HOLOGRAM_THRESHOLD, element.textureIdentifier, NOISE_TEXTURE, false);
+                ShaderRenderer.setUniformF(Shaders.GATE_HOLOGRAM.getProgram(),
+                        "_Sampler0_ST", 1.0f, 1.0f, 0.0f, 0.0f);
+                ShaderRenderer.setUniformF(Shaders.GATE_HOLOGRAM.getProgram(), "u_RAIN", rain);
+                MinecraftClient client = MinecraftClient.getInstance();
+                ShaderRenderer.setUniformF(Shaders.GATE_HOLOGRAM.getProgram(), "u_screenSize",
+                        client.getFramebuffer().textureWidth * 0.5f,
+                        client.getFramebuffer().textureHeight * 0.5f);
+                ShaderRenderer.setUniformF(Shaders.GATE_HOLOGRAM.getProgram(),
+                        "u_spriteRect", 0.0f, 0.0f, 1.0f, 1.0f);
+                shaderApplied = true;
             }
-        } catch (Exception ignored) {}
-        ms.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(rotDeg));
-        ms.translate(0.0, 0.0, 0.001); // nudge off the surface
-
-        // === Fit the untrimmed canvas into the 4×8 panel (preserve aspect), then draw only the trimmed rect ===
-        int srcWpx = frame.sourceW;
-        int srcHpx = frame.sourceH;
-
-        float scaleX = PANEL_W_BLOCKS / (float) srcWpx;
-        float scaleY = PANEL_H_BLOCKS / (float) srcHpx;
-        float pxToWorld = java.lang.Math.min(scaleX, scaleY);
-
-        float trimW = frame.w * pxToWorld; // world units
-        float trimH = frame.h * pxToWorld; // world units
-        float halfTrimW = trimW * 0.5f;
-        float halfTrimH = trimH * 0.5f;
-
-        // Offset of trimmed rect relative to untrimmed center (convert px -> world)
-        float cx_px = (frame.offX + frame.w * 0.5f) - (srcWpx * 0.5f);
-        float cy_px = (srcHpx * 0.5f) - (frame.offY + frame.h * 0.5f); // flip Y from atlas
-        float cx = cx_px * pxToWorld;
-        float cy = cy_px * pxToWorld;
-
-        // === Color ===
-        int rgb = be.getDisplayColor(tickDelta);
-        float rf = ((rgb >> 16) & 0xFF) / 255f * glow * brightness;
-        float gf = ((rgb >> 8) & 0xFF) / 255f * glow * brightness;
-        float bf = (rgb & 0xFF) / 255f * glow * brightness;
-
-        // Static amount handled as geometry cutout probability (no alpha fade under shaderpacks)
-        float staticLevel = be.getStaticLevel();
-        if (staticLevel >= 0.98f) {
-            ms.pop();
-            return;
+        } catch (RuntimeException ignored) {
+            // Resource reloads can briefly leave the program unavailable.
         }
-        float baseAlpha = 0.95f; // keep visible; removal happens via geometry cutout
-        int argb = ColorHelper.Argb.getArgb((int) (baseAlpha * 255), (int) (rf * 255), (int) (gf * 255), (int) (bf * 255));
+        if (!shaderApplied) RenderSystem.setShader(GameRenderer::getParticleProgram);
+        RenderSystem.setShaderTexture(0, element.textureIdentifier);
+        BufferRenderer.drawWithGlobalProgram(buffer.end());
 
-        // === Build the 4 corners of the trimmed quad in world space ===
-        MatrixStack.Entry e = ms.peek();
-        Matrix4f pm = e.getPositionMatrix();
-        Matrix3f nm = e.getNormalMatrix();
+        RenderSystem.setShader(GameRenderer::getParticleProgram);
+        RenderSystem.setShaderTexture(0, SpriteAtlasTexture.PARTICLE_ATLAS_TEXTURE);
+        RenderSystem.depthMask(true);
+        RenderSystem.enableCull();
+        RenderSystem.disableBlend();
+    }
 
-        Vector4f q1 = new Vector4f(cx - halfTrimW, cy + halfTrimH, 0f, 1f).mul(pm); // TL
-        Vector4f q2 = new Vector4f(cx + halfTrimW, cy + halfTrimH, 0f, 1f).mul(pm); // TR
-        Vector4f q3 = new Vector4f(cx + halfTrimW, cy - halfTrimH, 0f, 1f).mul(pm); // BR
-        Vector4f q4 = new Vector4f(cx - halfTrimW, cy - halfTrimH, 0f, 1f).mul(pm); // BL
-        Vector3f n = new Vector3f(0f, 0f, 1f).mul(nm).normalize();
+    private static void glyphVertex(BufferBuilder buffer, Matrix4f matrix,
+                                    float x, float y, float z, int red, int green, int blue,
+                                    int alpha, float u, float v) {
+        buffer.vertex(matrix, x, y, z)
+                .color(red, green, blue, alpha)
+                .texture(u, v)
+                .light(FULL_BRIGHT);
+    }
 
-        // === Noise sampling parameters (panel-space) ===
-        ensureNoiseLoaded();
-        // Use only the fractional part of scroll to keep indices bounded for large times
-        double noisePhase = (time * NOISE_SCROLL_CYCLES_PER_TICK) % 1.0;
-        if (noisePhase < 0) noisePhase += 1.0;
-
-        // We now sample noise at original resolution BUT scaled so ONE full noise texture == ONE world block.
-        // Therefore across the trimmed panel (trimW x trimH blocks) we have trimW * NOISE_W pixels horizontally.
-        // Geometry subdivision grid dimensions scale with panel size in blocks to keep 1:1 noise pixels.
-        int gridX = (NOISE_W > 0) ? java.lang.Math.max(1, (int) java.lang.Math.ceil(NOISE_W * trimW)) : FALLBACK_GRID_X;
-        int gridY = (NOISE_H > 0) ? java.lang.Math.max(1, (int) java.lang.Math.ceil(NOISE_H * trimH)) : FALLBACK_GRID_Y;
-
-        // Distance-based LOD + frame skip
-        PlayerEntity player = MinecraftClient.getInstance().player;
-        double distSq = 0;
-        if (player != null) {
-            double dx = (be.getPos().getX() + 0.5) - player.getX();
-            double dy = (be.getPos().getY() + 0.5) - player.getY();
-            double dz = (be.getPos().getZ() + 0.5) - player.getZ();
-            distSq = dx*dx + dy*dy + dz*dz;
+    private static FAtlasElement getGlyph(String key) {
+        String name = key.endsWith(".png") ? key.substring(0, key.length() - 4) : key;
+        if (GLYPHS.containsKey(name)) return GLYPHS.get(name);
+        try {
+            FAtlasElement element = LibrainworldmcClient.getAtlasManager().getElementWithName(name);
+            if (element != null) GLYPHS.put(name, element);
+            return element;
+        } catch (IllegalStateException ignored) {
+            return null;
         }
+    }
 
-        int lodFactor = 1;
-        if (distSq > LOD2_DIST_SQ) lodFactor = 4; else if (distSq > LOD1_DIST_SQ) lodFactor = 2;
-        if (lodFactor > 1) {
-            gridX = java.lang.Math.max(1, gridX / lodFactor);
-            gridY = java.lang.Math.max(1, gridY / lodFactor);
-        }
-
-        int frameSkip = (distSq > FAR_DIST_SQ) ? FRAME_SKIP_FAR : FRAME_SKIP_NEAR;
-        if (frameSkip > 0 && (clientFrameCounter % (frameSkip + 1)) != 0) {
-            // Still need to pop matrix
-            ms.pop();
-            return; // reuse previous frame's geometry (left rendered in last buffer submission)
-        }
-
-        // Downscale uniformly if above cap (preserve aspect so pixels remain roughly square)
-        long total = (long) gridX * (long) gridY;
-        if (total > MAX_NOISE_PIXELS) {
-            double scale = java.lang.Math.sqrt((double) total / (double) MAX_NOISE_PIXELS); // >1
-            gridX = java.lang.Math.max(1, (int) java.lang.Math.round(gridX / scale));
-            gridY = java.lang.Math.max(1, (int) java.lang.Math.round(gridY / scale));
-        }
-
-        // Cutout threshold mapping (like your shader: ~0.05 -> ~0.95)
-        float cutoff = 0.05f + staticLevel * 0.90f;
-
-        // === Draw using vanilla translucent with the atlas bound ===
-        VertexConsumer vc = buf.getBuffer(RenderLayer.getEntityTranslucent(SHEET));
-
-        // Optimized subdivision: row-wise run-length encoding. We only emit quads for contiguous "visible" spans.
-        // This can reduce vertex count by 10-100x vs per-pixel quads, especially at low static (high fill) where
-        // each row becomes a single quad, or high static (few isolated pixels) where geometry is sparse anyway.
-        // Optimized row processing using incremental noise sampling
-        if (NOISE_IMG == null || NOISE_W == 0 || NOISE_H == 0) {
-            // Fallback to single quad if noise missing
-            emitRunQuad(0, gridX - 1, 0, gridX, 1, 0f, 1f, wobble, frame, vc, argb, overlay, light, n, q1, q2, q3, q4);
-        } else {
-            for (int gy = 0; gy < gridY; gy++) {
-                float fy0 = (float) gy / gridY;
-                float fy1 = (float) (gy + 1) / gridY;
-                float panelVCenter = (gy + 0.5f) / gridY;
-                float blockV = panelVCenter * trimH; // (0..trimH)
-                // Precompute iy once per row
-                double vSample = ((double) blockV + noisePhase) * NOISE_H; // texture space
-                int iy = floorMod((int) java.lang.Math.floor(vSample), NOISE_H);
-
-                // Horizontal sampling setup
-                float du = trimW / gridX; // delta in blockU per gx increment
-                float uStart = (0.5f * trimW) / gridX; // blockU for gx=0 center
-                float uTex = uStart * NOISE_W; // convert to texture space *once*
-                float duTex = du * NOISE_W;
-
-                int runStart = -1;
-                for (int gx = 0; gx < gridX; gx++) {
-                    int ix = floorMod((int) uTex, NOISE_W);
-                    int argbc = NOISE_IMG.getColor(ix, iy);
-                    int a = (argbc >>> 24) & 0xFF;
-                    int r = (argbc >>> 16) & 0xFF;
-                    int g = (argbc >>> 8) & 0xFF;
-                    int b = (argbc) & 0xFF;
-                    // fast luminance (avoid division until end)
-                    float lum = (r + g + b) * (1f / (3f * 255f)) * (a / 255f);
-                    boolean on = lum >= cutoff;
-                    if (on) {
-                        if (runStart == -1) runStart = gx;
-                    } else if (runStart != -1) {
-                        emitRunQuad(runStart, gx - 1, gy, gridX, gridY, fy0, fy1, wobble, frame, vc, argb, overlay, light, n, q1, q2, q3, q4);
-                        runStart = -1;
-                    }
-                    uTex += duTex;
-                }
-                if (runStart != -1) {
-                    emitRunQuad(runStart, gridX - 1, gy, gridX, gridY, fy0, fy1, wobble, frame, vc, argb, overlay, light, n, q1, q2, q3, q4);
-                }
-            }
-        }
-
-        ms.pop();
+    private static float positive(float preferred, float fallback) {
+        return preferred > 0.0f ? preferred : Math.max(fallback, 1.0f);
     }
 
     @Override
-    public boolean rendersOutsideBoundingBox(HologramProjectorBlockEntity be) {
+    public boolean rendersOutsideBoundingBox(HologramProjectorBlockEntity blockEntity) {
         return true;
     }
 
-    // === Helpers ===
-
-    private static Vector4f lerp(Vector4f a, Vector4f b, float t) {
-        return new Vector4f(
-                a.x + (b.x - a.x) * t,
-                a.y + (b.y - a.y) * t,
-                a.z + (b.z - a.z) * t,
-                1.0f
-        );
-    }
-
-    private static Vector4f bilerp(Vector4f tl, Vector4f tr, Vector4f bl, Vector4f br, float sx, float sy) {
-        Vector4f top = lerp(tl, tr, sx);
-        Vector4f bot = lerp(bl, br, sx);
-        return lerp(top, bot, sy);
-    }
-
-    // Emit a single quad covering a horizontal run of pixels in one row (runStart..runEnd inclusive)
-    private static void emitRunQuad(int runStart, int runEnd, int gy,
-                                    int gridX, int gridY,
-                                    float fy0, float fy1,
-                                    float wobble,
-                                    HoloFrameIndex.Frame frame,
-                                    VertexConsumer vc,
-                                    int argb, int overlay, int light,
-                                    Vector3f n,
-                                    Vector4f q1, Vector4f q2, Vector4f q3, Vector4f q4) {
-        // Normalized horizontal span
-        float fx0 = (float) runStart / gridX;
-        float fx1 = (float) (runEnd + 1) / gridX; // end is inclusive
-
-        // Corners via bilinear interpolation across trimmed quad
-        Vector4f vTL = bilerp(q1, q2, q4, q3, fx0, fy0);
-        Vector4f vTR = bilerp(q1, q2, q4, q3, fx1, fy0);
-        Vector4f vBR = bilerp(q1, q2, q4, q3, fx1, fy1);
-        Vector4f vBL = bilerp(q1, q2, q4, q3, fx0, fy1);
-
-        // Atlas UV mapping (preserve proportion of frame)
-        float uCol0 = frame.u0 + (frame.u1 - frame.u0) * fx0 + wobble;
-        float uCol1 = frame.u0 + (frame.u1 - frame.u0) * fx1 + wobble;
-        float vRow0 = frame.v0 + (frame.v1 - frame.v0) * fy0;
-        float vRow1 = frame.v0 + (frame.v1 - frame.v0) * fy1;
-
-        vc.vertex(vTL.x, vTL.y, vTL.z, argb, uCol0, vRow0, overlay, light, n.x, n.y, n.z);
-        vc.vertex(vTR.x, vTR.y, vTR.z, argb, uCol1, vRow0, overlay, light, n.x, n.y, n.z);
-        vc.vertex(vBR.x, vBR.y, vBR.z, argb, uCol1, vRow1, overlay, light, n.x, n.y, n.z);
-        vc.vertex(vBL.x, vBL.y, vBL.z, argb, uCol0, vRow1, overlay, light, n.x, n.y, n.z);
-    }
-
-    private static void ensureNoiseLoaded() {
-        if (NOISE_IMG != null) return;
-        try {
-            ResourceManager rm = MinecraftClient.getInstance().getResourceManager();
-            Resource res = rm.getResourceOrThrow(NOISE);
-            try (var in = res.getInputStream()) {
-                NOISE_IMG = NativeImage.read(in);
-                NOISE_W = NOISE_IMG.getWidth();
-                NOISE_H = NOISE_IMG.getHeight();
-            }
-        } catch (Exception e) {
-            NOISE_IMG = null;
-            NOISE_W = NOISE_H = 0;
-        }
-    }
-
-    // (Removed old sampleNoise; fast path inline sampling now used.)
-
-    private static int floorMod(int x, int m) {
-        int r = x % m;
-        return (r < 0) ? r + m : r;
+    @Override
+    public int getRenderDistance() {
+        return 256;
     }
 }
