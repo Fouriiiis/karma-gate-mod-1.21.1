@@ -2,361 +2,426 @@ package dev.fouriis.karmagate.entity.client;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 import dev.fouriis.karmagate.block.karmagate.HeatCoilBlock;
+import dev.fouriis.karmagate.client.waterfall.WaterfallShaders;
 import dev.fouriis.karmagate.entity.karmagate.HeatCoilBlockEntity;
 import dev.fouriis.karmagate.entity.karmagate.WaterfallBlockEntity;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.SteamAudioController;
+import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
+import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
 import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
-import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
-import net.brickcraftdream.librainworldmc.client.render.shader.Shaders;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gl.GlUniform;
+import net.minecraft.client.gl.ShaderProgram;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
-import net.minecraft.client.render.OverlayTexture;
+import net.minecraft.client.render.Camera;
+import net.minecraft.client.render.GameRenderer;
 import net.minecraft.client.render.Tessellator;
+import net.minecraft.client.render.VertexConsumer;
 import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.render.VertexFormat;
 import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactory;
+import net.minecraft.client.color.world.BiomeColors;
 import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.fluid.FluidState;
-import net.minecraft.particle.ParticleTypes;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import org.joml.Matrix4f;
+import org.joml.Quaternionf;
+import org.joml.Vector3d;
+import org.joml.Vector3f;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Map;
+import java.util.Random;
+import java.util.WeakHashMap;
+
+/** Rain World's WaterFall graphic adapted to a one-block crossed-plane volume. */
 public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements BlockEntityRenderer<T> {
     private static final float HALF_EXTENT = 0.5f;
-    private static final float DEPTH_NUDGE = 0.002f;
-    private static final float WATERFALL_SURFACE_SCALE = 1.0f;
-    private static final float VISUAL_DENSITY_THRESHOLD = 0.02f;
-
-    private static final Identifier LEVEL_TEXTURE =
-            Identifier.of("librainworldmc", "grabtex");
-
+    private static final int FULL_BRIGHT = 0x00F000F0;
+    private static final Identifier WATER_FLOW_TEXTURE =
+            Identifier.ofVanilla("textures/block/water_flow.png");
     private static final Identifier NOISE_TEXTURE =
-            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise.png");
-
-    private static final Identifier MINECRAFT_WATER_FLOW =
-            Identifier.of("minecraft", "textures/block/water_flow.png");
+            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise-hq.png");
+    private static final Map<WaterfallBlockEntity, BubbleSystem> BUBBLE_SYSTEMS = new WeakHashMap<>();
+    private static FAtlasElement bubbleSprite;
 
     public WaterfallBlockRenderer(BlockEntityRendererFactory.Context ctx) {
     }
 
     @Override
-    public void render(
-            T be,
-            float tickDelta,
-            MatrixStack matrices,
-            VertexConsumerProvider vertexConsumers,
-            int light,
-            int overlay
-    ) {
+    public void render(T be, float tickDelta, MatrixStack matrices,
+                       VertexConsumerProvider vertexConsumers, int light, int overlay) {
         World world = be.getWorld();
-        if (world == null) {
-            return;
-        }
+        if (world == null || world.getBlockEntity(be.getPos().up()) instanceof WaterfallBlockEntity) return;
 
         BlockPos pos = be.getPos();
-
-        if (world.getBlockEntity(pos.up()) instanceof WaterfallBlockEntity) {
-            return;
-        }
-
         float blocksDown = WaterfallBlockEntity.measureFallDistance(world, pos, WaterfallBlockEntity.MAX_BLOCKS_DOWN);
-        float impactY = -blocksDown;
-        be.ensureClientVisualState(impactY);
+        be.ensureClientVisualState(-blocksDown);
+        handleHeatSteam(be, tickDelta, blocksDown);
 
-        handleParticles(be, tickDelta, blocksDown);
-
+        BubbleSystem bubbles = BUBBLE_SYSTEMS.computeIfAbsent(be, ignored -> new BubbleSystem(pos));
+        bubbles.update(be, blocksDown);
         float topY = be.getInterpolatedTopLocalY(tickDelta);
         float bottomY = be.getInterpolatedBottomLocalY(tickDelta);
-        float visualDensity = MathHelper.clamp(be.getVisualDensity(tickDelta), 0.0f, 1.0f);
-        if (visualDensity <= VISUAL_DENSITY_THRESHOLD || bottomY >= topY - 0.001f) {
-            return;
-        }
+        float density = MathHelper.clamp(be.getVisualDensity(tickDelta), 0.0f, 1.0f);
+        boolean drawPlanes = density > 0.001f && bottomY < topY - 0.001f;
+        if (!drawPlanes && !bubbles.hasVisibleBubbles()) return;
 
-        RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall((camera) -> {
-            renderWaterfallCrossedStreamsImmediate(
-                    be,
-                    tickDelta,
-                    matrices,
-                    light,
-                    topY,
-                    bottomY,
-                    visualDensity
-            );
+        float lengthFraction = Math.min((topY - bottomY) / Math.max(blocksDown + 1.0f, 0.001f), 1.0f);
+        float sourceReveal = inverseLerpClamped(1.0f, -blocksDown, topY);
+        float strikeReveal = inverseLerpClamped(-blocksDown, 1.0f, bottomY);
+        sourceReveal = MathHelper.lerp(1.0f - lengthFraction, (float) Math.pow(sourceReveal, 0.2), 1.0f);
+        strikeReveal = MathHelper.lerp(1.0f - lengthFraction, (float) Math.pow(strikeReveal, 0.2), 1.0f);
+        float sourceEdge = 1.0f / MathHelper.lerp(sourceReveal, 100.0f, 2.0f);
+        float strikeEdge = 1.0f / MathHelper.lerp(strikeReveal, 100.0f, 2.0f);
+        float rain = (world.getTime() + tickDelta) / 100.0f;
+        int waterColor = BiomeColors.getWaterColor(world, pos);
+        float waterRed = ((waterColor >> 16) & 0xFF) / 255.0f;
+        float waterGreen = ((waterColor >> 8) & 0xFF) / 255.0f;
+        float waterBlue = (waterColor & 0xFF) / 255.0f;
+        int sourceX = pos.getX(), sourceY = pos.getY(), sourceZ = pos.getZ();
+
+        RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall(camera -> {
+            if (drawPlanes) {
+                renderPlanes(camera, sourceX, sourceY, sourceZ, topY, bottomY,
+                        density, sourceEdge, strikeEdge, rain,
+                        waterRed, waterGreen, waterBlue);
+            }
+            renderBubbles(camera, bubbles, tickDelta, waterRed, waterGreen, waterBlue);
         }, false), 900);
     }
 
-    private void renderWaterfallCrossedStreamsImmediate(
-            WaterfallBlockEntity be,
-            float tickDelta,
-            MatrixStack matrices,
-            int packedLight,
-            float topY,
-            float bottomY,
-            float visualDensity
-    ) {
+    private static void renderPlanes(Camera camera, int sourceX, int sourceY, int sourceZ,
+                                     float topY, float bottomY, float density,
+                                     float sourceEdge, float strikeEdge, float rain,
+                                     float waterRed, float waterGreen, float waterBlue) {
+        ShaderProgram program = WaterfallShaders.PROGRAM;
+        if (program == null) return;
+
+        Vec3d cameraPos = camera.getPos();
+        float centerX = (float) (sourceX + 0.5 - cameraPos.x);
+        float centerZ = (float) (sourceZ + 0.5 - cameraPos.z);
+        float top = (float) (sourceY + topY - cameraPos.y);
+        float bottom = (float) (sourceY + bottomY - cameraPos.y);
+        BufferBuilder buffer = Tessellator.getInstance().begin(
+                VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR_TEXTURE_LIGHT);
+        emitPlane(buffer, centerX - HALF_EXTENT, centerZ - HALF_EXTENT,
+                centerX + HALF_EXTENT, centerZ + HALF_EXTENT,
+                top, bottom, density, sourceEdge, strikeEdge);
+        emitPlane(buffer, centerX - HALF_EXTENT, centerZ + HALF_EXTENT,
+                centerX + HALF_EXTENT, centerZ - HALF_EXTENT,
+                top, bottom, density, sourceEdge, strikeEdge);
+
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthMask(false);
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.disableCull();
+        RenderSystem.setShader(() -> program);
+        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
+        RenderSystem.setShaderTexture(0, WATER_FLOW_TEXTURE);
+        RenderSystem.setShaderTexture(1, NOISE_TEXTURE);
+        MinecraftClient client = MinecraftClient.getInstance();
+        program.addSampler("Sampler0", client.getTextureManager().getTexture(WATER_FLOW_TEXTURE));
+        program.addSampler("Sampler1", client.getTextureManager().getTexture(NOISE_TEXTURE));
+        setUniform(program, "uViewMat", new Matrix4f().rotation(camera.getRotation()).transpose());
+        setUniform(program, "uCameraWorldPos", (float) cameraPos.x, (float) cameraPos.y, (float) cameraPos.z);
+        setUniform(program, "uRain", rain);
+        setUniform(program, "uSourceWorldY", sourceY + 1.0f);
+        setUniform(program, "uNoiseFeatureBlocks", 48.0f / 20.0f);
+        setUniform(program, "uBiomeWaterColor", waterRed, waterGreen, waterBlue);
+        BufferRenderer.drawWithGlobalProgram(buffer.end());
+        RenderSystem.depthMask(true);
+        RenderSystem.enableCull();
+        RenderSystem.disableBlend();
+    }
+
+    private static void emitPlane(BufferBuilder buffer, float xA, float zA, float xB, float zB,
+                                  float topY, float bottomY, float density,
+                                  float sourceEdge, float strikeEdge) {
+        buffer.vertex(xA, topY, zA).color(density, sourceEdge, strikeEdge, 1.0f)
+                .texture(0.0f, 0.0f).light(FULL_BRIGHT);
+        buffer.vertex(xB, topY, zB).color(density, sourceEdge, strikeEdge, 1.0f)
+                .texture(1.0f, 0.0f).light(FULL_BRIGHT);
+        buffer.vertex(xB, bottomY, zB).color(density, sourceEdge, strikeEdge, 1.0f)
+                .texture(1.0f, 1.0f).light(FULL_BRIGHT);
+        buffer.vertex(xA, bottomY, zA).color(density, sourceEdge, strikeEdge, 1.0f)
+                .texture(0.0f, 1.0f).light(FULL_BRIGHT);
+    }
+
+    private static void renderBubbles(Camera camera, BubbleSystem system, float tickDelta,
+                                      float waterRed, float waterGreen, float waterBlue) {
+        FAtlasElement sprite = getBubbleSprite();
+        if (sprite == null || sprite.textureIdentifier == null) return;
+        Vec3d cameraPos = camera.getPos();
+        Vector3f forward = new Vector3f(0.0f, 0.0f, -1.0f).rotate(camera.getRotation());
+        ArrayList<VisibleBubble> visible = new ArrayList<>();
+        for (WaterBubble bubble : system.bubbles) {
+            if (!bubble.active) continue;
+            float life = MathHelper.lerp(tickDelta, bubble.previousLife, bubble.life);
+            if (life <= 0.0f) continue;
+            Vector3d position = interpolate(bubble.previousPosition, bubble.position, tickDelta);
+            float dx = (float) (position.x - cameraPos.x);
+            float dy = (float) (position.y - cameraPos.y);
+            float dz = (float) (position.z - cameraPos.z);
+            float depth = dx * forward.x + dy * forward.y + dz * forward.z;
+            if (depth > 0.01f) visible.add(new VisibleBubble(position, life, depth));
+        }
+        if (visible.isEmpty()) return;
+        visible.sort(Comparator.comparingDouble(VisibleBubble::depth).reversed());
+
+        Matrix4f projection = RenderSystem.getProjectionMatrix();
+        int frameHeight = Math.max(1, MinecraftClient.getInstance().getWindow().getFramebufferHeight());
+        Matrix4f view = new Matrix4f().rotation(camera.getRotation()).transpose();
+        Quaternionf billboard = new Quaternionf(camera.getRotation());
+        BufferBuilder buffer = Tessellator.getInstance().begin(
+                VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR_TEXTURE_LIGHT);
+        for (VisibleBubble item : visible) {
+            float diameter = 16.0f * (2.0f * item.depth / (projection.m11() * frameHeight))
+                    * MathHelper.sqrt(item.life);
+            if (diameter > 0.0001f) {
+                appendBubble(buffer, cameraPos, view, billboard, item.position, diameter * 0.5f,
+                        waterRed, waterGreen, waterBlue);
+            }
+        }
+        var built = buffer.endNullable();
+        if (built == null) return;
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthMask(false);
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.disableCull();
+        RenderSystem.setShader(GameRenderer::getParticleProgram);
+        RenderSystem.setShaderTexture(0, sprite.textureIdentifier);
+        BufferRenderer.drawWithGlobalProgram(built);
+        RenderSystem.depthMask(true);
+        RenderSystem.enableCull();
+        RenderSystem.disableBlend();
+    }
+
+    private static void appendBubble(VertexConsumer vertices, Vec3d camera, Matrix4f view,
+                                     Quaternionf rotation, Vector3d position, float halfSize,
+                                     float waterRed, float waterGreen, float waterBlue) {
+        float cx = (float) (position.x - camera.x);
+        float cy = (float) (position.y - camera.y);
+        float cz = (float) (position.z - camera.z);
+        bubbleVertex(vertices, view, corner(1, -1, halfSize, rotation, cx, cy, cz), 1, 1,
+                waterRed, waterGreen, waterBlue);
+        bubbleVertex(vertices, view, corner(1, 1, halfSize, rotation, cx, cy, cz), 1, 0,
+                waterRed, waterGreen, waterBlue);
+        bubbleVertex(vertices, view, corner(-1, 1, halfSize, rotation, cx, cy, cz), 0, 0,
+                waterRed, waterGreen, waterBlue);
+        bubbleVertex(vertices, view, corner(-1, -1, halfSize, rotation, cx, cy, cz), 0, 1,
+                waterRed, waterGreen, waterBlue);
+    }
+
+    private static Vector3f corner(float x, float y, float size, Quaternionf rotation,
+                                   float cx, float cy, float cz) {
+        return new Vector3f(x, y, 0.0f).rotate(rotation).mul(size).add(cx, cy, cz);
+    }
+
+    private static void bubbleVertex(VertexConsumer vertices, Matrix4f view,
+                                     Vector3f position, float u, float v,
+                                     float waterRed, float waterGreen, float waterBlue) {
+        // Bubbles use the local biome tint, lifted toward white so the thin
+        // LizardBubble5 outline remains readable over water and dark blocks.
+        float red = MathHelper.lerp(0.35f, waterRed, 1.0f);
+        float green = MathHelper.lerp(0.35f, waterGreen, 1.0f);
+        float blue = MathHelper.lerp(0.35f, waterBlue, 1.0f);
+        vertices.vertex(view, position.x, position.y, position.z)
+                .color(red, green, blue, 1.0f).texture(u, v).light(FULL_BRIGHT);
+    }
+
+    private static FAtlasElement getBubbleSprite() {
+        if (bubbleSprite != null) return bubbleSprite;
         try {
-            //CoreShaderRenderer.bindShader$WaterFall(
-            //        WATERFALL_SURFACE_SCALE,
-            //        LEVEL_TEXTURE,
-            //        NOISE_TEXTURE,
-            //        Identifier.ofVanilla("textures/misc/underwater.png"),
-            //        null,
-            //        null,
-            //        false,
-            //        false
-            //);
-            Shaders.WATER_FALL.setSurfacescale(WATERFALL_SURFACE_SCALE);
-            Shaders.WATER_FALL.setSampler1_LevelTex(LEVEL_TEXTURE);
-            Shaders.WATER_FALL.setSampler2_MainTex(NOISE_TEXTURE);
-            Shaders.WATER_FALL.setSampler4_PalTex(Identifier.ofVanilla("textures/misc/underwater.png"));
-            Shaders.WATER_FALL.apply();
+            bubbleSprite = LibrainworldmcClient.getAtlasManager().getElementWithName("LizardBubble5");
+            if (bubbleSprite == null) {
+                bubbleSprite = LibrainworldmcClient.getAtlasManager().getElementWithName("Futile_White_Circle");
+            }
+        } catch (IllegalStateException ignored) {
+            // Atlas initialization/resource reload can briefly make it unavailable.
+        }
+        return bubbleSprite;
+    }
 
-            float impactY = Math.min(bottomY, -0.001f);
-            float topEdge = edgeValue(1.0f, impactY, topY);
-            float bottomEdge = edgeValue(impactY, 1.0f, bottomY);
-
-            int r = MathHelper.clamp((int) (visualDensity * 255.0f), 0, 255);
-            int g = MathHelper.clamp((int) (topEdge * 255.0f), 0, 255);
-            int b = MathHelper.clamp((int) (bottomEdge * 255.0f), 0, 255);
-            int a = 255;
-
-            RenderSystem.enableBlend();
-            RenderSystem.defaultBlendFunc();
-            RenderSystem.depthMask(false);
-            RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
-            RenderSystem.setShaderTexture(0, MINECRAFT_WATER_FLOW);
-
-            matrices.push();
-            matrices.translate(0.5, 0.0, 0.5);
-            Matrix4f m = matrices.peek().getPositionMatrix();
-
-            Tessellator tessellator = Tessellator.getInstance();
-            BufferBuilder buffer = tessellator.begin(
-                    VertexFormat.DrawMode.QUADS,
-                    VertexFormats.POSITION_COLOR_TEXTURE_OVERLAY_LIGHT_NORMAL
-            );
-
-            // \ plane
-            emitPlane(
-                    buffer, m,
-                    -HALF_EXTENT, -HALF_EXTENT,
-                     HALF_EXTENT,  HALF_EXTENT,
-                    topY, bottomY, packedLight,
-                    r, g, b, a,
-                    -0.70710677f, 0.0f, 0.70710677f
-            );
-
-            // / plane
-            emitPlane(
-                    buffer, m,
-                    -HALF_EXTENT,  HALF_EXTENT,
-                     HALF_EXTENT, -HALF_EXTENT,
-                    topY, bottomY, packedLight,
-                    r, g, b, a,
-                     0.70710677f, 0.0f, 0.70710677f
-            );
-
-            BufferRenderer.drawWithGlobalProgram(buffer.end());
-            matrices.pop();
-
-            RenderSystem.depthMask(true);
-        } catch (Exception e) {
-            //System.err.println("[Karmagate/Waterfall] Exception while rendering crossed streams at "
-            //        + be.getPos()
-            //        + " topY=" + topY
-            //        + " bottomY=" + bottomY
-            //        + " visualDensity=" + visualDensity
-            //        + " surfaceScale=" + WATERFALL_SURFACE_SCALE);
-            e.printStackTrace();
-            RenderSystem.depthMask(true);
+    private static void handleHeatSteam(WaterfallBlockEntity be, float tickDelta, float blocksDown) {
+        World world = be.getWorld();
+        if (world == null) return;
+        BlockPos source = be.getPos();
+        double clientTime = world.getTime() + tickDelta;
+        for (int i = 1; i <= (int) blocksDown + 1; i++) {
+            BlockPos hitPos = source.down(i);
+            BlockState state = world.getBlockState(hitPos);
+            if (!(state.getBlock() instanceof HeatCoilBlock)) continue;
+            BlockEntity hitEntity = world.getBlockEntity(hitPos);
+            if (!(hitEntity instanceof HeatCoilBlockEntity coil)) continue;
+            float heat = MathHelper.clamp(coil.getHeat(), 0.0f, 1.0f);
+            float flow = be.getEffectiveFlow(clientTime, i - 0.5f);
+            if (heat <= 0.01f || flow <= 0.05f) continue;
+            SteamAudioController.get().onSteamBurst(hitPos, heat * flow);
+            if (!coil.beginClientSteamEmissionTick()) continue;
+            for (int step = 0; step < 2; step++) {
+                if (squared(world.random.nextFloat()) >= flow * 2.0f
+                        || squared(world.random.nextFloat()) >= heat * 2.0f) continue;
+                double centerX = hitPos.getX() + 0.5;
+                double centerZ = hitPos.getZ() + 0.5;
+                double px = centerX + (world.random.nextDouble() * 2.0 - 1.0) * 0.75;
+                double py = hitPos.getY() + 1.5 + (world.random.nextDouble() * 2.0 - 1.0) * 0.5;
+                double pz = centerZ + (world.random.nextDouble() * 2.0 - 1.0) * 0.75;
+                world.addParticle(ModParticles.STEAM, px, py, pz,
+                        centerX - px, Math.pow(heat, 0.75), centerZ - pz);
+                coil.clientPulseCool(heat * world.random.nextFloat() * flow, 5);
+            }
         }
     }
 
-    private void emitPlane(
-            BufferBuilder buffer,
-            Matrix4f m,
-            float xA, float zA,
-            float xB, float zB,
-            float topY,
-            float bottomY,
-            int light,
-            int r, int g, int b, int a,
-            float nx, float ny, float nz
-    ) {
-        float u0 = 0.0f;
-        float u1 = 1.0f;
-        float v0 = 0.0f;
-        float v1 = 1.0f;
-
-        float offX = nx * DEPTH_NUDGE;
-        float offZ = nz * DEPTH_NUDGE;
-
-        buffer.vertex(m, xA + offX, topY, zA + offZ)
-                .color(r, g, b, a)
-                .texture(u0, v0)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(nx, ny, nz);
-
-        buffer.vertex(m, xB + offX, topY, zB + offZ)
-                .color(r, g, b, a)
-                .texture(u1, v0)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(nx, ny, nz);
-
-        buffer.vertex(m, xB + offX, bottomY, zB + offZ)
-                .color(r, g, b, a)
-                .texture(u1, v1)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(nx, ny, nz);
-
-        buffer.vertex(m, xA + offX, bottomY, zA + offZ)
-                .color(r, g, b, a)
-                .texture(u0, v1)
-                .overlay(OverlayTexture.DEFAULT_UV)
-                .light(light)
-                .normal(nx, ny, nz);
-    }
+    @Override
+    public boolean rendersOutsideBoundingBox(T blockEntity) { return true; }
 
     @Override
-    public boolean rendersOutsideBoundingBox(T blockEntity) {
-        return true;
-    }
-
-    @Override
-    public int getRenderDistance() {
-        return 256;
-    }
-
-    private static float edgeValue(float start, float end, float value) {
-        float progress = inverseLerpClamped(start, end, value);
-        return 1.0f / MathHelper.lerp(progress, 100.0f, 2.0f);
-    }
+    public int getRenderDistance() { return 256; }
 
     private static float inverseLerpClamped(float a, float b, float value) {
-        if (Math.abs(b - a) <= 1.0e-5f) {
-            return 0.0f;
-        }
-
+        if (Math.abs(b - a) <= 1.0e-5f) return 0.0f;
         return MathHelper.clamp((value - a) / (b - a), 0.0f, 1.0f);
     }
 
-    private void handleParticles(T be, float tickDelta, float blocksDown) {
-        World world = be.getWorld();
-        if (world == null) {
-            return;
+    private static float squared(float value) { return value * value; }
+
+    private static void setUniform(ShaderProgram program, String name, float value) {
+        GlUniform uniform = program.getUniform(name);
+        if (uniform != null) uniform.set(value);
+    }
+
+    private static void setUniform(ShaderProgram program, String name, float x, float y, float z) {
+        GlUniform uniform = program.getUniform(name);
+        if (uniform != null) uniform.set(x, y, z);
+    }
+
+    private static void setUniform(ShaderProgram program, String name, Matrix4f matrix) {
+        GlUniform uniform = program.getUniform(name);
+        if (uniform != null) uniform.set(matrix);
+    }
+
+    private static Vector3d interpolate(Vector3d previous, Vector3d current, float delta) {
+        return new Vector3d(MathHelper.lerp(delta, previous.x, current.x),
+                MathHelper.lerp(delta, previous.y, current.y),
+                MathHelper.lerp(delta, previous.z, current.z));
+    }
+
+    private record VisibleBubble(Vector3d position, float life, float depth) { }
+
+    private static final class BubbleSystem {
+        private final Random random;
+        private final ArrayList<WaterBubble> bubbles = new ArrayList<>();
+        private long lastTick = Long.MIN_VALUE;
+
+        private BubbleSystem(BlockPos source) { random = new Random(source.asLong() ^ 91827L); }
+
+        private void update(WaterfallBlockEntity waterfall, float blocksDown) {
+            World world = waterfall.getWorld();
+            if (world == null || lastTick == world.getTime()) return;
+            int wanted = (int) MathHelper.lerp(
+                    MathHelper.clamp(waterfall.getFlow(), 0.0f, 1.0f), 5.0f, 10.0f);
+            while (bubbles.size() < wanted) bubbles.add(new WaterBubble());
+            while (bubbles.size() > wanted) bubbles.remove(bubbles.size() - 1);
+            for (WaterBubble bubble : bubbles) bubble.captureRenderState();
+
+            long now = world.getTime();
+            int elapsed = lastTick == Long.MIN_VALUE ? 1 : (int) MathHelper.clamp(now - lastTick, 1L, 20L);
+            lastTick = now;
+            BlockPos source = waterfall.getPos();
+            float strikeY = source.getY() - blocksDown;
+            // Match WaterFall.WaterContact directly: bubbles begin once the
+            // propagated lower endpoint is within ten RW pixels (half a block)
+            // of the measured strike surface. getEffectiveFlow() describes a
+            // point inside the column and is not a reliable endpoint-contact
+            // test at fractional fluid heights.
+            boolean contact = waterfall.getFlow() > 0.0f
+                    && waterfall.getInterpolatedBottomLocalY(1.0f) <= -blocksDown + 0.5f;
+            for (int tick = 0; tick < elapsed; tick++) {
+                for (int step = 0; step < 2; step++) {
+                    for (WaterBubble bubble : bubbles) updateBubble(bubble, source, strikeY, waterfall.getFlow(), contact);
+                }
+            }
         }
 
-        BlockPos pos = be.getPos();
-        double clientTime = world.getTime() + tickDelta;
-        boolean canSpawnSteam = be.beginSteamParticleTick(world.getTime());
-        int maxIndex = (int) blocksDown + 1;
-
-        for (int i = 1; i <= maxIndex; i++) {
-            BlockPos hitPos = pos.down(i);
-            BlockState hitState = world.getBlockState(hitPos);
-
-            if (hitState.getBlock() instanceof HeatCoilBlock) {
-                BlockEntity hitBe = world.getBlockEntity(hitPos);
-                if (hitBe instanceof HeatCoilBlockEntity coil) {
-                    float heat = coil.getHeat();
-                    if (heat <= 0.01f) {
-                        continue;
-                    }
-
-                    float flow = be.getEffectiveFlow(clientTime, i - 0.5f);
-
-                    if (flow > 0.05f) {
-                        float intensity = heat * flow;
-                        SteamAudioController.get().onSteamBurst(hitPos, intensity);
-
-                        if (canSpawnSteam && world.random.nextFloat() < intensity * 0.08f) {
-                            double px = hitPos.getX() + 0.5 + (world.random.nextDouble() - 0.5) * 0.8;
-                            double py = hitPos.getY() + 1.0;
-                            double pz = hitPos.getZ() + 0.5 + (world.random.nextDouble() - 0.5) * 0.8;
-
-                            world.addParticle(ModParticles.STEAM, px, py, pz, 0, intensity, 0);
-                            coil.clientPulseCool(0.15f * flow, 5);
-                        }
-                    }
-                }
-            } else if (!hitState.isAir() && i <= blocksDown) {
-                float flow = be.getEffectiveFlow(clientTime, i - 0.5f);
-
-                if (flow > 0.05f) {
-                    float chance = flow * 0.35f;
-                    if (world.random.nextFloat() < chance) {
-                        spawnTerrainDrip(world, pos, hitPos, flow);
-                    }
-                }
+        private void updateBubble(WaterBubble bubble, BlockPos source, float strikeY,
+                                  float flow, boolean contact) {
+            bubble.position.add(bubble.velocity);
+            bubble.velocity.mul(0.9);
+            bubble.velocity.y += 0.2 / 20.0;
+            bubble.life -= 1.0f / bubble.lifeTime;
+            if (bubble.life <= 0.0f || bubble.position.y > strikeY + 0.5f) {
+                resetBubble(bubble, source, strikeY, flow, contact);
             }
         }
 
-        float flowAtBottom = be.getEffectiveFlow(clientTime, blocksDown);
-        if (flowAtBottom > 0.05f) {
-            double impactX = pos.getX() + 0.5;
-            double impactY = pos.getY() - blocksDown;
-            double impactZ = pos.getZ() + 0.5;
-
-            BlockPos impactBlockPos = BlockPos.ofFloored(impactX, impactY - 0.05, impactZ);
-            FluidState fluidState = world.getFluidState(impactBlockPos);
-            boolean isWater = !fluidState.isEmpty();
-
-            float chance = flowAtBottom * 0.8f;
-            int count = (int) chance;
-            if (world.random.nextFloat() < (chance - count)) {
-                count++;
+        private void resetBubble(WaterBubble bubble, BlockPos source, float strikeY,
+                                 float flow, boolean contact) {
+            if (!contact) {
+                bubble.position.set(-1000.0, 1000.0, -1000.0);
+                bubble.previousPosition.set(bubble.position);
+                bubble.velocity.zero();
+                bubble.life = bubble.previousLife = 1.0f;
+                bubble.lifeTime = 5.0f;
+                bubble.active = false;
+                return;
             }
+            bubble.position.set(source.getX() + 0.5 + lerp(-0.5, 0.5, random.nextDouble()),
+                    strikeY + 0.12,
+                    source.getZ() + 0.5 + lerp(-0.5, 0.5, random.nextDouble()));
+            float heading = random.nextFloat() * MathHelper.TAU;
+            Vector3d lateral = new Vector3d(Math.cos(heading), 0.0, Math.sin(heading));
+            float angle = (float) lerp(160.0, 200.0, random.nextDouble()) * MathHelper.RADIANS_PER_DEGREE;
+            Vector3d direction = lateral.mul(Math.sin(angle)).add(0.0, Math.cos(angle), 0.0);
+            direction.mul(random.nextDouble() * MathHelper.lerp(flow, 8.0f, 12.0f) / 20.0);
+            direction.fma(random.nextDouble() * 2.0 / 20.0, randomUnitVector());
+            bubble.velocity.set(direction);
+            bubble.lifeTime = 5 + random.nextInt(15);
+            bubble.life = bubble.previousLife = 1.0f;
+            bubble.previousPosition.set(bubble.position);
+            bubble.active = true;
+        }
 
-            for (int k = 0; k < count; k++) {
-                double ox = (world.random.nextDouble() - 0.5) * 0.8;
-                double oz = (world.random.nextDouble() - 0.5) * 0.8;
+        private Vector3d randomUnitVector() {
+            double y = lerp(-1.0, 1.0, random.nextDouble());
+            double radius = Math.sqrt(Math.max(0.0, 1.0 - y * y));
+            double angle = random.nextDouble() * Math.PI * 2.0;
+            return new Vector3d(Math.cos(angle) * radius, y, Math.sin(angle) * radius);
+        }
 
-                world.addParticle(
-                        ParticleTypes.SPLASH,
-                        impactX + ox, impactY + 0.05, impactZ + oz,
-                        0, 0, 0
-                );
-
-                if (isWater) {
-                    world.addParticle(
-                            ParticleTypes.BUBBLE,
-                            impactX + ox, impactY - 0.1, impactZ + oz,
-                            0, -0.3, 0
-                    );
-                }
+        private boolean hasVisibleBubbles() {
+            for (WaterBubble bubble : bubbles) {
+                if (bubble.active && bubble.life > 0.0f) return true;
             }
+            return false;
         }
     }
 
-    private static void spawnTerrainDrip(World world, BlockPos sourcePos, BlockPos hitPos, float flow) {
-        double px = hitPos.getX() + 0.5 + (world.random.nextDouble() - 0.5) * 0.6;
-        double py = hitPos.getY() + world.random.nextDouble();
-        double pz = hitPos.getZ() + 0.5 + (world.random.nextDouble() - 0.5) * 0.6;
+    private static final class WaterBubble {
+        private final Vector3d position = new Vector3d(-1000.0, 1000.0, -1000.0);
+        private final Vector3d previousPosition = new Vector3d(position);
+        private final Vector3d velocity = new Vector3d();
+        private float life = 1.0f, previousLife = 1.0f, lifeTime = 5.0f;
+        private boolean active;
 
-        double vx = (world.random.nextDouble() - 0.5) * 0.1;
-        double vz = (world.random.nextDouble() - 0.5) * 0.1;
-        double vy = -0.04 - flow * 0.08;
-
-        if (Math.abs(sourcePos.getX() - hitPos.getX()) > Math.abs(sourcePos.getZ() - hitPos.getZ())) {
-            vx += Math.signum(hitPos.getX() - sourcePos.getX()) * (0.04 + flow * 0.05);
-        } else if (sourcePos.getZ() != hitPos.getZ()) {
-            vz += Math.signum(hitPos.getZ() - sourcePos.getZ()) * (0.04 + flow * 0.05);
-        }
-
-        world.addParticle(ParticleTypes.FALLING_WATER, px, py, pz, vx, vy, vz);
-        if (world.random.nextFloat() < flow * 0.4f) {
-            world.addParticle(ParticleTypes.SPLASH, px, py, pz, vx * 0.5, 0.02, vz * 0.5);
+        private void captureRenderState() {
+            previousPosition.set(position);
+            previousLife = life;
         }
     }
+
+    private static double lerp(double a, double b, double delta) { return a + (b - a) * delta; }
 }

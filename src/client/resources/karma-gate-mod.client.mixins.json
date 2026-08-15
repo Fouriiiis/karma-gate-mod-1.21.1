@@ -6,7 +6,8 @@
 		"ExampleClientMixin",
 		"GameRendererMixin",
 		"GameRendererAccessor",
-		"GraffitiBlockBreakMixin"
+		"GraffitiBlockBreakMixin",
+		"ParticleManagerMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

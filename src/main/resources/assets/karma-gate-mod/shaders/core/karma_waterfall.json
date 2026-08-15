@@ -1,24 +1,23 @@
 {
   "blend": { "func": "add", "srcrgb": "src_alpha", "dstrgb": "one_minus_src_alpha" },
-
-  "vertex":   "karma-gate-mod:karma_waterfall",
+  "vertex": "karma-gate-mod:karma_waterfall",
   "fragment": "karma-gate-mod:karma_waterfall",
-
-  "attributes": [ "Position", "Color", "UV0" ],
-
+  "attributes": [ "Position", "Color", "UV0", "UV2" ],
   "samplers": [
-    { "name": "Sampler0" }
+    { "name": "Sampler0", "wrap": "repeat", "minfilter": "linear", "magfilter": "linear" },
+    { "name": "Sampler1", "wrap": "repeat", "minfilter": "linear", "magfilter": "linear" }
   ],
-
   "uniforms": [
-    { "name": "ModelViewMat", "type": "matrix4x4", "count": 16, "values": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] },
-    { "name": "ProjMat",      "type": "matrix4x4", "count": 16, "values": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] },
-    { "name": "GameTime",     "type": "float", "count": 1, "values": [ 0.0 ] },
-
-    { "name": "uSeed",          "type": "float", "count": 1, "values": [ 0.0 ] },
-    { "name": "uScrollSpeed",   "type": "float", "count": 1, "values": [ 0.085 ] },
-    { "name": "uNoiseScale",    "type": "float", "count": 2, "values": [ 11.0, 1.5 ] },
-    { "name": "uSoftness",      "type": "float", "count": 1, "values": [ 0.10 ] },
-    { "name": "uTilesPerBlock", "type": "float", "count": 1, "values": [ 1.25 ] }
+    { "name": "ModelViewMat", "type": "matrix4x4", "count": 16,
+      "values": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] },
+    { "name": "ProjMat", "type": "matrix4x4", "count": 16,
+      "values": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] },
+    { "name": "uViewMat", "type": "matrix4x4", "count": 16,
+      "values": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] },
+    { "name": "uCameraWorldPos", "type": "float", "count": 3, "values": [0,0,0] },
+    { "name": "uRain", "type": "float", "count": 1, "values": [0] },
+    { "name": "uSourceWorldY", "type": "float", "count": 1, "values": [0] },
+    { "name": "uNoiseFeatureBlocks", "type": "float", "count": 1, "values": [2.4] },
+    { "name": "uBiomeWaterColor", "type": "float", "count": 3, "values": [0.247,0.463,0.894] }
   ]
 }

@@ -11,13 +11,8 @@ import net.minecraft.registry.RegistryWrapper;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
-import software.bernie.geckolib.animatable.GeoBlockEntity;
-import software.bernie.geckolib.animatable.instance.AnimatableInstanceCache;
-import software.bernie.geckolib.animation.AnimatableManager;
-import software.bernie.geckolib.util.GeckoLibUtil;
 
-public class HeatCoilBlockEntity extends BlockEntity implements GeoBlockEntity {
-    private final AnimatableInstanceCache cache = GeckoLibUtil.createInstanceCache(this);
+public class HeatCoilBlockEntity extends BlockEntity {
 
     // server-authoritative heat [0..1]
     private float heat = 0f;
@@ -45,6 +40,25 @@ public class HeatCoilBlockEntity extends BlockEntity implements GeoBlockEntity {
     private float clientFlickerDip = 0f; // absolute dip amount from baseAtStart
     private float clientFlickerBaseAtStart = 0f; // base heat when pulse started
     private int clientFlickerHoldTicks = 0; // initial ticks to hold at min
+    private long lastClientSteamEmissionTick = Long.MIN_VALUE;
+    private boolean clientHeaterVisualInitialized;
+    private float clientHeaterHeat;
+    private float previousClientHeaterHeat;
+    private float clientLightFlicker = 1.0f;
+    private float clientLightColorFlicker = 1.0f;
+
+    /**
+     * Limits water-gate-style steam to one emission attempt per heater per tick,
+     * matching RegionGateGraphics.Update rather than the render frame rate or
+     * the number of individual water particles touching the coil.
+     */
+    public boolean beginClientSteamEmissionTick() {
+        if (world == null || !world.isClient) return false;
+        long now = world.getTime();
+        if (lastClientSteamEmissionTick == now) return false;
+        lastClientSteamEmissionTick = now;
+        return true;
+    }
 
     /**
      * Client-only: briefly reduce the visual heat by up to {@code peakDip} and ease it back over {@code durationTicks}.
@@ -115,6 +129,21 @@ public class HeatCoilBlockEntity extends BlockEntity implements GeoBlockEntity {
         return clamp01(baseNow - dipNow);
     }
 
+    /** Rain World's 40 Hz smoothed heat used by the heater mesh. */
+    public float getInterpolatedHeaterHeat(float tickDelta) {
+        if (!clientHeaterVisualInitialized) return getVisualHeat();
+        return previousClientHeaterHeat
+                + (clientHeaterHeat - previousClientHeaterHeat) * clamp01(tickDelta);
+    }
+
+    public float getClientLightFlicker() {
+        return clientLightFlicker;
+    }
+
+    public float getClientLightColorFlicker() {
+        return clientLightColorFlicker;
+    }
+
     /* ================= public API (SERVER) ================= */
 
     /** Enqueue a heat contribution to be applied this tick (positive heats, negative cools). */
@@ -145,7 +174,10 @@ public class HeatCoilBlockEntity extends BlockEntity implements GeoBlockEntity {
 
     /** Server tick: accumulate all contributions and apply once. */
     public void tick(World world, BlockPos pos, BlockState state) {
-        if (world.isClient) return;
+        if (world.isClient) {
+            tickClientVisuals(world);
+            return;
+        }
 
         float delta = pendingDelta;
         pendingDelta = 0f; // consume for this tick
@@ -164,10 +196,23 @@ public class HeatCoilBlockEntity extends BlockEntity implements GeoBlockEntity {
         }
     }
 
-    /* ================= GeckoLib ================= */
+    private void tickClientVisuals(World world) {
+        float target = clamp01(getVisualHeat());
+        if (!clientHeaterVisualInitialized) {
+            clientHeaterVisualInitialized = true;
+            clientHeaterHeat = target;
+            previousClientHeaterHeat = target;
+            return;
+        }
 
-    @Override public void registerControllers(AnimatableManager.ControllerRegistrar registrar) { /* none */ }
-    @Override public AnimatableInstanceCache getAnimatableInstanceCache() { return cache; }
+        previousClientHeaterHeat = clientHeaterHeat;
+        // RegionGateGraphics updates at 40 Hz; advance twice per Minecraft tick.
+        for (int step = 0; step < 2; step++) {
+            clientHeaterHeat += (target - clientHeaterHeat) * 0.7f;
+            clientLightFlicker = 0.8f + 0.2f * world.random.nextFloat();
+            clientLightColorFlicker = 0.7f + 0.3f * world.random.nextFloat();
+        }
+    }
 
     /* ================= sync & NBT ================= */
 

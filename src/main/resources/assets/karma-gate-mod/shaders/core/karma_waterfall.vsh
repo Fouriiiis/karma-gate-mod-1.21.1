@@ -1,19 +1,22 @@
 #version 150
 
-uniform mat4 ModelViewMat;
-uniform mat4 ProjMat;
-
 in vec3 Position;
 in vec4 Color;
 in vec2 UV0;
+in ivec2 UV2;
+
+uniform mat4 ModelViewMat;
+uniform mat4 ProjMat;
+uniform mat4 uViewMat;
+uniform vec3 uCameraWorldPos;
 
 out vec2 vLocalUV;
-out float vFlow;
-out vec4 vColor;
+out vec3 vWaterfallState;
+out vec3 vWorldPos;
 
 void main() {
-    gl_Position = ProjMat * ModelViewMat * vec4(Position, 1.0);
+    gl_Position = ProjMat * ModelViewMat * uViewMat * vec4(Position, 1.0);
     vLocalUV = UV0;
-    vFlow = clamp(Color.a, 0.0, 1.0);
-    vColor = Color;
+    vWaterfallState = Color.rgb;
+    vWorldPos = Position + uCameraWorldPos;
 }

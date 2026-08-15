@@ -34,7 +34,6 @@ public class WaterfallBlockEntity extends BlockEntity {
     private float prevBottomPos = SOURCE_TOP_Y;
     private float bottomVelocity = 0.0f;
     private boolean clientStateInitialized = false;
-    private long lastSteamParticleTick = Long.MIN_VALUE;
 
     public WaterfallBlockEntity(BlockPos pos, BlockState state) {
         this(ModBlockEntities.WATERFALL_BLOCK_ENTITY, pos, state);
@@ -92,14 +91,6 @@ public class WaterfallBlockEntity extends BlockEntity {
 
     public float getInterpolatedBottomLocalY(float tickDelta) {
         return lerp(prevBottomPos, bottomPos, tickDelta);
-    }
-
-    public boolean beginSteamParticleTick(long worldTick) {
-        if (lastSteamParticleTick == worldTick) {
-            return false;
-        }
-        lastSteamParticleTick = worldTick;
-        return true;
     }
 
     public void ensureClientVisualState(float impactY) {
@@ -172,8 +163,18 @@ public class WaterfallBlockEntity extends BlockEntity {
         float impactY = -blocksDown;
         ensureClientVisualState(impactY);
 
-        lastRenderedFlow = renderedFlow;
+        // Rain World's WaterFall updates at 40 Hz. Keep Minecraft's render
+        // interpolation at 20 Hz, but advance the endpoint propagation twice
+        // between the captured render states.
         lastVisualDensity = visualDensity;
+        prevTopPos = topPos;
+        prevBottomPos = bottomPos;
+        tickClientStep(impactY);
+        tickClientStep(impactY);
+    }
+
+    private void tickClientStep(float impactY) {
+        float flowBeforeStep = renderedFlow;
 
         if (isAtSourceTop(topPos)) {
             visualDensity = lerp(visualDensity, flow, 0.1f);
@@ -183,7 +184,6 @@ public class WaterfallBlockEntity extends BlockEntity {
             renderedFlow = flow;
         }
 
-        prevBottomPos = bottomPos;
         bottomPos += bottomVelocity;
         bottomVelocity -= FALL_ACCEL_BLOCKS;
         if (bottomPos < impactY) {
@@ -192,7 +192,6 @@ public class WaterfallBlockEntity extends BlockEntity {
         }
 
         if (renderedFlow <= FLOW_EPSILON) {
-            prevTopPos = topPos;
             topPos += topVelocity;
             topVelocity -= FALL_ACCEL_BLOCKS;
             if (topPos < impactY) {
@@ -202,15 +201,15 @@ public class WaterfallBlockEntity extends BlockEntity {
             }
         } else {
             topPos = SOURCE_TOP_Y;
-            prevTopPos = SOURCE_TOP_Y;
             topVelocity = 0.0f;
 
-            if (lastRenderedFlow <= FLOW_EPSILON) {
+            if (flowBeforeStep <= FLOW_EPSILON) {
                 bottomPos = SOURCE_TOP_Y;
-                prevBottomPos = SOURCE_TOP_Y;
                 bottomVelocity = 0.0f;
             }
         }
+
+        lastRenderedFlow = renderedFlow;
     }
 
     protected final void setInitialFlow(float initialFlow) {

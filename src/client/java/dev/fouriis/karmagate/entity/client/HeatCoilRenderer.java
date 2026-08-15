@@ -1,191 +1,300 @@
 package dev.fouriis.karmagate.entity.client;
 
 import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.platform.GlStateManager;
+import dev.fouriis.karmagate.block.karmagate.HeatCoilBlock;
 import dev.fouriis.karmagate.entity.karmagate.HeatCoilBlockEntity;
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
-import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
-import net.brickcraftdream.librainworldmc.client.atlas.FAtlasManager;
+import net.brickcraftdream.librainworldmc.client.atlas.FAtlasSpriteModel;
 import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.*;
+import net.brickcraftdream.librainworldmc.client.render.shader.ShaderRenderer;
+import net.brickcraftdream.librainworldmc.client.render.shader.Shaders;
+import net.minecraft.client.render.LightmapTextureManager;
+import net.minecraft.client.render.OverlayTexture;
+import net.minecraft.client.render.BufferBuilder;
+import net.minecraft.client.render.BufferRenderer;
+import net.minecraft.client.render.Camera;
+import net.minecraft.client.render.GameRenderer;
+import net.minecraft.client.render.RenderLayer;
+import net.minecraft.client.render.Tessellator;
+import net.minecraft.client.render.VertexFormat;
+import net.minecraft.client.render.VertexFormats;
+import net.minecraft.client.render.VertexConsumer;
+import net.minecraft.client.render.VertexConsumerProvider;
+import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactory;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.Identifier;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.ColorHelper;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
-import software.bernie.geckolib.cache.object.BakedGeoModel;
-import software.bernie.geckolib.renderer.GeoBlockRenderer;
-import software.bernie.geckolib.renderer.layer.GeoRenderLayer;
+import org.joml.Matrix4f;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 
-public class HeatCoilRenderer extends GeoBlockRenderer<HeatCoilBlockEntity> {
-    private static final Identifier HEAT_NOISE_TEX =
-            Identifier.of("karmagate", "textures/effect/heat_distortion_noise.png");
+/** 3-D atlas-model adaptation of RegionGateGraphics' RegionGate_Heater. */
+public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlockEntity> {
+    private static final float PIXELS_PER_BLOCK = 20.0f;
+    private static final float HEATER_MODEL_DEPTH_PIXELS = 3.0f;
+    private static final float HEATER_BASE_HEIGHT_PIXELS = 0.2f;
+    private static final int GLOW_SEGMENTS = 48;
+    private static final int GLOW_RINGS = 12;
+    // Run after libMod's conventional priority-1000 post effects. Recapturing
+    // immediately before every coil prevents one grabtex shader from restoring
+    // a stale scene over another, and also composes overlapping heat coils.
+    private static final int HEAT_DISTORTION_PRIORITY = 1007;
+    private static final int FULL_BRIGHT = LightmapTextureManager.MAX_LIGHT_COORDINATE;
+    private static final Identifier NOISE_TEXTURE =
+            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise-hq.png");
     private static final Identifier GRAB_TEXTURE = Identifier.of("librainworldmc", "grabtex");
-    private final FAtlasManager atlasManager;
 
-    public HeatCoilRenderer(BlockEntityRendererFactory.Context ctx) {
-        super(new HeatCoilModel());
-        atlasManager = LibrainworldmcClient.getAtlasManager();
-        addRenderLayer(new GlowLayer(this, resolveHeatNoiseTexture(atlasManager)));
+    // palette1 pixels (2,0) and (1,0), retained from RegionGateGraphics.
+    private static final Rgb BLACK_COLOR = new Rgb(19.0f / 255.0f, 0.0f, 17.0f / 255.0f);
+    private static final Rgb FOG_COLOR = new Rgb(107.0f / 255.0f, 171.0f / 255.0f, 165.0f / 255.0f);
+
+    private static FAtlasSpriteModel heaterModel;
+
+    public HeatCoilRenderer(BlockEntityRendererFactory.Context context) {
     }
 
-    private static Identifier resolveHeatNoiseTexture(FAtlasManager atlasManager) {
-        if (atlasManager != null) {
-            String[] candidates = {"NoiseTex", "noise", "HeatDistortionNoise", "HeatDistortion"};
-            for (String candidate : candidates) {
-                FAtlasElement element = atlasManager.getElementWithName(candidate);
-                if (element != null && element.textureIdentifier != null) {
-                    return element.textureIdentifier;
-                }
-            }
-        }
-        return HEAT_NOISE_TEX;
+    @Override
+    public void render(HeatCoilBlockEntity heater, float tickDelta, MatrixStack matrices,
+                       VertexConsumerProvider consumers, int light, int overlay) {
+        FAtlasSpriteModel model = getHeaterModel();
+        if (model == null || model.element().textureIdentifier == null) return;
+
+        float heat = MathHelper.clamp(heater.getInterpolatedHeaterHeat(tickDelta), 0.0f, 1.0f);
+        Rgb hotColor = heaterColor(heat);
+        Rgb shadeTarget = mix(BLACK_COLOR, FOG_COLOR, MathHelper.lerp(heat, 0.3f, 0.8f));
+        Rgb shadeColor = mix(hotColor, shadeTarget, MathHelper.lerp(heat, 0.8f, 0.1f));
+        Direction facing = heater.getCachedState().get(HeatCoilBlock.FACING);
+        Matrix4f matrix = matrices.peek().getPositionMatrix();
+        VertexConsumer vertices = consumers.getBuffer(
+                RenderLayer.getEntityCutoutNoCull(model.element().textureIdentifier));
+
+        renderHeaterModel(vertices, matrix, facing, model, hotColor, shadeColor);
+
+        queueHeatGlow(heater, heat);
+        queueHeatDistortion(heater, tickDelta);
     }
 
-    private static final class GlowLayer extends GeoRenderLayer<HeatCoilBlockEntity> {
-        GlowLayer(HeatCoilRenderer parent, Identifier heatNoiseTexture) {
-            super(parent);
-        }
+    private static void queueHeatGlow(HeatCoilBlockEntity heater, float heat) {
+        if (heat <= 0.05f) return;
 
-        @Override
-        public void render(
-                MatrixStack matrices,
-                HeatCoilBlockEntity animatable,
-                BakedGeoModel bakedModel,
-                RenderLayer baseLayer,
-                VertexConsumerProvider bufferSource,
-                VertexConsumer buffer,
-                float partialTick,
-                int packedLight,
-                int packedOverlay
-        ) {
-            float heat = animatable.getVisualHeat();
+        float alpha = (float) Math.pow(
+                inverseLerp(0.05f, 0.5f, heat) * heater.getClientLightFlicker(), 0.75f);
+        if (alpha <= 0.001f) return;
+        float hue = inverseLerp(0.4f, 0.7f, heat) * 0.045f;
+        float lightness = 0.5f + 0.1f * inverseLerp(
+                0.8f, 1.0f, heat * heater.getClientLightColorFlicker());
+        Rgb glowColor = hslToRgb(hue, 1.0f, lightness);
+        float radius = MathHelper.lerp(MathHelper.sin(MathHelper.PI * heat), 10.0f, 15.0f);
+        double centerX = heater.getPos().getX() + 0.5;
+        double centerY = heater.getPos().getY() + 2.0f / PIXELS_PER_BLOCK;
+        double centerZ = heater.getPos().getZ() + 0.5;
 
-            float h = Math.max(0f, Math.min(1f, heat));
-            float threshold = 0.05f;
-            if (h <= threshold) return;
+        // Draw just before libMod captures GrabTexture for HeatDistortion, so
+        // the screen-blended light is part of the scene that gets distorted.
+        RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall(camera ->
+                renderGlow(camera, centerX, centerY, centerZ, radius, glowColor, alpha), false), 990);
+    }
 
-            float t = (h - threshold) / (1f - threshold);
+    private static void renderGlow(Camera camera, double worldX, double worldY, double worldZ,
+                                   float radius, Rgb color, float alpha) {
+        Vec3d cameraPos = camera.getPos();
+        float cx = (float) (worldX - cameraPos.x);
+        float cy = (float) (worldY - cameraPos.y);
+        float cz = (float) (worldZ - cameraPos.z);
+        Quaternionf billboard = new Quaternionf(camera.getRotation());
+        Matrix4f view = new Matrix4f().rotation(camera.getRotation()).transpose();
+        BufferBuilder buffer = Tessellator.getInstance().begin(
+                VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
 
-            float p = t * 3f;
-            int i0 = (int) Math.floor(p);
-            int i1 = Math.min(i0 + 1, 3);
-            float frac = p - i0;
-
-            float aFast = t * t;
-            float aTail = (float) Math.sqrt(t);
-            float baseAlpha = Math.min(1f, 0.35f * aFast + 0.65f * aTail);
-
-            java.util.function.IntFunction<Identifier> tex = idx -> switch (idx) {
-                case 0 -> HeatCoilModel.EMISSIVE_1;
-                case 1 -> HeatCoilModel.EMISSIVE_2;
-                case 2 -> HeatCoilModel.EMISSIVE_3;
-                default -> HeatCoilModel.EMISSIVE_4;
-            };
-
-            int fullBright = 0xF000F0;
-
-            float w0 = (i0 == i1) ? 1f : (1f - frac);
-            float w1 = (i0 == i1) ? 0f : frac;
-
-            if (w0 > 0f) {
-                int a0 = (int) (Math.min(1f, baseAlpha * w0) * 255f);
-                int argb0 = ColorHelper.Argb.getArgb(a0, 255, 255, 255);
-                RenderLayer layer0 = RenderLayer.getEyes(tex.apply(i0));
-                VertexConsumer buf0 = bufferSource.getBuffer(layer0);
-                getRenderer().reRender(
-                        bakedModel, matrices, bufferSource, animatable,
-                        layer0, buf0, partialTick,
-                        fullBright, packedOverlay, argb0
-                );
+        for (int ring = 0; ring < GLOW_RINGS; ring++) {
+            float innerT = ring / (float) GLOW_RINGS;
+            float outerT = (ring + 1) / (float) GLOW_RINGS;
+            float innerAmount = square(1.0f - innerT) * alpha * 0.38f;
+            float outerAmount = square(1.0f - outerT) * alpha * 0.38f;
+            for (int segment = 0; segment < GLOW_SEGMENTS; segment++) {
+                float angle0 = MathHelper.TAU * segment / GLOW_SEGMENTS;
+                float angle1 = MathHelper.TAU * (segment + 1) / GLOW_SEGMENTS;
+                glowVertex(buffer, view, billboard, cx, cy, cz, radius * innerT, angle0,
+                        color, innerAmount);
+                glowVertex(buffer, view, billboard, cx, cy, cz, radius * innerT, angle1,
+                        color, innerAmount);
+                glowVertex(buffer, view, billboard, cx, cy, cz, radius * outerT, angle1,
+                        color, outerAmount);
+                glowVertex(buffer, view, billboard, cx, cy, cz, radius * outerT, angle0,
+                        color, outerAmount);
             }
-
-            if (w1 > 0f) {
-                int a1 = (int) (Math.min(1f, baseAlpha * w1) * 255f);
-                int argb1 = ColorHelper.Argb.getArgb(a1, 255, 255, 255);
-                RenderLayer layer1 = RenderLayer.getEyes(tex.apply(i1));
-                VertexConsumer buf1 = bufferSource.getBuffer(layer1);
-                getRenderer().reRender(
-                        bakedModel, matrices, bufferSource, animatable,
-                        layer1, buf1, partialTick,
-                        fullBright, packedOverlay, argb1
-                );
-            }
-
-            renderHeatDistortionBillboard(animatable, partialTick, t, fullBright);
         }
 
-        private void renderHeatDistortionBillboard(
-                HeatCoilBlockEntity animatable,
-                float partialTick,
-                float heatT,
-                int packedLight
-        ) {
-            MinecraftClient mc = MinecraftClient.getInstance();
-            if (mc.world == null || mc.gameRenderer == null || mc.getCameraEntity() == null) return;
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthMask(false);
+        RenderSystem.enableBlend();
+        RenderSystem.blendFunc(GlStateManager.SrcFactor.ONE_MINUS_DST_COLOR,
+                GlStateManager.DstFactor.ONE);
+        RenderSystem.disableCull();
+        RenderSystem.setShader(GameRenderer::getPositionColorProgram);
+        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
+        BufferRenderer.drawWithGlobalProgram(buffer.end());
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.depthMask(true);
+        RenderSystem.enableCull();
+        RenderSystem.disableBlend();
+    }
 
-            // Rain World reference:
-            // num3 = InverseLerp(0.15f, 0.8f, heat)
-            // y += 40f * num3
-            // scaleX = Lerp(10f, 15f, num3)
-            // scaleY = Lerp(15f, 30f, num3)
-            // alpha = SCurve(heat, 1.5f)
-            float num3 = inverseLerpClamped(0.15f, 0.8f, heatT);
+    private static void glowVertex(BufferBuilder buffer, Matrix4f view, Quaternionf billboard,
+                                   float cx, float cy, float cz, float distance, float angle,
+                                   Rgb color, float amount) {
+        Vector3f position = new Vector3f(MathHelper.cos(angle), MathHelper.sin(angle), 0.0f)
+                .mul(distance).rotate(billboard).add(cx, cy, cz);
+        // Screen blending ignores source alpha, so bake the radial amount into
+        // RGB exactly as RegionGateHeatCoil3D's ScreenBlend does.
+        buffer.vertex(view, position.x, position.y, position.z)
+                .color(color.r * amount, color.g * amount, color.b * amount, 1.0f);
+    }
 
-            Vec3d baseCenter = Vec3d.ofCenter(animatable.getPos()).add(0.0, 0.15 + 0.45 * num3, 0.0);
-            Vec3d camPos = mc.gameRenderer.getCamera().getPos();
-            Vec3d toCamera = camPos.subtract(baseCenter);
-            Vec3d towardCamera = toCamera.lengthSquared() > 1.0e-6 ? toCamera.normalize() : Vec3d.ZERO;
-            Vec3d blockCenter = baseCenter.add(towardCamera.multiply(-1.0));
+    private static float square(float value) {
+        return value * value;
+    }
 
-            // Tuned to preserve the Rain World proportions:
-            // width grows 10 -> 15  (1.5x)
-            // height grows 15 -> 30 (2.0x)
-            float halfWidth = lerp(0.50f, 0.75f, num3);
-            float halfHeight = lerp(0.75f, 1.50f, num3);
-
-            float alpha = sCurve(heatT, 1.5f);
-
-
-            Box box = Box.of(blockCenter, 3.75, 1.25, 3.75);
-            float boxHalf = Math.max(halfWidth, halfHeight);
-
-            RenderUtils.drawCameraFacingBillboardFitBoxNoScaleLargest(
-                    () -> {
-                        float[] spriteRect = new float[]{0f, 0f, 1f, 1f};
-                        CoreShaderRenderer.bindShader$HeatDistortion(Identifier.of("librainworldmc", "textures/rainworld/palettes/noise-hq.png"), GRAB_TEXTURE, false);
-                        RenderSystem.setShaderColor(1, 1, 1, alpha);
-                    },
-                    blockCenter.x, blockCenter.y - 1, blockCenter.z,
-                    box, boxHalf, boxHalf,
-                    0, 0, 0,
-                    1, 1, 1, alpha, packedLight
-            );
-
-            //RenderUtils.drawWireBox3D(GameRenderer.getPositionColorTexLightmapProgram(), box, 0.01f, 1, 1, 0.4f, 1);
+    private static void renderHeaterModel(VertexConsumer vertices, Matrix4f matrix, Direction facing,
+                                          FAtlasSpriteModel model, Rgb hotColor, Rgb shadeColor) {
+        for (FAtlasSpriteModel.Quad quad : model.quads()) {
+            // The sprite model's +Z face becomes the heater's upward face. Its
+            // lower face retains the C# shade color; edge extrusion is blended
+            // between them so the generated silhouette reads as solid.
+            float upward = MathHelper.clamp(quad.normalZ() * 0.5f + 0.5f, 0.0f, 1.0f);
+            Rgb color = mix(shadeColor, hotColor, upward);
+            emitModelVertex(vertices, matrix, facing, model, quad, quad.a(), color);
+            emitModelVertex(vertices, matrix, facing, model, quad, quad.b(), color);
+            emitModelVertex(vertices, matrix, facing, model, quad, quad.c(), color);
+            emitModelVertex(vertices, matrix, facing, model, quad, quad.d(), color);
         }
+    }
 
+    private static void emitModelVertex(VertexConsumer vertices, Matrix4f matrix, Direction facing,
+                                        FAtlasSpriteModel model, FAtlasSpriteModel.Quad quad,
+                                        FAtlasSpriteModel.Vertex vertex, Rgb color) {
+        float angle = facing.asRotation() * MathHelper.RADIANS_PER_DEGREE;
+        float cos = MathHelper.cos(angle);
+        float sin = MathHelper.sin(angle);
+        float localX = (vertex.x() - model.width() * 0.5f) / PIXELS_PER_BLOCK;
+        float localZ = (vertex.y() - model.height() * 0.5f) / PIXELS_PER_BLOCK;
+        float localY = (HEATER_BASE_HEIGHT_PIXELS + vertex.z() + model.depth() * 0.5f)
+                / PIXELS_PER_BLOCK;
+        float rotatedX = localX * cos - localZ * sin;
+        float rotatedZ = localX * sin + localZ * cos;
+        float normalX = quad.normalX() * cos - quad.normalY() * sin;
+        float normalZ = quad.normalX() * sin + quad.normalY() * cos;
+        vertices.vertex(matrix, 0.5f + rotatedX, localY, 0.5f + rotatedZ)
+                .color(color.r, color.g, color.b, 1.0f)
+                .texture(vertex.u(), vertex.v())
+                .overlay(OverlayTexture.DEFAULT_UV)
+                .light(FULL_BRIGHT)
+                .normal(normalX, quad.normalZ(), normalZ);
+    }
 
-        private float inverseLerpClamped(float a, float b, float value) {
-            if (a == b) return 0f;
-            return Math.max(0f, Math.min(1f, (value - a) / (b - a)));
+    private static void queueHeatDistortion(HeatCoilBlockEntity heater, float tickDelta) {
+        float targetHeat = MathHelper.clamp(heater.getVisualHeat(), 0.0f, 1.0f);
+        if (targetHeat <= 0.0f || heater.getWorld() == null) return;
+        float factor = inverseLerp(0.15f, 0.8f, targetHeat);
+        float halfWidth = 0.5f * (16.0f * MathHelper.lerp(factor, 10.0f, 15.0f)) / PIXELS_PER_BLOCK;
+        float halfHeight = 0.5f * (16.0f * MathHelper.lerp(factor, 15.0f, 30.0f)) / PIXELS_PER_BLOCK;
+        float alpha = sCurve(targetHeat, 1.5f);
+        float rain = (heater.getWorld().getTime() + tickDelta) / 100.0f;
+        double centerX = heater.getPos().getX() + 0.5;
+        double centerY = heater.getPos().getY() + 0.2f / PIXELS_PER_BLOCK + 2.0f * factor;
+        double centerZ = heater.getPos().getZ() + 0.5;
+
+        RenderUtils.drawCameraFacingBillboardOffset(() -> {
+                    CoreShaderRenderer.bindShader$HeatDistortion(NOISE_TEXTURE, GRAB_TEXTURE, false);
+                    if (Shaders.HEAT_DISTORTION != null && Shaders.HEAT_DISTORTION.getProgram() != null) {
+                        ShaderRenderer.setUniformF(Shaders.HEAT_DISTORTION.getProgram(), "u_RAIN", rain);
+                    }
+                    RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
+                },
+                centerX, centerY, centerZ,
+                halfWidth, halfHeight, 0.0f,
+                0.0f, 0.0f, 0.0f,
+                1.0f, 1.0f, 1.0f, alpha, FULL_BRIGHT,
+                true, HEAT_DISTORTION_PRIORITY);
+    }
+
+    private static FAtlasSpriteModel getHeaterModel() {
+        if (heaterModel != null) return heaterModel;
+        try {
+            heaterModel = LibrainworldmcClient.getAtlasManager()
+                    .getModelWithName("RegionGate_Heater", HEATER_MODEL_DEPTH_PIXELS);
+        } catch (IllegalStateException ignored) {
+            // libMod atlas initialization can briefly lag the first rendered frame.
         }
+        return heaterModel;
+    }
 
-        private float lerp(float a, float b, float t) {
-            return a + (b - a) * t;
+    private static Rgb heaterColor(float heat) {
+        Rgb result = mix(BLACK_COLOR, new Rgb(1.0f, 0.0f, 0.0f), inverseLerp(0.0f, 0.3f, heat));
+        if (heat > 0.3f) {
+            float value = inverseLerp(0.3f, 1.0f, heat);
+            result = hslToRgb(value * 0.16f, 1.0f, 0.5f + 0.2f * value);
         }
+        return result;
+    }
 
-        // Approximation of Rain World's Custom.SCurve(x, 1.5f)
-        private float sCurve(float x, float exp) {
-            float v = Math.max(0f, Math.min(1f, x));
-            if (v <= 0f) return 0f;
-            if (v >= 1f) return 1f;
+    private static Rgb hslToRgb(float hue, float saturation, float lightness) {
+        float maximum = lightness <= 0.5f
+                ? lightness * (1.0f + saturation)
+                : lightness + saturation - lightness * saturation;
+        if (maximum <= 0.0f) return new Rgb(lightness, lightness, lightness);
+        float minimum = lightness + lightness - maximum;
+        float range = (maximum - minimum) / maximum;
+        float sectorValue = hue * 6.0f;
+        int sector = (int) sectorValue;
+        float fraction = sectorValue - sector;
+        float rise = maximum * range * fraction;
+        float up = minimum + rise;
+        float down = maximum - rise;
+        return switch (sector) {
+            case 0 -> new Rgb(maximum, up, minimum);
+            case 1 -> new Rgb(down, maximum, minimum);
+            case 2 -> new Rgb(minimum, maximum, up);
+            case 3 -> new Rgb(minimum, down, maximum);
+            case 4 -> new Rgb(up, minimum, maximum);
+            default -> new Rgb(maximum, minimum, down);
+        };
+    }
 
-            float a = (float) Math.pow(v, exp);
-            float b = (float) Math.pow(1f - v, exp);
-            return a / (a + b);
+    private static float inverseLerp(float a, float b, float value) {
+        return MathHelper.clamp((value - a) / (b - a), 0.0f, 1.0f);
+    }
+
+    private static float sCurve(float x, float k) {
+        x = MathHelper.clamp(x, 0.0f, 1.0f) * 2.0f - 1.0f;
+        if (x < 0.0f) {
+            x = Math.abs(1.0f + x);
+            return k * x / (k - x + 1.0f) * 0.5f;
         }
+        k = -1.0f - k;
+        return 0.5f + k * x / (k - x + 1.0f) * 0.5f;
+    }
+
+    private static Rgb mix(Rgb a, Rgb b, float amount) {
+        return new Rgb(MathHelper.lerp(amount, a.r, b.r),
+                MathHelper.lerp(amount, a.g, b.g), MathHelper.lerp(amount, a.b, b.b));
+    }
+
+    private record Rgb(float r, float g, float b) {
+    }
+
+    @Override
+    public boolean rendersOutsideBoundingBox(HeatCoilBlockEntity blockEntity) {
+        return true;
+    }
+
+    @Override
+    public int getRenderDistance() {
+        return 256;
     }
 }

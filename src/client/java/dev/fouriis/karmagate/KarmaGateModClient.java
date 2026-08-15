@@ -45,7 +45,7 @@ import dev.fouriis.karmagate.item.tool.CoralNeuronClientDefinition;
 import dev.fouriis.karmagate.item.tool.ProjectionZoneClientDefinition;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.particle.SteamParticle;
-import dev.fouriis.karmagate.particle.WaterStreamParticle;
+import dev.fouriis.karmagate.particle.SteamSmokeSystem;
 import dev.fouriis.karmagate.sound.GateAudioSpecs;
 import dev.fouriis.karmagate.sound.ModSounds;
 import dev.fouriis.karmagate.sound.MultiSound;
@@ -102,6 +102,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 		registerAtcCloudCommand();
 		registerCowboyEasterEgg();
 		ClientTickEvents.END_CLIENT_TICK.register(KarmaGateModClient::openPendingAtcCloudConfig);
+		ClientTickEvents.END_CLIENT_TICK.register(SteamSmokeSystem::tick);
 
 		// Register distant structure billboards
 		//dev.fouriis.karmagate.client.DistantStructuresRenderer.init();
@@ -115,7 +116,6 @@ public class KarmaGateModClient implements ClientModInitializer {
 		BlockEntityRendererFactories.register(ModBlockEntities.WATERFALL_BLOCK_ENTITY, WaterfallBlockRenderer::new);
 		BlockEntityRendererFactories.register(ModBlockEntities.WATER_STREAM_BLOCK_ENTITY, WaterfallBlockRenderer::new);
 
-		ParticleFactoryRegistry.getInstance().register(ModParticles.WATER_STREAM, sprites -> new WaterStreamParticle.Factory(sprites));
 		ParticleFactoryRegistry.getInstance().register(ModParticles.STEAM, new SteamParticle.Factory());
 
 		// Register neuron swarmer renderer
