@@ -12,5 +12,8 @@
   "item.karma-gate-mod.five_pebbles_spawn_egg": "Five Pebbles Spawn Egg",
   "item.karma-gate-mod.looks_to_the_moon_spawn_egg": "Looks to the Moon Spawn Egg",
   "item.karma-gate-mod.room_tool": "Room Tool",
-  "key.karma-gate-mod.room_map": "Room Map"
+  "key.karma-gate-mod.room_map": "Room Map",
+  "dialogue.karma-gate-mod.echo.1": "Little wanderer, you have crossed a long way to reach this place.",
+  "dialogue.karma-gate-mod.echo.2": "The rooms remember many travelers, though their names have faded.<LINE>Listen, and carry one small memory onward.",
+  "dialogue.karma-gate-mod.echo.3": "When our meeting ends, your path will still be your own."
 }

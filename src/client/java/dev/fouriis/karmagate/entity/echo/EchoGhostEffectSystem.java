@@ -42,7 +42,7 @@ import java.util.UUID;
  */
 public final class EchoGhostEffectSystem {
     private static final float PIXELS_PER_BLOCK = 20.0f;
-    private static final float ROOM_HALF_EXTENT = 10.0f;
+    private static final float ROOM_HALF_EXTENT = (float) EchoEntity.PARTICLE_ZONE_HALF_EXTENT;
     private static final float GHOST_MODE = 0.85f;
     private static final float GHOST_SCALE = 0.75f;
     /** Compensates for Minecraft not applying Rain World's dark ghost palette first. */
@@ -91,6 +91,13 @@ public final class EchoGhostEffectSystem {
         activeWorld = null;
     }
 
+    public static void triggerPulse(EchoEntity echo) {
+        State state = STATES.computeIfAbsent(echo.getUuid(),
+                id -> new State(echo.getId(), id));
+        state.entityId = echo.getId();
+        state.pulseUpdates = 35;
+    }
+
     public static void queue(EchoEntity echo, float tickDelta) {
         if (echo.getWorld() == null || echo.isRemoved()) return;
         State state = STATES.computeIfAbsent(echo.getUuid(),
@@ -100,6 +107,7 @@ public final class EchoGhostEffectSystem {
         float rain = (echo.getWorld().getTime() + tickDelta) / 100.0f;
         float delta = MathHelper.clamp(tickDelta, 0.0f, 1.0f);
         Box bounds = echo.getBoundingBox();
+        float distortionHalfSize = stabilizedDistortionHalfSize(center, bounds);
 
         // Draw the flakes behind the Echo before capturing the scene used by
         // the distortion shell.
@@ -110,12 +118,13 @@ public final class EchoGhostEffectSystem {
         // enclosing the entity. This keeps it around the Echo instead of
         // intersecting or rotating through its model as the camera moves.
         if (Shaders.GHOST_DISTORTION != null
-                && Shaders.GHOST_DISTORTION.getProgram() != null) {
+                && Shaders.GHOST_DISTORTION.getProgram() != null
+                && distortionHalfSize > 0.0f) {
             RenderUtils.drawCameraFacingBillboardFitSphere(
-                    () -> bindDistortion(rain),
+                    () -> bindDistortion(rain, state.distortionOpacity()),
                     center.x, center.y, center.z,
                     bounds,
-                    DISTORTION_MAX_HALF_SIZE, DISTORTION_MAX_HALF_SIZE,
+                    distortionHalfSize, distortionHalfSize,
                     0.0f,
                     1.0f, 1.0f, 1.0f, 1.0f, FULL_BRIGHT,
                     true, EFFECT_PRIORITY);
@@ -124,6 +133,28 @@ public final class EchoGhostEffectSystem {
         // Flakes nearer than the Echo stay in front of the distortion shell.
         RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall(camera ->
                 renderFlakeLayer(camera, state, center, delta, false), false), EFFECT_PRIORITY + 1);
+    }
+
+    /**
+     * Cancels the apparent size gain caused by FitSphere pushing its quad from
+     * the entity center to the camera-facing surface plus corner clearance.
+     * Without this, the quad approaches the camera much faster than the model.
+     */
+    private static float stabilizedDistortionHalfSize(Vec3d center, Box bounds) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        double distance = client.gameRenderer.getCamera().getPos().distanceTo(center);
+        double halfX = bounds.getLengthX() * 0.5;
+        double halfY = bounds.getLengthY() * 0.5;
+        double halfZ = bounds.getLengthZ() * 0.5;
+        double sphereRadius = Math.sqrt(halfX * halfX + halfY * halfY + halfZ * halfZ);
+        if (distance <= sphereRadius + 0.01) return 0.0f;
+
+        // For a square billboard the helper's extra corner clearance is
+        // sqrt(2) * halfSize. Solve the perspective ratio against a billboard
+        // located at the Echo center, then retain the original upper limit.
+        double compensated = DISTORTION_MAX_HALF_SIZE * (distance - sphereRadius)
+                / (distance + Math.sqrt(2.0) * DISTORTION_MAX_HALF_SIZE);
+        return MathHelper.clamp((float) compensated, 0.01f, DISTORTION_MAX_HALF_SIZE);
     }
 
     private static void renderFlakeLayer(Camera camera, State state, Vec3d center,
@@ -283,7 +314,7 @@ public final class EchoGhostEffectSystem {
                 .light(FULL_BRIGHT);
     }
 
-    private static void bindDistortion(float rain) {
+    private static void bindDistortion(float rain, float opacity) {
         CoreShaderRenderer.bindShader$GhostDistortion(
                 NOISE_TEXTURE, GRAB_TEXTURE, null, null,
                 false, true, false, false, false, false);
@@ -297,7 +328,7 @@ public final class EchoGhostEffectSystem {
         RenderSystem.setShaderTexture(7, GRAB_TEXTURE);
         // Preserve full vertex alpha for the shader's displacement strength,
         // but soften its blue-graded result when compositing over Minecraft.
-        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, DISTORTION_OPACITY);
+        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, opacity);
     }
 
     private static void restoreParticleRenderState() {
@@ -378,6 +409,7 @@ public final class EchoGhostEffectSystem {
         private final Random random;
         private final Flake[] flakes = new Flake[ACTIVE_FLAKES];
         private int entityId;
+        private int pulseUpdates;
 
         private State(int entityId, UUID id) {
             this.entityId = entityId;
@@ -390,6 +422,7 @@ public final class EchoGhostEffectSystem {
         }
 
         private void tick() {
+            pulseUpdates = Math.max(0, pulseUpdates - 2);
             for (Flake flake : flakes) {
                 flake.previousX = flake.x;
                 flake.previousY = flake.y;
@@ -399,6 +432,11 @@ public final class EchoGhostEffectSystem {
             }
             step();
             step();
+        }
+
+        private float distortionOpacity() {
+            float pulse = pulseUpdates / 35.0f;
+            return MathHelper.lerp(pulse * pulse, DISTORTION_OPACITY, 0.9f);
         }
 
         private void step() {

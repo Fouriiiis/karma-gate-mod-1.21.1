@@ -6,6 +6,7 @@ import net.minecraft.entity.attribute.DefaultAttributeContainer;
 import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import software.bernie.geckolib.animatable.GeoAnimatable;
@@ -23,6 +24,8 @@ import software.bernie.geckolib.util.GeckoLibUtil;
 public final class EchoEntity extends MobEntity implements GeoAnimatable {
     /** Center of the supplied model's visible bounds relative to its spawn anchor. */
     public static final double VISUAL_CENTER_Y = 6.0;
+    /** Temporary room/particle volume until the proper room system is available. */
+    public static final double PARTICLE_ZONE_HALF_EXTENT = 10.0;
 
     private static final RawAnimation IDLE =
             RawAnimation.begin().thenLoop("animation.model.idle");
@@ -70,6 +73,17 @@ public final class EchoEntity extends MobEntity implements GeoAnimatable {
 
     public Vec3d getVisualCenter() {
         return new Vec3d(getX(), getY() + VISUAL_CENTER_Y, getZ());
+    }
+
+    public Box getParticleZone() {
+        Vec3d center = getVisualCenter();
+        return new Box(
+                center.x - PARTICLE_ZONE_HALF_EXTENT,
+                center.y - PARTICLE_ZONE_HALF_EXTENT,
+                center.z - PARTICLE_ZONE_HALF_EXTENT,
+                center.x + PARTICLE_ZONE_HALF_EXTENT,
+                center.y + PARTICLE_ZONE_HALF_EXTENT,
+                center.z + PARTICLE_ZONE_HALF_EXTENT);
     }
 
     @Override
