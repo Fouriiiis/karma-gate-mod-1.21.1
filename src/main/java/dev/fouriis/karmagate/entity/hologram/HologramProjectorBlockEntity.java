@@ -158,7 +158,7 @@ public class HologramProjectorBlockEntity extends BlockEntity {
             colorRed = previousColorRed = base[0];
             colorGreen = previousColorGreen = base[1];
             colorBlue = previousColorBlue = base[2];
-            fade = previousFade = lowPower ? 0.82f : 1.0f - targetLevel;
+            fade = previousFade = 1.0f - targetLevel;
             visualStateInitialized = true;
         }
 
@@ -172,7 +172,9 @@ public class HologramProjectorBlockEntity extends BlockEntity {
     }
 
     private void updateClientVisualStep() {
-        goalFade = lowPower ? 0.82f : 1.0f - targetLevel;
+        // Low power controls color and extra flicker; the controller supplies
+        // the independent reference fade target for the current gate mode.
+        goalFade = 1.0f - targetLevel;
         fade = lerpAndTick(fade, Math.min(goalFade, 1.0f - flicker), 0.01f, 0.05f);
 
         float period = flicker == 0.0f ? lerp(30.0f, 780.0f, goalFade) : 30.0f;
@@ -226,8 +228,9 @@ public class HologramProjectorBlockEntity extends BlockEntity {
     }
 
     public void setTargetLevel(float v) {
-        this.targetLevel = Math.max(0f, Math.min(1f, v));
-        //System.out.println("HologramProjectorBlockEntity: setTargetLevel " + this.targetLevel);
+        float next = Math.max(0f, Math.min(1f, v));
+        if (Math.abs(next - this.targetLevel) <= 1.0e-4f) return;
+        this.targetLevel = next;
         markDirtySync();
     }
 

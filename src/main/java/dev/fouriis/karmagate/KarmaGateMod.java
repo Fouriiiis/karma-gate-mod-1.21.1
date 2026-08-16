@@ -15,6 +15,7 @@ import dev.fouriis.karmagate.entity.centipede.RedCentipedeEntity;
 import dev.fouriis.karmagate.entity.centipede.SmallCentipedeEntity;
 import dev.fouriis.karmagate.entity.centipede.SmallCentiwingEntity;
 import dev.fouriis.karmagate.entity.daddy.DaddyLongLegsEntity;
+import dev.fouriis.karmagate.entity.echo.EchoEntity;
 import dev.fouriis.karmagate.entity.garbworm.GarbageWormEntity;
 import dev.fouriis.karmagate.entity.oracle.FivePebblesEntity;
 import dev.fouriis.karmagate.entity.oracle.LooksToTheMoonEntity;
@@ -220,6 +221,16 @@ public class KarmaGateMod implements ModInitializer {
                     .build()
     );
 
+    public static final EntityType<EchoEntity> ECHO_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "echo"),
+            FabricEntityTypeBuilder.<EchoEntity>create(SpawnGroup.CREATURE, EchoEntity::new)
+                    .dimensions(EntityDimensions.fixed(6.0f, 18.0f))
+                    .trackRangeBlocks(256)
+                    .trackedUpdateRate(1)
+                    .build()
+    );
+
 
     @Override
     public void onInitialize() {
@@ -249,6 +260,7 @@ public class KarmaGateMod implements ModInitializer {
         FabricDefaultAttributeRegistry.register(YELLOW_OVERSEER_ENTITY_TYPE, YellowOverseerEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(FIVE_PEBBLES_ENTITY_TYPE, OracleEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(LOOKS_TO_THE_MOON_ENTITY_TYPE, OracleEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(ECHO_ENTITY_TYPE, EchoEntity.createAttributes());
 
         // Register networking
         ModNetworking.register();

@@ -10,7 +10,9 @@ import net.minecraft.world.World;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Manages gate lights for one side (SIDE1 / SIDE2).
@@ -193,6 +195,33 @@ public class GateLightGroup {
     public void lightTopPairOnly(World world) {
         setAll(world, false);
         lightTopPair(world, true);
+    }
+
+    /** Apply the two logical RegionGate lamp states represented by this side. */
+    public void setPairStates(World world, boolean bottom, boolean top) {
+        Set<BlockPos> lit = new HashSet<>();
+        if (bottom) {
+            LightRef near = bottomNear();
+            LightRef far = topFar();
+            if (near != null) lit.add(near.pos);
+            if (far != null) lit.add(far.pos);
+            if (near == null && far == null) {
+                LightRef fallback = topNear() != null ? topNear() : bottomFar();
+                if (fallback != null) lit.add(fallback.pos);
+            }
+        }
+        if (top) {
+            LightRef near = topNear();
+            LightRef far = bottomFar();
+            if (near != null) lit.add(near.pos);
+            if (far != null) lit.add(far.pos);
+            if (near == null && far == null) {
+                LightRef fallback = bottomNear() != null ? bottomNear() : topFar();
+                if (fallback != null) lit.add(fallback.pos);
+            }
+        }
+        for (LightRef ref : nearCol) setOne(world, ref.pos, lit.contains(ref.pos));
+        for (LightRef ref : farCol) setOne(world, ref.pos, lit.contains(ref.pos));
     }
 
     // ---------------- internals ----------------

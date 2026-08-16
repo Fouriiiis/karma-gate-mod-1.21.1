@@ -20,7 +20,8 @@ public class WaterfallBlockEntity extends BlockEntity {
     private static final float SOURCE_TOP_Y = 1.0f;
     private static final float FALL_ACCEL_BLOCKS = 0.9f / 20.0f;
     private static final float FLOW_EPSILON = 1.0e-4f;
-    private static final float MAX_FLOW = 0.5f;
+    // RegionGate water pressure and setFlow both use the complete 0..1 range.
+    private static final float MAX_FLOW = 1.0f;
 
     private float flow = MAX_FLOW;
     private float lastRenderedFlow = MAX_FLOW;

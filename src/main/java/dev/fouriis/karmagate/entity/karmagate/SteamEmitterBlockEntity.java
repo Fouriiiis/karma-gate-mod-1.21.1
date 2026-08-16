@@ -4,11 +4,14 @@ package dev.fouriis.karmagate.entity.karmagate;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
 import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.ModSounds;
-import dev.fouriis.karmagate.block.karmagate.SteamEmitterBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.network.listener.ClientPlayPacketListener;
+import net.minecraft.network.packet.Packet;
+import net.minecraft.network.packet.s2c.play.BlockEntityUpdateS2CPacket;
 import net.minecraft.registry.RegistryWrapper;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 
@@ -16,6 +19,7 @@ import java.util.Random;
 
 public class SteamEmitterBlockEntity extends BlockEntity {
     private boolean enabled = false;
+    private float flow = 0.0f;
     private final Random rng = new Random();
     private float clientSteamPressure = 0.0f;
 
@@ -25,12 +29,20 @@ public class SteamEmitterBlockEntity extends BlockEntity {
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) {
-        System.out.println("SteamEmitterBlockEntity: setEnabled " + enabled);
-        if (this.enabled != enabled) {
-            this.enabled = enabled;
-            markDirty();
-            if (world != null) world.updateListeners(pos, getCachedState(), getCachedState(), 3);
-        }
+        setFlow(enabled ? 1.0f : 0.0f);
+    }
+
+    public float getFlow() { return flow; }
+
+    /** Fractional RegionGate electric-steam pressure in the range 0..1. */
+    public void setFlow(float value) {
+        if (world != null && world.isClient) return;
+        float next = Math.max(0.0f, Math.min(1.0f, value));
+        boolean nextEnabled = next > 1.0e-4f;
+        if (Math.abs(next - flow) <= 1.0e-4f && enabled == nextEnabled) return;
+        flow = next;
+        enabled = nextEnabled;
+        markDirtySync();
     }
 
     public static void tick(World world, BlockPos pos, BlockState state, SteamEmitterBlockEntity be) {
@@ -38,15 +50,9 @@ public class SteamEmitterBlockEntity extends BlockEntity {
             return;
         }
 
-        // Rain World updates at 40 Hz, so run two gate updates for every
-        // Minecraft 20 Hz game tick.
+        be.clientSteamPressure = be.flow;
+        // Two emission attempts preserve Rain World's 40 Hz particle cadence.
         for (int step = 0; step < 2; step++) {
-            if (state.get(SteamEmitterBlock.ENABLED)) {
-                be.clientSteamPressure = Math.min(1.0f, be.clientSteamPressure + 0.025f);
-            } else {
-                be.clientSteamPressure = Math.max(0.0f, be.clientSteamPressure - 0.025f);
-            }
-
             float pressure = be.clientSteamPressure;
             if (pressure <= 0.0f) {
                 continue;
@@ -79,18 +85,33 @@ public class SteamEmitterBlockEntity extends BlockEntity {
     protected void writeNbt(NbtCompound nbt, RegistryWrapper.WrapperLookup lookup) {
         super.writeNbt(nbt, lookup);
         nbt.putBoolean("enabled", enabled);
+        nbt.putFloat("flow", flow);
     }
 
     @Override
     public void readNbt(NbtCompound nbt, RegistryWrapper.WrapperLookup lookup) {
         super.readNbt(nbt, lookup);
-        enabled = nbt.getBoolean("enabled");
+        if (nbt.contains("flow")) flow = Math.max(0.0f, Math.min(1.0f, nbt.getFloat("flow")));
+        else flow = nbt.getBoolean("enabled") ? 1.0f : 0.0f;
+        enabled = flow > 1.0e-4f;
     }
 
     @Override
     public NbtCompound toInitialChunkDataNbt(RegistryWrapper.WrapperLookup lookup) {
         NbtCompound nbt = super.toInitialChunkDataNbt(lookup);
         nbt.putBoolean("enabled", enabled);
+        nbt.putFloat("flow", flow);
         return nbt;
+    }
+
+    private void markDirtySync() {
+        markDirty();
+        if (world instanceof ServerWorld serverWorld) serverWorld.getChunkManager().markForUpdate(pos);
+        if (world != null) world.updateListeners(pos, getCachedState(), getCachedState(), 3);
+    }
+
+    @Override
+    public Packet<ClientPlayPacketListener> toUpdatePacket() {
+        return BlockEntityUpdateS2CPacket.create(this);
     }
 }

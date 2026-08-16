@@ -143,11 +143,11 @@ public class KarmaGateBlockEntity extends BlockEntity implements GeoBlockEntity 
         }
 
         controller.setGates(gate1, gate2);
-        controller.resetOnBind();
-
-        // ALSO bind nearby lights now that we know orientation
+        // Bind components first: their combination determines whether this is
+        // an electric gate, a water gate, or an incomplete/broken assembly.
         final int lightRadius = Math.max(15, radius); // reuse radius (or expand a bit) for convenience
         controller.bindLightsAndEffects(world, this.pos, this.getCachedState(), lightRadius);
+        controller.resetOnBind();
 
         KarmaGateMod.LOGGER.info("Controller {} @{} bound {} gate(s): gate1={}, gate2={}",
                 airlockId, origin, bound, gate1, gate2);

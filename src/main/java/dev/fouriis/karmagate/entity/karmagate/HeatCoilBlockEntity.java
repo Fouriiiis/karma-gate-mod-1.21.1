@@ -19,6 +19,7 @@ public class HeatCoilBlockEntity extends BlockEntity {
 
     // heater toggle (server)
     private boolean enabled = false;
+    private boolean gateManaged = false;
 
     // all external/additional contributions for the *current* server tick
     private float pendingDelta = 0f;
@@ -161,6 +162,7 @@ public class HeatCoilBlockEntity extends BlockEntity {
     /** Toggle the built-in heater on/off. */
     public void setEnabled(boolean on) {
         if (world != null && world.isClient) return; // server only
+        this.gateManaged = false;
         this.enabled = on;
         // no immediate sync needed; heat itself will sync when it changes
     }
@@ -170,12 +172,34 @@ public class HeatCoilBlockEntity extends BlockEntity {
     /** Server-authoritative heat (client will read the synced value). */
     public float getHeat() { return heat; }
 
+    /**
+     * Exact RegionGateGraphics heat supplied by the 40 Hz gate simulation.
+     * This bypasses the older generic on/off heater rate while the coil is
+     * bound to a gate.
+     */
+    public void setGateHeat(float value) {
+        if (world != null && world.isClient) return;
+        gateManaged = true;
+        enabled = false;
+        pendingDelta = 0.0f;
+        float next = clamp01(value);
+        if (Math.abs(next - heat) > EPS) {
+            heat = next;
+            markDirtySync();
+        }
+    }
+
     /* ================= ticking ================= */
 
     /** Server tick: accumulate all contributions and apply once. */
     public void tick(World world, BlockPos pos, BlockState state) {
         if (world.isClient) {
             tickClientVisuals(world);
+            return;
+        }
+
+        if (gateManaged) {
+            pendingDelta = 0.0f;
             return;
         }
 
@@ -227,6 +251,7 @@ public class HeatCoilBlockEntity extends BlockEntity {
         super.writeNbt(nbt, lookup);
         nbt.putFloat("heat", heat);
         nbt.putBoolean("enabled", enabled);
+        nbt.putBoolean("gateManaged", gateManaged);
         // pendingDelta is transient per tick and not persisted
     }
 
@@ -235,6 +260,7 @@ public class HeatCoilBlockEntity extends BlockEntity {
         super.readNbt(nbt, lookup);
         this.heat = nbt.getFloat("heat");
         this.enabled = nbt.getBoolean("enabled");
+        this.gateManaged = nbt.getBoolean("gateManaged");
         this.pendingDelta = 0f;
     }
 

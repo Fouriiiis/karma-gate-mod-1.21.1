@@ -1,4 +1,3 @@
-// dev/fouriis/karmagate/entity/karmagate/KarmaGateController.java
 package dev.fouriis.karmagate.entity.karmagate;
 
 import dev.fouriis.karmagate.KarmaGateMod;
@@ -7,77 +6,56 @@ import dev.fouriis.karmagate.block.karmagate.SteamEmitterBlock;
 import dev.fouriis.karmagate.entity.hologram.HologramProjectorBlockEntity;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+import java.util.UUID;
 
 /**
- * Airlock controller simplified into RW-like Mode states.
- * Binds lights + effect blocks (water/heat/steam) and holograms.
+ * Server-authoritative port of RegionGate, WaterGate, ElectricGate, and the
+ * state-derived controls from RegionGateGraphics. One Minecraft tick advances
+ * two Rain World logic steps so all source constants remain at their native
+ * 40 Hz values.
  */
 public final class KarmaGateController {
-
-    /* ===================== Modes ===================== */
     private enum Mode {
-        MiddleClosed,
-        ClosingAirLock,
-        Waiting,
-        OpeningMiddle,
-        MiddleOpen,
-        ClosingMiddle,
-        OpeningSide,
-        Closed,
-        Broken
+        MiddleClosed, ClosingAirLock, Waiting, OpeningMiddle,
+        MiddleOpen, ClosingMiddle, OpeningSide, Closed, Broken
     }
+
     private enum Side { SIDE1, SIDE2 }
 
-    // Enum for karma levels 0-5 + D
+    public enum GateType { WATER, ELECTRIC, BROKEN }
+
     public enum KarmaLevel {
-        LEVEL_0(0),
-        LEVEL_1(1),
-        LEVEL_2(2),
-        LEVEL_3(3),
-        LEVEL_4(4),
-        LEVEL_5(5),
-        LEVEL_D(-1);
+        LEVEL_0(0), LEVEL_1(1), LEVEL_2(2), LEVEL_3(3),
+        LEVEL_4(4), LEVEL_5(5), LEVEL_D(-1);
 
         private final int index;
 
         KarmaLevel(int index) { this.index = index; }
-
         public int getIndex() { return index; }
+        public float asFloat() { return index < 0 ? 1.0f : index / 5.0f; }
 
-        /** Representative normalized (0..1) value; LEVEL_D maps to 1.0f for now (treat like special high). */
-        public float asFloat() { return index < 0 ? 1.0f : (index / 5.0f); }
-
-        /** Map a normalized float (0..1) to the nearest discrete karma tier (exclusive of LEVEL_D). */
-        public static KarmaLevel fromFloat(float v) {
-            float c = Math.max(0f, Math.min(1f, v));
-            int bucket = (int)Math.floor(c * 6f); // 0..5 (since c==1 gives 6 -> clamp to 5)
-            if (bucket > 5) bucket = 5;
-            return switch (bucket) {
-                case 0 -> LEVEL_0;
-                case 1 -> LEVEL_1;
-                case 2 -> LEVEL_2;
-                case 3 -> LEVEL_3;
-                case 4 -> LEVEL_4;
-                case 5 -> LEVEL_5;
-                default -> LEVEL_0;
-            };
+        public static KarmaLevel fromFloat(float value) {
+            int bucket = Math.min(5, (int) Math.floor(clamp01(value) * 6.0f));
+            return fromIndex(bucket);
         }
 
-        /** Helper for symbol index mapping: 0..5 => levels, 6 => LEVEL_D (clamped otherwise). */
-        public static KarmaLevel fromIndex(int idx) {
-            // Support both legacy 6 sentinel AND direct -1 input for LEVEL_D so callers can
-            // naturally cycle -1..5 without remapping.
-            if (idx == -1 || idx == 6) return LEVEL_D;
-            int k = Math.max(0, Math.min(5, idx));
-            return switch (k) {
-                case 0 -> LEVEL_0;
+        public static KarmaLevel fromIndex(int index) {
+            if (index == -1 || index == 6) return LEVEL_D;
+            return switch (Math.max(0, Math.min(5, index))) {
                 case 1 -> LEVEL_1;
                 case 2 -> LEVEL_2;
                 case 3 -> LEVEL_3;
@@ -88,890 +66,851 @@ public final class KarmaGateController {
         }
     }
 
-    /* ===================== Geometry ===================== */
-    private static final double HALF_SIDE  = 6.5;
-    private static final double OFFSET_POS = 5.0;   // Side 2 (+) along controller normal
-    private static final double OFFSET_NEG = -4.0;  // Side 1 (−) along controller normal
+    private static final int RAIN_WORLD_STEPS_PER_MC_TICK = 2;
+    private static final float DOOR_CLOSE_SPEED = 1.0f / 180.0f;
+    private static final float DOOR_OPEN_SPEED = 1.0f / 220.0f;
+    private static final int RECOVERY_DURATION = 40 * 30;
+    private static final int STATIONARY_REQUIRED = 20;
+    private static final double STATIONARY_DISTANCE_SQUARED = 0.0025;
+    private static final double HALF_WIDTH = 6.5;
+    private static final double FALLBACK_SIDE_OFFSET_NEGATIVE = -4.0;
+    private static final double FALLBACK_SIDE_OFFSET_POSITIVE = 5.0;
+    private static final double DETECTION_GATE_PADDING = 2.0;
 
-    /* ===================== Timings (20 TPS) ===================== */
-    private static final int PREPARE_TICKS_MC          = 60;
-    private static final int WASH_TICKS_MC             = 100;
-    private static final int COOLDOWN_TICKS_MC         = 600;
-
-    private static final int GATE_ANIMATION_OPEN_TICKS  = 160;
-    private static final int GATE_ANIMATION_CLOSE_TICKS = 160;
-
-    private static final int CIRCULAR_STEP_TICKS = 6; // for wait light chase
-    private static final int MIDDLE_OPEN_TIMEOUT_TICKS = 600; // auto-close safety
-
-    /* ===================== Bound outer gates ===================== */
-    private BlockPos gate1 = null; // NEG
-    private BlockPos gate2 = null; // POS
-
-    /* ===================== Effect bindings (positions only) ===================== */
+    private final KarmaGateBlockEntity controllerBE;
+    private final GateLightGroup lightsSide1 = new GateLightGroup(GateLightGroup.Side.SIDE1);
+    private final GateLightGroup lightsSide2 = new GateLightGroup(GateLightGroup.Side.SIDE2);
     private final List<BlockPos> waterSide1 = new ArrayList<>();
     private final List<BlockPos> waterSide2 = new ArrayList<>();
-    private final List<BlockPos> heatSide1  = new ArrayList<>();
-    private final List<BlockPos> heatSide2  = new ArrayList<>();
+    private final List<BlockPos> heatSide1 = new ArrayList<>();
+    private final List<BlockPos> heatSide2 = new ArrayList<>();
     private final List<BlockPos> steamSide1 = new ArrayList<>();
     private final List<BlockPos> steamSide2 = new ArrayList<>();
     private final List<BlockPos> hologramSide1 = new ArrayList<>();
     private final List<BlockPos> hologramSide2 = new ArrayList<>();
+    private final Random random = new Random(1979L);
+    private final Map<UUID, Vec3d> previousPlayerPositions = new HashMap<>();
+    private final Map<UUID, Integer> stationarySteps = new HashMap<>();
 
-    /* ===================== Runtime ===================== */
-    private int prepare1 = 0;
-    private int prepare2 = 0;
-    private int washTicks = 0;
-    private int cooldownTicks = 0;
-    private int lampBlink = 0;
-
-    // door animation waits
-    private int outerAnimWait = 0;  // used in ClosingAirLock (close) and OpeningSide (open)
-    private int innerAnimWait = 0;  // used in OpeningMiddle (open) and ClosingMiddle (close)
-    private int middleOpenTicks = 0; // ticks spent in MiddleOpen
-
+    private BlockPos gate1;
+    private BlockPos gate2;
+    private GateType gateType = GateType.BROKEN;
     private Mode mode = Mode.MiddleClosed;
-    private Side entrySide = null;   // which side initiated (NEG=SIDE1 / POS=SIDE2)
+    private Side entrySide;
+    private boolean dontOpen;
+    private int startCounter;
+    private int washingCounter;
+    private int recoveryCounter;
+    private int lampBlink;
+    private boolean recoveryActive;
+    private float recoveryStartResource = 1.0f;
+    private final float[] doorClosed = { 0.0f, 1.0f, 0.0f };
+    private final float[] doorGoal = { 0.0f, 1.0f, 0.0f };
 
-    /* ===================== Lights ===================== */
-    private final GateLightGroup lightsSide1 = new GateLightGroup(GateLightGroup.Side.SIDE1);
-    private final GateLightGroup lightsSide2 = new GateLightGroup(GateLightGroup.Side.SIDE2);
+    private float waterLeft = 1.0f;
+    private final float[] waterFlow = new float[2];
+    private final float[] waterSetFlow = new float[2];
+    private float outletLag;
+    private final float[] heaterHeat = new float[2];
+    private final float[] heaterTarget = new float[2];
 
-    /* ===================== Shared Karma Levels ===================== */
+    private float batteryLeft = 1.0f;
+    private boolean batteryChanging;
+    private final boolean[] lampsOn = new boolean[4];
+    private float electricSteam;
+
     private KarmaLevel karmaSide1 = KarmaLevel.LEVEL_0;
     private KarmaLevel karmaSide2 = KarmaLevel.LEVEL_0;
-
-    /* ===================== Parent BE ===================== */
-    private final KarmaGateBlockEntity controllerBE;
 
     public KarmaGateController(KarmaGateBlockEntity controllerBE) {
         this.controllerBE = controllerBE;
     }
 
-    /* ===================== API ===================== */
-
-    public void setGates(BlockPos g1, BlockPos g2) {
-        this.gate1 = g1;
-        this.gate2 = g2;
+    public void setGates(BlockPos first, BlockPos second) {
+        World world = controllerBE.getWorld();
+        if (world == null || first == null || second == null) {
+            gate1 = first;
+            gate2 = second;
+            return;
+        }
+        Direction.Axis axis = controllerBE.getCachedState().get(KarmaGateBlock.AXIS);
+        if (axisCoordinate(first, axis) <= axisCoordinate(second, axis)) {
+            gate1 = first;
+            gate2 = second;
+        } else {
+            gate1 = second;
+            gate2 = first;
+        }
     }
 
-    /** Bind just lights (kept for compatibility). */
     public void bindLights(World world, BlockPos pos, BlockState state, int radius) {
-        Direction.Axis gateAxis = state.get(KarmaGateBlock.AXIS);
-        Direction.Axis rotatedAxis = (gateAxis == Direction.Axis.X) ? Direction.Axis.Z : Direction.Axis.X;
-        lightsSide1.bindLights(world, pos, rotatedAxis, radius);
-        lightsSide2.bindLights(world, pos, rotatedAxis, radius);
+        Direction.Axis pathAxis = state.get(KarmaGateBlock.AXIS);
+        Direction.Axis modelAxis = pathAxis == Direction.Axis.X ? Direction.Axis.Z : Direction.Axis.X;
+        lightsSide1.bindLights(world, pos, modelAxis, radius);
+        lightsSide2.bindLights(world, pos, modelAxis, radius);
         lightsSide1.allOff(world);
         lightsSide2.allOff(world);
     }
 
-    /** Bind lights and scan + bind nearby WaterStream/HeatCoil/Steam/Hologram BEs split by side. */
     public void bindLightsAndEffects(World world, BlockPos pos, BlockState state, int radius) {
         bindLights(world, pos, state, radius);
+        waterSide1.clear();
+        waterSide2.clear();
+        heatSide1.clear();
+        heatSide2.clear();
+        steamSide1.clear();
+        steamSide2.clear();
+        hologramSide1.clear();
+        hologramSide2.clear();
 
-    Direction.Axis gateAxis   = state.get(KarmaGateBlock.AXIS);
-
-        waterSide1.clear(); waterSide2.clear();
-        heatSide1.clear();  heatSide2.clear();
-        steamSide1.clear(); steamSide2.clear();
-        hologramSide1.clear(); hologramSide2.clear();
-
-    // Center of the gate along its axis: posCoord - 0.5 (gate takes 2 blocks towards -axis)
-    final double axisCenter = (gateAxis == Direction.Axis.X)
-        ? (pos.getX() - 0.5)
-        : (pos.getZ() - 0.5);
-
+        Direction.Axis axis = state.get(KarmaGateBlock.AXIS);
+        double center = axisCoordinate(pos, axis) - 0.5;
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dy = -radius; dy <= radius; dy++) {
                 for (int dz = -radius; dz <= radius; dz++) {
                     if (dx == 0 && dy == 0 && dz == 0) continue;
-                    BlockPos p = pos.add(dx, dy, dz);
-                    BlockEntity be = world.getBlockEntity(p);
-            // Classify by displacement along the GATE axis around the centered coordinate
-            double along = (gateAxis == Direction.Axis.X)
-                ? ((p.getX() + 0.5) - axisCenter)
-                : ((p.getZ() + 0.5) - axisCenter);
-            boolean isNeg = along < 0; // SIDE1 on negative side of the axis center
-
-                    if (be instanceof WaterStreamBlockEntity) {
-                        if (isNeg) waterSide1.add(p); else waterSide2.add(p);
-                    } else if (be instanceof HeatCoilBlockEntity) {
-                        if (isNeg) heatSide1.add(p); else heatSide2.add(p);
-                    } else if (be instanceof SteamEmitterBlockEntity) {
-                        if (isNeg) steamSide1.add(p); else steamSide2.add(p);
-                    } else if (be instanceof HologramProjectorBlockEntity) {
-                        if (isNeg) hologramSide1.add(p); else hologramSide2.add(p);
-                        ((HologramProjectorBlockEntity)be).bindController(this);
+                    BlockPos foundPos = pos.add(dx, dy, dz);
+                    BlockEntity found = world.getBlockEntity(foundPos);
+                    boolean negative = axisCoordinate(foundPos, axis) + 0.5 < center;
+                    if (found instanceof WaterStreamBlockEntity) {
+                        (negative ? waterSide1 : waterSide2).add(foundPos);
+                    } else if (found instanceof HeatCoilBlockEntity) {
+                        (negative ? heatSide1 : heatSide2).add(foundPos);
+                    } else if (found instanceof SteamEmitterBlockEntity) {
+                        (negative ? steamSide1 : steamSide2).add(foundPos);
+                    } else if (found instanceof HologramProjectorBlockEntity hologram) {
+                        (negative ? hologramSide1 : hologramSide2).add(foundPos);
+                        hologram.bindController(this);
                     }
                 }
             }
         }
 
-        // Apply current shared karma levels to all found holograms
+        gateType = inferGateType();
+
         applyKarmaToList(world, hologramSide1, karmaSide1);
         applyKarmaToList(world, hologramSide2, karmaSide2);
-
-        KarmaGateMod.LOGGER.info("[GateCtrl @{}] bound effects: water(S1={}, S2={}), heat(S1={}, S2={}), steam(S1={}, S2={}), holo(S1={}, S2={})",
-                controllerBE.getPos(), waterSide1.size(), waterSide2.size(), heatSide1.size(), heatSide2.size(), steamSide1.size(), steamSide2.size(), hologramSide1.size(), hologramSide2.size());
+        KarmaGateMod.LOGGER.info(
+                "[GateCtrl @{}] type={} water(S1={},S2={}) heat(S1={},S2={}) steam(S1={},S2={}) lights={} holograms(S1={},S2={})",
+                controllerBE.getPos(), gateType, waterSide1.size(), waterSide2.size(),
+                heatSide1.size(), heatSide2.size(), steamSide1.size(), steamSide2.size(),
+                lightsSide1.getRefs().size() + lightsSide2.getRefs().size(),
+                hologramSide1.size(), hologramSide2.size());
+        if (gateType == GateType.BROKEN) {
+            KarmaGateMod.LOGGER.warn("[GateCtrl @{}] component set is ambiguous/incomplete; gate is inert",
+                    controllerBE.getPos());
+        }
     }
 
     public void resetOnBind() {
-        prepare1 = prepare2 = 0;
-        washTicks = 0;
-        cooldownTicks = 0;
-        lampBlink = 0;
-        outerAnimWait = innerAnimWait = 0;
-    middleOpenTicks = 0;
-        entrySide = null;
-        mode = Mode.MiddleClosed;
-        lightsSide1.allOff(controllerBE.getWorld());
-        lightsSide2.allOff(controllerBE.getWorld());
-        controllerBE.setOpen(false);
-        stopAllWater(controllerBE.getWorld());
-        stopAllHeat(controllerBE.getWorld());
-        stopAllSteam(controllerBE.getWorld());
-        //reset holograms
-        setHologramLowPower(controllerBE.getWorld(), false, false);
-        setHologramTargetLevels(controllerBE.getWorld(), 0.0f, 0.0f);
+        resetSimulation();
+        applyOutputs(controllerBE.getWorld());
     }
 
-    /* ===================== Tick ===================== */
+    private void resetSimulation() {
+        mode = gateType == GateType.BROKEN ? Mode.Broken : Mode.MiddleClosed;
+        entrySide = null;
+        dontOpen = false;
+        startCounter = 0;
+        washingCounter = 0;
+        recoveryCounter = 0;
+        lampBlink = 0;
+        recoveryActive = false;
+        recoveryStartResource = 1.0f;
+        doorClosed[0] = doorGoal[0] = 0.0f;
+        doorClosed[1] = doorGoal[1] = 1.0f;
+        doorClosed[2] = doorGoal[2] = 0.0f;
+        waterLeft = 1.0f;
+        waterFlow[0] = waterFlow[1] = 0.0f;
+        waterSetFlow[0] = waterSetFlow[1] = 0.0f;
+        outletLag = 0.0f;
+        heaterHeat[0] = heaterHeat[1] = 0.0f;
+        heaterTarget[0] = heaterTarget[1] = 0.0f;
+        batteryLeft = 1.0f;
+        batteryChanging = false;
+        lampsOn[0] = lampsOn[1] = lampsOn[2] = lampsOn[3] = false;
+        electricSteam = 0.0f;
+        previousPlayerPositions.clear();
+        stationarySteps.clear();
+    }
 
     public void tick(World world, BlockPos pos, BlockState state) {
         if (world == null || world.isClient) return;
+        Detection detection = detectPlayers(world, pos, state);
+        for (int step = 0; step < RAIN_WORLD_STEPS_PER_MC_TICK; step++) {
+            simulationStep(detection);
+        }
+        applyOutputs(world);
+        controllerBE.markDirty();
+    }
+
+    private void simulationStep(Detection detection) {
         lampBlink++;
+        if (gateType == GateType.WATER) updateWaterGate();
+        else if (gateType == GateType.ELECTRIC) updateElectricGate();
+        updateGraphicsControls();
+        updateBaseGate(detection);
+        updateDoors();
+        updateRecovery();
+    }
 
-        // orientation
-        Direction.Axis gateAxis   = state.get(KarmaGateBlock.AXIS);
-        // Axis-centered reference along the gate axis
-        double centerX = pos.getX() + 0.5;
-        double centerZ = pos.getZ() + 0.5;
-        double axisCenter = (gateAxis == Direction.Axis.X) ? (pos.getX() - 0.5) : (pos.getZ() - 0.5);
-
-        // Determine gate coordinates along axis (center points)
-        Double g1 = (gate1 != null) ? ((gateAxis == Direction.Axis.X) ? (gate1.getX() + 0.5) : (gate1.getZ() + 0.5)) : null;
-        Double g2 = (gate2 != null) ? ((gateAxis == Direction.Axis.X) ? (gate2.getX() + 0.5) : (gate2.getZ() + 0.5)) : null;
-
-        // Fixed width (perpendicular to axis), dynamic length along axis between controller and outer gate
-    double widthHalf = HALF_SIDE;
-    double pad = 2.0; // reduce detection length by 2 blocks toward each side gate
-
-        // Side 1 (negative) rectangle
-        double s1HalfAxis = HALF_SIDE; // fallback
-        double s1AxisMid = axisCenter + OFFSET_NEG;
-        if (g1 != null) {
-            double len = Math.abs(g1 - axisCenter);
-            double usable = Math.max(0.0, len - pad);
-            s1HalfAxis = Math.max(3.0, usable * 0.5);
-            double sign = (g1 >= axisCenter) ? 1.0 : -1.0; // should be -1 for side1
-            // mid is axisCenter displaced toward g1 by half usable
-            double midAxis = axisCenter + sign * (usable * 0.5);
-            if (gateAxis == Direction.Axis.X) { s1AxisMid = midAxis; } else { s1AxisMid = midAxis; }
-        }
-
-        // Side 2 (positive) rectangle
-        double s2HalfAxis = HALF_SIDE; // fallback
-        double s2AxisMid = axisCenter + OFFSET_POS;
-        if (g2 != null) {
-            double len = Math.abs(g2 - axisCenter);
-            double usable = Math.max(0.0, len - pad);
-            s2HalfAxis = Math.max(3.0, usable * 0.5);
-            double sign = (g2 >= axisCenter) ? 1.0 : -1.0; // should be +1 for side2
-            double midAxis = axisCenter + sign * (usable * 0.5);
-            if (gateAxis == Direction.Axis.X) { s2AxisMid = midAxis; } else { s2AxisMid = midAxis; }
-        }
-
-        // Build per-axis rectangle centers and half extents
-        double s1cx, s1cz, s2cx, s2cz, cHalfAxis;
-        if (gateAxis == Direction.Axis.X) {
-            s1cx = s1AxisMid; s1cz = centerZ;
-            s2cx = s2AxisMid; s2cz = centerZ;
-            cHalfAxis = Math.max(2.5, Math.min(s1HalfAxis, s2HalfAxis) - 2.0);
-        } else {
-            s1cx = centerX; s1cz = s1AxisMid;
-            s2cx = centerX; s2cz = s2AxisMid;
-            cHalfAxis = Math.max(2.5, Math.min(s1HalfAxis, s2HalfAxis) - 2.0);
-        }
-
-    boolean inSide1 = anyPlayerInRectForSide(world,
-                s1cx, s1cz,
-                (gateAxis == Direction.Axis.X) ? s1HalfAxis : widthHalf,
-        (gateAxis == Direction.Axis.X) ? widthHalf : s1HalfAxis,
-        Side.SIDE1);
-
-    boolean inSide2 = anyPlayerInRectForSide(world,
-                s2cx, s2cz,
-                (gateAxis == Direction.Axis.X) ? s2HalfAxis : widthHalf,
-        (gateAxis == Direction.Axis.X) ? widthHalf : s2HalfAxis,
-        Side.SIDE2);
-
-        boolean inCenter = anyPlayerInRect(world,
-                centerX, centerZ,
-                (gateAxis == Direction.Axis.X) ? cHalfAxis : widthHalf,
-                (gateAxis == Direction.Axis.X) ? widthHalf : cHalfAxis);
-
-        /* cooldown gates all */
-        if (cooldownTicks > 0) {
-            cooldownTicks--;
-            lightsSide1.allOff(world);
-            lightsSide2.allOff(world);
-            controllerBE.setOpen(false);
-            if (cooldownTicks == 0 && mode == Mode.Closed) {
-                mode = Mode.MiddleClosed;
-                setHologramTargetLevels(world, 0.0f, 0.0f);
-                setHologramLowPower(world, false, false);
-                KarmaGateMod.LOGGER.info("[GateCtrl @{}] cooldown done → MiddleClosed", controllerBE.getPos());
-            }
-            return;
-        }
-
+    private void updateBaseGate(Detection detection) {
         switch (mode) {
             case MiddleClosed -> {
-                // ignore if both sides occupied or someone idling in center
-                if ((inSide1 && inSide2) || inCenter) {
-                    prepare1 = prepare2 = 0;
-                    lightsSide1.allOff(world);
-                    lightsSide2.allOff(world);
-                    controllerBE.setOpen(false);
-                    break;
-                }
-
-                // prepare gating
-                prepare1 = inSide1 && !inSide2 ? Math.min(prepare1 + 1, PREPARE_TICKS_MC) : 0;
-                prepare2 = inSide2 && !inSide1 ? Math.min(prepare2 + 1, PREPARE_TICKS_MC) : 0;
-
-                if (prepare1 > 0 && prepare2 == 0) {
-                    lightsSide1.blinkBottomTopAlternate(world, lampBlink);
-                    lightsSide2.allOff(world);
-                    setHologramTargetLevelSide2(world, 1.0f);
-                    setWaterFlowForSide(world, opposite(Side.SIDE1), 1.0f);
-                } else if (prepare2 > 0 && prepare1 == 0) {
-                    lightsSide2.blinkBottomTopAlternate(world, lampBlink);
-                    lightsSide1.allOff(world);
-                    setHologramTargetLevelSide1(world, 1.0f);
-                    setWaterFlowForSide(world, opposite(Side.SIDE2), 1.0f);
-                } else {
-                    lightsSide1.allOff(world);
-                    lightsSide2.allOff(world);
-                    // stop all water
-                    stopAllWater(world);
-                    // reset hologram targets
-                    setHologramTargetLevels(world, 0.0f, 0.0f);
-                    setHologramLowPower(world, false, false);
-                }
-
-                if (prepare1 >= PREPARE_TICKS_MC) {
-                    entrySide = Side.SIDE1;
-                    setOuterOpen(world, entrySide, false);
-                    outerAnimWait = GATE_ANIMATION_CLOSE_TICKS;
-                    controllerBE.setOpen(false);
-                    washTicks = 0;
-                    lightsSide1.allOff(world); lightsSide2.allOff(world);
-                    mode = Mode.ClosingAirLock;
-                    setWaterFlowForSide(world, opposite(entrySide), 1.0f);
-                    setHeatEnabledForSide(world, entrySide, true);
-                    setHologramTargetLevelSide1(world, 1.0f);
-                    KarmaGateMod.LOGGER.info("[GateCtrl @{}] PREP S1 → ClosingAirLock", controllerBE.getPos());
-                } else if (prepare2 >= PREPARE_TICKS_MC) {
-                    entrySide = Side.SIDE2;
-                    setOuterOpen(world, entrySide, false);
-                    outerAnimWait = GATE_ANIMATION_CLOSE_TICKS;
-                    controllerBE.setOpen(false);
-                    washTicks = 0;
-                    lightsSide1.allOff(world); lightsSide2.allOff(world);
-                    mode = Mode.ClosingAirLock;
-                    setWaterFlowForSide(world, opposite(entrySide), 1.0f);
-                    setHeatEnabledForSide(world, entrySide, true);
-                    setHologramTargetLevelSide2(world, 1.0f);
-                    KarmaGateMod.LOGGER.info("[GateCtrl @{}] PREP S2 → ClosingAirLock", controllerBE.getPos());
-                }
-            }
-
-            case ClosingAirLock -> {
-                if (outerAnimWait > 0) { outerAnimWait--; break; }
-
-                mode = Mode.Waiting;
-                setWaterFlowForSide(world, entrySide, 0.7f);
-                setWaterFlowForSide(world, opposite(entrySide), 0.0f);
-                setSteamEnabledForSide(world, entrySide, true);
-                KarmaGateMod.LOGGER.info("[GateCtrl @{}] outer closed → Waiting", controllerBE.getPos());
-            }
-
-            case Waiting -> {
-                lightsSide1.allOff(world); lightsSide2.allOff(world);
-
-                washTicks++;
-                if (washTicks >= WASH_TICKS_MC) {
-                    controllerBE.setOpen(true);                 // open middle
-                    innerAnimWait = GATE_ANIMATION_OPEN_TICKS;  // wait for anim
-                    mode = Mode.OpeningMiddle;
-
-                    // Turn off opposite water, turn off entry heat
-                    setWaterFlowForSide(world, entrySide, 0.0f);
-                    setWaterFlowForSide(world, opposite(entrySide), 1.0f);
-                    setHeatEnabledForSide(world, entrySide, false);
-                    setSteamEnabledForSide(world, entrySide, false);
-
-                    KarmaGateMod.LOGGER.info("[GateCtrl @{}] Waiting done → OpeningMiddle", controllerBE.getPos());
-                }
-            }
-
-            case OpeningMiddle -> {
-                if (innerAnimWait > 0) { innerAnimWait--; break; }
-                mode = Mode.MiddleOpen;
-                setWaterFlowForSide(world, opposite(entrySide), 0.0f);
-                middleOpenTicks = 0; // start timeout counter
-                KarmaGateMod.LOGGER.info("[GateCtrl @{}] inner open → MiddleOpen", controllerBE.getPos());
-            }
-
-            case MiddleOpen -> {
-                // idle lights chase while inner is open
-                chaseCircularWaitSequence(world);
-                // advance timeout counter
-                middleOpenTicks++;
-
-                // leave when center is empty (and the player progressed to the opposite side)
-                boolean entryOccupied = (entrySide == Side.SIDE1) ? inSide1 : inSide2;
-                boolean oppositeOccupied = (entrySide == Side.SIDE1) ? inSide2 : inSide1;
-                boolean allCrossed = !entryOccupied && !inCenter && oppositeOccupied;
-                boolean timeout = middleOpenTicks >= MIDDLE_OPEN_TIMEOUT_TICKS;
-
-                if (allCrossed || timeout) {
-                    controllerBE.setOpen(false);                // close middle
-                    innerAnimWait = GATE_ANIMATION_CLOSE_TICKS; // wait for anim
-                    mode = Mode.ClosingMiddle;
-
-                    // Water ON on entry side while closing middle
-                    setWaterFlowForSide(world, entrySide, 1.0f);
-
-                    if (timeout) {
-                        KarmaGateMod.LOGGER.info("[GateCtrl @{}] timeout {} ticks → ClosingMiddle", controllerBE.getPos(), MIDDLE_OPEN_TIMEOUT_TICKS);
+                Side occupied = detection.startingSide();
+                if (occupied != null) {
+                    entrySide = occupied;
+                    boolean still = occupied == Side.SIDE1
+                            ? detection.side1Stationary : detection.side2Stationary;
+                    if (!dontOpen && still && energyEnoughToOpen() && isSideEnabled(occupied)) {
+                        startCounter++;
+                        if (startCounter > 60) {
+                            mode = Mode.ClosingAirLock;
+                            doorGoal[index(occupied)] = 1.0f;
+                            startCounter = 0;
+                            KarmaGateMod.LOGGER.info("[GateCtrl @{}] MiddleClosed -> ClosingAirLock ({})",
+                                    controllerBE.getPos(), occupied);
+                        }
                     } else {
-                        KarmaGateMod.LOGGER.info("[GateCtrl @{}] all crossed → ClosingMiddle", controllerBE.getPos());
+                        startCounter = 0;
                     }
+                } else {
+                    entrySide = null;
+                    startCounter = 0;
+                    if (!detection.anyInsideGate()) dontOpen = false;
                 }
             }
-
+            case ClosingAirLock -> {
+                if (allDoorsInPosition()) {
+                    washingCounter = 0;
+                    mode = Mode.Waiting;
+                }
+            }
+            case Waiting -> {
+                washingCounter++;
+                if (washingCounter > 400) {
+                    mode = Mode.OpeningMiddle;
+                    doorGoal[1] = 0.0f;
+                }
+            }
+            case OpeningMiddle -> {
+                if (allDoorsInPosition()) mode = Mode.MiddleOpen;
+            }
+            case MiddleOpen -> {
+                if (entrySide != null && detection.allThrough(entrySide)) {
+                    doorGoal[1] = 1.0f;
+                    mode = Mode.ClosingMiddle;
+                }
+            }
             case ClosingMiddle -> {
-                lightsSide1.blinkAll(world, lampBlink);
-                lightsSide2.blinkAll(world, lampBlink);
-
-                if (innerAnimWait > 0) { innerAnimWait--; break; }
-
-                // Open outer on entry side
-                setOuterOpen(world, entrySide, true);
-                outerAnimWait = GATE_ANIMATION_OPEN_TICKS;
-                mode = Mode.OpeningSide;
-
-                // Stop water on entry side; stop heat on opposite side
-                setWaterFlowForSide(world, entrySide, 0.5f);
-                setHeatEnabledForSide(world, opposite(entrySide), false);
-
-
-                KarmaGateMod.LOGGER.info("[GateCtrl @{}] inner closed → OpeningSide ({})", controllerBE.getPos(), entrySide);
+                if (allDoorsInPosition()) {
+                    mode = Mode.OpeningSide;
+                    doorGoal[0] = 0.0f;
+                    doorGoal[2] = 0.0f;
+                }
             }
-
             case OpeningSide -> {
-                lightsSide1.blinkAll(world, lampBlink);
-                lightsSide2.blinkAll(world, lampBlink);
-                if (outerAnimWait > 0) { outerAnimWait--; break; }
-                // once outer is open, enter cooldown
-                cooldownTicks = COOLDOWN_TICKS_MC;
-                prepare1 = prepare2 = 0;
-                washTicks = 0;
-                lightsSide1.allOff(world); lightsSide2.allOff(world);
-                mode = Mode.Closed;
-                setWaterFlowForSide(world, entrySide, 0.0f);
-                setHologramTargetLevels(world, 0.65f, 0.65f);
-                setHologramLowPower(world, true, true);
-                KarmaGateMod.LOGGER.info("[GateCtrl @{}] outer open → Closed (cooldown={})", controllerBE.getPos(), COOLDOWN_TICKS_MC);
+                if (allDoorsInPosition()) {
+                    mode = Mode.Closed;
+                    dontOpen = true;
+                    recoveryActive = true;
+                    recoveryCounter = 0;
+                    recoveryStartResource = gateType == GateType.WATER ? waterLeft : batteryLeft;
+                }
             }
+            case Closed, Broken -> { }
+        }
+    }
 
+    private void updateWaterGate() {
+        int wash = index(entrySide == null ? Side.SIDE1 : entrySide);
+        int outlet = 1 - wash;
+        float pressure = waterPressure();
+        switch (mode) {
+            case MiddleClosed -> waterSetFlow[outlet] =
+                    inverseLerp(0.0f, 60.0f, startCounter) * 0.5f * pressure;
+            case ClosingAirLock -> {
+                waterSetFlow[outlet] = pressure;
+                waterRunning(1.0f);
+            }
+            case Waiting -> {
+                washingCounter++;
+                waterSetFlow[wash] = (float) Math.pow(
+                        inverseLerp(0.0f, 160.0f, washingCounter), 1.5) * 0.5f * pressure;
+                outletLag = Math.max(0.0f, outletLag - 1.0f / 60.0f);
+                waterSetFlow[outlet] = outletLag * pressure;
+                if (washingCounter > 400) waterSetFlow[wash] = 0.0f;
+            }
+            case OpeningMiddle -> {
+                waterSetFlow[outlet] = pressure;
+                waterRunning(1.0f);
+                if (allDoorsInPosition()) outletLag = 1.0f;
+            }
+            case MiddleOpen -> {
+                outletLag = Math.max(0.0f, outletLag - 1.0f / 60.0f);
+                waterSetFlow[outlet] = outletLag * pressure;
+            }
+            case ClosingMiddle -> {
+                waterSetFlow[wash] = pressure;
+                waterSetFlow[outlet] = 0.0f;
+                waterRunning(1.0f);
+            }
+            case OpeningSide -> {
+                waterSetFlow[wash] = pressure;
+                waterSetFlow[outlet] = 0.0f;
+                waterRunning(1.0f);
+                if (allDoorsInPosition()) {
+                    waterSetFlow[wash] = 0.0f;
+                    outletLag = 1.0f;
+                }
+            }
             case Closed -> {
-                // cooldown handled at top
+                outletLag = Math.max(0.0f, outletLag - 1.0f / 60.0f);
+                waterSetFlow[wash] = outletLag > 0.05f ? outletLag * pressure : 0.0f;
+                waterSetFlow[outlet] = 0.0f;
+                waterRunning(outletLag * 0.5f);
             }
-
-            case Broken -> {
-                // intentionally inert
-            }
+            case Broken -> { }
+        }
+        for (int i = 0; i < 2; i++) {
+            float rate = waterSetFlow[i] > waterFlow[i] ? 1.0f / 40.0f : 1.0f / 60.0f;
+            waterFlow[i] = moveTowards(waterFlow[i], waterSetFlow[i], rate);
         }
     }
 
-    /* ===================== DRY Helpers (water/heat/steam) ===================== */
-
-    private List<BlockPos> getWaterList(Side side) {
-        return side == Side.SIDE1 ? waterSide1 : waterSide2;
-    }
-    private List<BlockPos> getHeatList(Side side) {
-        return side == Side.SIDE1 ? heatSide1 : heatSide2;
-    }
-    private List<BlockPos> getSteamList(Side side) {
-        return side == Side.SIDE1 ? steamSide1 : steamSide2;
-    }
-    private Side opposite(Side s) { return s == Side.SIDE1 ? Side.SIDE2 : Side.SIDE1; }
-
-    /** Set water flow for all streams on a side; also sync the ENABLED state based on flow. */
-    private void setWaterFlowForSide(World world, Side side, float flow) {
-        setWaterFlow(world, getWaterList(side), flow);
-    }
-    private void setWaterFlow(World world, List<BlockPos> list, float flow) {
-        //KarmaGateMod.LOGGER.info("[GateCtrl @{}] setWaterFlow: targets={}, flow={}, enable={}", controllerBE.getPos(), list.size(), String.format("%.2f", flow), enable);
-        for (BlockPos p : list) {
-            BlockEntity be = world.getBlockEntity(p);
-            if (be instanceof WaterStreamBlockEntity ws) {
-                ws.setTargetFlow(flow);
-            }
+    private void updateElectricGate() {
+        batteryChanging = false;
+        for (int i = 0; i < lampsOn.length; i++) {
+            if (random.nextFloat() < 1.0f / 60.0f) lampsOn[i] = false;
         }
-    }
-
-    /** Enable/disable all heat coils on a side. */
-    private void setHeatEnabledForSide(World world, Side side, boolean enabled) {
-        enableHeat(world, getHeatList(side), enabled);
-    }
-
-    /** Enable/disable all steam emitters on a side. */
-    private void setSteamEnabledForSide(World world, Side side, boolean enabled) {
-        enableSteam(world, getSteamList(side), enabled);
-    }
-
-    private void enableHeat(World world, List<BlockPos> list, boolean enabled) {
-        for (BlockPos p : list) {
-            BlockEntity be = world.getBlockEntity(p);
-            if (be instanceof HeatCoilBlockEntity coil) {
-                coil.setEnabled(enabled);
-            }
-        }
-    }
-
-    private void enableSteam(World world, List<BlockPos> list, boolean enabled) {
-        for (BlockPos p : list) {
-            BlockEntity be = world.getBlockEntity(p);
-            if (be instanceof SteamEmitterBlockEntity emitter) {
-                emitter.setEnabled(enabled);
-                // Also mirror ENABLED into blockstate so client-side ticks run particles/sound
-                BlockState s = world.getBlockState(p);
-                if (s.getBlock() instanceof SteamEmitterBlock) {
-                    boolean cur = s.get(SteamEmitterBlock.ENABLED);
-                    if (cur != enabled) {
-                        world.setBlockState(p, s.with(SteamEmitterBlock.ENABLED, enabled), 3);
+        switch (mode) {
+            case MiddleClosed -> {
+                if (startCounter > 0 && entrySide != null) {
+                    boolean firstHalf = lampBlink % 20 < 10;
+                    if (entrySide == Side.SIDE1) {
+                        lampsOn[1] = firstHalf;
+                        lampsOn[2] = !firstHalf;
+                        lampsOn[0] = lampsOn[3] = false;
+                    } else {
+                        lampsOn[0] = firstHalf;
+                        lampsOn[3] = !firstHalf;
+                        lampsOn[1] = lampsOn[2] = false;
                     }
                 }
             }
+            case ClosingAirLock, OpeningMiddle -> batteryRunning(1.0f);
+            case Waiting -> washingCounter++;
+            case MiddleOpen -> {
+                int active = (lampBlink % 40) / 10;
+                for (int i = 0; i < 4; i++) lampsOn[i] = false;
+                lampsOn[entrySide == Side.SIDE1 ? active : 3 - active] = true;
+            }
+            case ClosingMiddle, OpeningSide -> {
+                batteryRunning(1.0f);
+                boolean on = lampBlink % 20 < 10;
+                for (int i = 0; i < 4; i++) lampsOn[i] = on;
+            }
+            case Closed, Broken -> { }
         }
     }
 
-    private void stopAllWater(World world) {
-        setWaterFlow(world, waterSide1, 0.0f);
-        setWaterFlow(world, waterSide2, 0.0f);
-    }
-    private void stopAllHeat(World world) {
-        enableHeat(world, heatSide1, false);
-        enableHeat(world, heatSide2, false);
-    }
-    private void stopAllSteam(World world) {
-        enableSteam(world, steamSide1, false);
-        enableSteam(world, steamSide2, false);
-    }
-
-    /** Check if any player is inside an axis-aligned rectangle centered at (cx,cz) with half extents (hx,hz). */
-    private static boolean anyPlayerInRect(World world, double cx, double cz, double hx, double hz) {
-        if (world == null) return false;
-        double ahx = Math.max(0.0, Math.abs(hx));
-        double ahz = Math.max(0.0, Math.abs(hz));
-        // If it's a square, delegate to the existing square helper for consistency
-        if (Math.abs(ahx - ahz) < 1e-6) {
-            return KarmaGateBlockEntity.anyPlayerInSquare(world, cx, cz, ahx);
+    private void updateGraphicsControls() {
+        if (gateType == GateType.WATER) {
+            for (int i = 0; i < 2; i++) {
+                boolean selected = entrySide != null && i == index(entrySide);
+                if ((mode == Mode.ClosingAirLock || mode == Mode.Waiting) && selected) {
+                    heaterTarget[i] = Math.min(1.0f, heaterTarget[i] + 1.0f / 600.0f);
+                } else {
+                    heaterTarget[i] = Math.max(0.0f, heaterTarget[i] - 1.0f / 600.0f);
+                }
+                heaterHeat[i] = lerp(heaterHeat[i], heaterTarget[i], 0.7f);
+            }
+        } else if (gateType == GateType.ELECTRIC) {
+            electricSteam = mode == Mode.Waiting && washingCounter > 0
+                    ? Math.min(1.0f, electricSteam + 0.025f)
+                    : Math.max(0.0f, electricSteam - 0.025f);
         }
-        double minX = cx - ahx, maxX = cx + ahx;
-        double minZ = cz - ahz, maxZ = cz + ahz;
-        for (net.minecraft.entity.player.PlayerEntity p : world.getPlayers()) {
-            if (!playerEligibleForDetection(p)) continue; // ignore spectators and non-eligible players
-            double px = p.getX();
-            double pz = p.getZ();
-            if (px >= minX && px <= maxX && pz >= minZ && pz <= maxZ) return true;
+    }
+
+    private void updateDoors() {
+        for (int i = 0; i < doorClosed.length; i++) {
+            float speed = doorClosed[i] > doorGoal[i] ? DOOR_OPEN_SPEED : DOOR_CLOSE_SPEED;
+            doorClosed[i] = moveTowards(doorClosed[i], doorGoal[i], speed);
         }
-        return false;
     }
 
-    /** Basic filter to decide if a player should be considered by gate detection. */
-    private static boolean playerEligibleForDetection(net.minecraft.entity.player.PlayerEntity p) {
-        // Ignore spectators entirely; hook for future karma check
-        if (p.isSpectator()) return false;
-        return passesKarmaPlaceholder(p);
+    private void updateRecovery() {
+        if (!recoveryActive || mode != Mode.Closed) return;
+        recoveryCounter++;
+        float progress = clamp01(recoveryCounter / (float) RECOVERY_DURATION);
+        if (gateType == GateType.WATER) waterLeft = lerp(recoveryStartResource, 1.0f, progress);
+        else if (gateType == GateType.ELECTRIC) batteryLeft = lerp(recoveryStartResource, 1.0f, progress);
+        if (recoveryCounter >= RECOVERY_DURATION) resetSimulation();
     }
 
-    /** Placeholder for karma checks; always true for now. Wire actual karma logic later. */
-    private static boolean passesKarmaPlaceholder(net.minecraft.entity.player.PlayerEntity p) {
+    private void applyOutputs(World world) {
+        if (world == null) return;
+        setGateOpen(world, gate1, doorGoal[0] < 0.5f);
+        controllerBE.setOpen(doorGoal[1] < 0.5f);
+        setGateOpen(world, gate2, doorGoal[2] < 0.5f);
+
+        if (gateType == GateType.WATER) {
+            setWaterFlow(world, waterSide1, waterFlow[0]);
+            setWaterFlow(world, waterSide2, waterFlow[1]);
+            setHeaterHeat(world, heatSide1, heaterHeat[0]);
+            setHeaterHeat(world, heatSide2, heaterHeat[1]);
+            setSteamFlow(world, steamSide1, 0.0f);
+            setSteamFlow(world, steamSide2, 0.0f);
+            lightsSide1.allOff(world);
+            lightsSide2.allOff(world);
+        } else if (gateType == GateType.ELECTRIC) {
+            setWaterFlow(world, waterSide1, 0.0f);
+            setWaterFlow(world, waterSide2, 0.0f);
+            setHeaterHeat(world, heatSide1, 0.0f);
+            setHeaterHeat(world, heatSide2, 0.0f);
+            setSteamFlow(world, steamSide1, electricSteam);
+            setSteamFlow(world, steamSide2, electricSteam);
+            lightsSide1.setPairStates(world, lampsOn[1], lampsOn[2]);
+            lightsSide2.setPairStates(world, lampsOn[0], lampsOn[3]);
+        } else {
+            stopAllEffects(world);
+            lightsSide1.allOff(world);
+            lightsSide2.allOff(world);
+        }
+        applyHologramControls(world);
+    }
+
+    private void applyHologramControls(World world) {
+        boolean lowPower = !energyEnoughToOpen();
+        float side1Fade;
+        float side2Fade;
+        if (mode == Mode.MiddleClosed) {
+            side1Fade = 1.0f;
+            side2Fade = 1.0f;
+            if (entrySide != null && startCounter > 0) {
+                if (gateType == GateType.WATER) {
+                    float selectedFade = inverseLerp(40.0f, 0.0f, startCounter);
+                    if (entrySide == Side.SIDE1) side1Fade = selectedFade;
+                    else side2Fade = selectedFade;
+                } else if (gateType == GateType.ELECTRIC) {
+                    float preparingFade = inverseLerp(10.0f, 0.0f, startCounter);
+                    side1Fade = lampsOn[1] || lampsOn[2] ? 0.0f : preparingFade;
+                    side2Fade = lampsOn[0] || lampsOn[3] ? 0.0f : preparingFade;
+                }
+            }
+        } else if (mode == Mode.Closed) {
+            side1Fade = side2Fade = lowPower ? 0.82f : 1.0f;
+        } else {
+            side1Fade = side2Fade = 0.0f;
+        }
+        setHologramTargetLevels(world, 1.0f - side1Fade, 1.0f - side2Fade);
+        setHologramLowPower(world, lowPower, lowPower);
+    }
+
+    private Detection detectPlayers(World world, BlockPos pos, BlockState state) {
+        updateStationaryPlayers(world);
+        Direction.Axis axis = state.get(KarmaGateBlock.AXIS);
+        double centerX = pos.getX() + 0.5;
+        double centerZ = pos.getZ() + 0.5;
+        double axisCenter = axis == Direction.Axis.X ? pos.getX() - 0.5 : pos.getZ() - 0.5;
+        double gate1Coordinate = gate1 == null ? Double.NaN : axisCoordinate(gate1, axis) + 0.5;
+        double gate2Coordinate = gate2 == null ? Double.NaN : axisCoordinate(gate2, axis) + 0.5;
+
+        Region side1 = makeSideRegion(axis, centerX, centerZ, axisCenter, gate1Coordinate,
+                FALLBACK_SIDE_OFFSET_NEGATIVE);
+        Region side2 = makeSideRegion(axis, centerX, centerZ, axisCenter, gate2Coordinate,
+                FALLBACK_SIDE_OFFSET_POSITIVE);
+        double centerHalfAxis = Math.max(2.5,
+                Math.min(side1.axisHalf, side2.axisHalf) - 2.0);
+        Region center = axis == Direction.Axis.X
+                ? new Region(centerX, centerZ, centerHalfAxis, HALF_WIDTH, centerHalfAxis)
+                : new Region(centerX, centerZ, HALF_WIDTH, centerHalfAxis, centerHalfAxis);
+
+        boolean in1 = false, in2 = false, inCenter = false;
+        boolean stationary1 = false, stationary2 = false;
+        for (PlayerEntity player : world.getPlayers()) {
+            if (!playerEligible(player)) continue;
+            boolean p1 = isSideEnabled(Side.SIDE1) && side1.contains(player);
+            boolean p2 = isSideEnabled(Side.SIDE2) && side2.contains(player);
+            boolean pc = center.contains(player);
+            in1 |= p1;
+            in2 |= p2;
+            inCenter |= pc;
+            int still = stationarySteps.getOrDefault(player.getUuid(), 0);
+            stationary1 |= p1 && still >= STATIONARY_REQUIRED;
+            stationary2 |= p2 && still >= STATIONARY_REQUIRED;
+        }
+        return new Detection(in1, in2, inCenter, stationary1, stationary2);
+    }
+
+    private void updateStationaryPlayers(World world) {
+        Set<UUID> seen = new HashSet<>();
+        for (PlayerEntity player : world.getPlayers()) {
+            if (!playerEligible(player)) continue;
+            UUID id = player.getUuid();
+            seen.add(id);
+            Vec3d position = player.getPos();
+            Vec3d previous = previousPlayerPositions.put(id, position);
+            boolean still = previous != null
+                    && previous.squaredDistanceTo(position) <= STATIONARY_DISTANCE_SQUARED;
+            stationarySteps.put(id, still
+                    ? Math.min(120, stationarySteps.getOrDefault(id, 0) + RAIN_WORLD_STEPS_PER_MC_TICK)
+                    : 0);
+        }
+        previousPlayerPositions.keySet().removeIf(id -> !seen.contains(id));
+        stationarySteps.keySet().removeIf(id -> !seen.contains(id));
+    }
+
+    private Region makeSideRegion(Direction.Axis axis, double centerX, double centerZ,
+                                  double axisCenter, double gateCoordinate, double fallbackOffset) {
+        double halfAxis = HALF_WIDTH;
+        double middle = axisCenter + fallbackOffset;
+        if (!Double.isNaN(gateCoordinate)) {
+            double usable = Math.max(0.0, Math.abs(gateCoordinate - axisCenter) - DETECTION_GATE_PADDING);
+            halfAxis = Math.max(3.0, usable * 0.5);
+            middle = axisCenter + Math.signum(gateCoordinate - axisCenter) * usable * 0.5;
+        }
+        return axis == Direction.Axis.X
+                ? new Region(middle, centerZ, halfAxis, HALF_WIDTH, halfAxis)
+                : new Region(centerX, middle, HALF_WIDTH, halfAxis, halfAxis);
+    }
+
+    private boolean energyEnoughToOpen() {
+        return gateType == GateType.WATER ? waterLeft > 0.5f
+                : gateType == GateType.ELECTRIC && batteryLeft > 0.5f;
+    }
+
+    private GateType inferGateType() {
+        boolean hasLights = !lightsSide1.getRefs().isEmpty() || !lightsSide2.getRefs().isEmpty();
+        boolean hasSteam = !steamSide1.isEmpty() || !steamSide2.isEmpty();
+        boolean hasWater = !waterSide1.isEmpty() || !waterSide2.isEmpty();
+        boolean hasHeaters = !heatSide1.isEmpty() || !heatSide2.isEmpty();
+        boolean electric = hasLights && hasSteam;
+        boolean water = hasWater && hasHeaters;
+        return electric == water ? GateType.BROKEN
+                : electric ? GateType.ELECTRIC : GateType.WATER;
+    }
+
+    private float waterPressure() {
+        return (float) Math.pow(inverseLerp(0.0f, 0.5f, waterLeft), 0.6);
+    }
+
+    private void waterRunning(float flow) {
+        waterLeft = Math.max(0.0f, waterLeft - flow / 1450.0f);
+    }
+
+    private void batteryRunning(float flow) {
+        batteryLeft = Math.max(0.0f, batteryLeft - flow / 1300.0f);
+        batteryChanging = true;
+    }
+
+    private boolean allDoorsInPosition() {
+        for (int i = 0; i < doorClosed.length; i++) {
+            if (Math.abs(doorClosed[i] - doorGoal[i]) > 1.0e-6f) return false;
+        }
         return true;
     }
 
-    /** Side-aware detection: returns false if the side is disabled (LEVEL_D) or no eligible players in rect. */
-    private boolean anyPlayerInRectForSide(World world, double cx, double cz, double hx, double hz, Side side) {
-        if (world == null) return false;
-        if (!isSideEnabled(side)) return false; // side disabled via karma level → ignore entirely
-        double ahx = Math.max(0.0, Math.abs(hx));
-        double ahz = Math.max(0.0, Math.abs(hz));
-        if (Math.abs(ahx - ahz) < 1e-6) {
-            // Square case: reuse square helper but still filter players by eligibility and side karma
-            double minX = cx - ahx, maxX = cx + ahx;
-            double minZ = cz - ahz, maxZ = cz + ahz;
-            for (net.minecraft.entity.player.PlayerEntity p : world.getPlayers()) {
-                if (!playerEligibleForDetection(p)) continue;
-                if (!passesKarmaForSide(p, side)) continue;
-                double px = p.getX();
-                double pz = p.getZ();
-                if (px >= minX && px <= maxX && pz >= minZ && pz <= maxZ) return true;
-            }
-            return false;
-        }
-        double minX = cx - ahx, maxX = cx + ahx;
-        double minZ = cz - ahz, maxZ = cz + ahz;
-        for (net.minecraft.entity.player.PlayerEntity p : world.getPlayers()) {
-            if (!playerEligibleForDetection(p)) continue;
-            if (!passesKarmaForSide(p, side)) continue;
-            double px = p.getX();
-            double pz = p.getZ();
-            if (px >= minX && px <= maxX && pz >= minZ && pz <= maxZ) return true;
-        }
-        return false;
+    private static int index(Side side) { return side == Side.SIDE1 ? 0 : 1; }
+    private static double axisCoordinate(BlockPos pos, Direction.Axis axis) {
+        return axis == Direction.Axis.X ? pos.getX() : pos.getZ();
     }
-
-    /** A side is enabled when its karma requirement is not LEVEL_D. */
+    private static boolean playerEligible(PlayerEntity player) { return !player.isSpectator(); }
     private boolean isSideEnabled(Side side) {
-        return switch (side) {
-            case SIDE1 -> karmaSide1 != KarmaLevel.LEVEL_D;
-            case SIDE2 -> karmaSide2 != KarmaLevel.LEVEL_D;
-        };
+        return side == Side.SIDE1 ? karmaSide1 != KarmaLevel.LEVEL_D : karmaSide2 != KarmaLevel.LEVEL_D;
     }
 
-    /** Placeholder per-player/per-side karma rule. For now, only gate-wide side disable is enforced. */
-    private boolean passesKarmaForSide(net.minecraft.entity.player.PlayerEntity p, Side side) {
-        // If the side is disabled, no player passes. Otherwise allow all.
-        return isSideEnabled(side);
+    private static void setGateOpen(World world, BlockPos pos, boolean open) {
+        if (pos == null) return;
+        if (world.getBlockEntity(pos) instanceof KarmaGateBlockEntity gate) gate.setOpen(open);
     }
 
-    /* ===================== Gate helpers ===================== */
-
-    private void setOuterOpen(World world, Side side, boolean open) {
-        BlockPos pos = (side == Side.SIDE1) ? gate1 : gate2;
-        if (world == null || pos == null) return;
-        BlockEntity be = world.getBlockEntity(pos);
-        if (be instanceof KarmaGateBlockEntity g) g.setOpen(open);
-    }
-
-    private void chaseCircularWaitSequence(World world) {
-        int total = lightsSide1.getRefs().size() + lightsSide2.getRefs().size();
-        if (total < 2) {
-            lightsSide1.blinkAll(world, lampBlink);
-            lightsSide2.blinkAll(world, lampBlink);
-            return;
-        }
-        int step = (lampBlink / CIRCULAR_STEP_TICKS) % 4;
-        lightsSide1.allOff(world);
-        lightsSide2.allOff(world);
-
-        boolean clockwise = (entrySide == Side.SIDE1);
-        if (clockwise) {
-            switch (step) {
-                case 0 -> lightsSide1.lightBottomPairOnly(world);
-                case 1 -> lightsSide2.lightBottomPairOnly(world);
-                case 2 -> lightsSide2.lightTopPairOnly(world);
-                case 3 -> lightsSide1.lightTopPairOnly(world);
-            }
-        } else if (entrySide == Side.SIDE2) {
-            switch (step) {
-                case 0 -> lightsSide2.lightBottomPairOnly(world);
-                case 1 -> lightsSide1.lightBottomPairOnly(world);
-                case 2 -> lightsSide1.lightTopPairOnly(world);
-                case 3 -> lightsSide2.lightTopPairOnly(world);
+    private static void setWaterFlow(World world, List<BlockPos> positions, float flow) {
+        for (BlockPos pos : positions) {
+            if (world.getBlockEntity(pos) instanceof WaterStreamBlockEntity stream) {
+                stream.setTargetFlow(flow);
             }
         }
     }
 
-    /* ===================== Accessors for your effect logic ===================== */
+    private static void setHeaterHeat(World world, List<BlockPos> positions, float heat) {
+        for (BlockPos pos : positions) {
+            if (world.getBlockEntity(pos) instanceof HeatCoilBlockEntity coil) coil.setGateHeat(heat);
+        }
+    }
+
+    private static void setSteamFlow(World world, List<BlockPos> positions, float flow) {
+        boolean enabled = flow > 1.0e-4f;
+        for (BlockPos pos : positions) {
+            if (world.getBlockEntity(pos) instanceof SteamEmitterBlockEntity emitter) {
+                emitter.setFlow(flow);
+                BlockState state = world.getBlockState(pos);
+                if (state.getBlock() instanceof SteamEmitterBlock
+                        && state.get(SteamEmitterBlock.ENABLED) != enabled) {
+                    world.setBlockState(pos, state.with(SteamEmitterBlock.ENABLED, enabled), 3);
+                }
+            }
+        }
+    }
+
+    private void stopAllEffects(World world) {
+        setWaterFlow(world, waterSide1, 0.0f);
+        setWaterFlow(world, waterSide2, 0.0f);
+        setHeaterHeat(world, heatSide1, 0.0f);
+        setHeaterHeat(world, heatSide2, 0.0f);
+        setSteamFlow(world, steamSide1, 0.0f);
+        setSteamFlow(world, steamSide2, 0.0f);
+    }
+
     public List<BlockPos> getWaterSide1() { return waterSide1; }
     public List<BlockPos> getWaterSide2() { return waterSide2; }
-    public List<BlockPos> getHeatSide1()  { return heatSide1;  }
-    public List<BlockPos> getHeatSide2()  { return heatSide2;  }
+    public List<BlockPos> getHeatSide1() { return heatSide1; }
+    public List<BlockPos> getHeatSide2() { return heatSide2; }
     public List<BlockPos> getHologramSide1() { return hologramSide1; }
     public List<BlockPos> getHologramSide2() { return hologramSide2; }
-
     public KarmaLevel getKarmaSide1() { return karmaSide1; }
     public KarmaLevel getKarmaSide2() { return karmaSide2; }
+    public GateType getGateType() { return gateType; }
+    public void setKarmaSide1(World world, KarmaLevel level) { setKarmaForSide(world, Side.SIDE1, level); }
+    public void setKarmaSide2(World world, KarmaLevel level) { setKarmaForSide(world, Side.SIDE2, level); }
 
-    // Only enum-based setters exposed now
-    public void setKarmaSide1(World world, KarmaLevel lvl) { setKarmaForSide(world, Side.SIDE1, lvl); }
-    public void setKarmaSide2(World world, KarmaLevel lvl) { setKarmaForSide(world, Side.SIDE2, lvl); }
-
-    /** Re-apply current stored karma levels to all currently bound holograms. */
     public void reapplyKarma(World world) {
-        if (world == null) return;
         applyKarmaToList(world, hologramSide1, karmaSide1);
         applyKarmaToList(world, hologramSide2, karmaSide2);
     }
 
-    /* ===================== Hologram visual helpers (targetLevel / lowPower) ===================== */
-
-    // ---- targetLevel (0..1 float) ----
-
-    /** Set target static level for all holograms on Side 1. */
-    public void setHologramTargetLevelSide1(World world, float level) { setHologramTargetLevelForSide(world, Side.SIDE1, level); }
-    /** Set target static level for all holograms on Side 2. */
-    public void setHologramTargetLevelSide2(World world, float level) { setHologramTargetLevelForSide(world, Side.SIDE2, level); }
-    /** Set target static level for both sides (null to skip a side). */
-    public void setHologramTargetLevels(World world, Float side1Level, Float side2Level) {
-        if (world == null) return;
-        if (side1Level != null) setHologramTargetLevelForSide(world, Side.SIDE1, side1Level);
-        if (side2Level != null) setHologramTargetLevelForSide(world, Side.SIDE2, side2Level);
+    public void setHologramTargetLevelSide1(World world, float level) {
+        setHologramTargetLevelForSide(world, Side.SIDE1, level);
     }
-
+    public void setHologramTargetLevelSide2(World world, float level) {
+        setHologramTargetLevelForSide(world, Side.SIDE2, level);
+    }
+    public void setHologramTargetLevels(World world, Float side1, Float side2) {
+        if (world == null) return;
+        if (side1 != null) setHologramTargetLevelForSide(world, Side.SIDE1, side1);
+        if (side2 != null) setHologramTargetLevelForSide(world, Side.SIDE2, side2);
+    }
     private void setHologramTargetLevelForSide(World world, Side side, float level) {
         if (world == null) return;
-        float clamped = Math.max(0f, Math.min(1f, level));
-        List<BlockPos> list = (side == Side.SIDE1) ? hologramSide1 : hologramSide2;
-        for (BlockPos p : list) {
-            BlockEntity be = world.getBlockEntity(p);
-            if (be instanceof HologramProjectorBlockEntity holo) {
-                holo.setTargetLevel(clamped);
+        for (BlockPos pos : side == Side.SIDE1 ? hologramSide1 : hologramSide2) {
+            if (world.getBlockEntity(pos) instanceof HologramProjectorBlockEntity hologram) {
+                hologram.setTargetLevel(clamp01(level));
             }
         }
     }
 
-    // ---- lowPower toggle ----
-
-    /** Toggle lowPower mode for holograms on Side 1. */
-    public void setHologramLowPowerSide1(World world, boolean lowPower) { setHologramLowPowerForSide(world, Side.SIDE1, lowPower); }
-    /** Toggle lowPower mode for holograms on Side 2. */
-    public void setHologramLowPowerSide2(World world, boolean lowPower) { setHologramLowPowerForSide(world, Side.SIDE2, lowPower); }
-    /** Toggle lowPower mode for both sides (null to skip a side). */
-    public void setHologramLowPower(World world, Boolean side1Low, Boolean side2Low) {
-        if (world == null) return;
-        if (side1Low != null) setHologramLowPowerForSide(world, Side.SIDE1, side1Low);
-        if (side2Low != null) setHologramLowPowerForSide(world, Side.SIDE2, side2Low);
+    public void setHologramLowPowerSide1(World world, boolean lowPower) {
+        setHologramLowPowerForSide(world, Side.SIDE1, lowPower);
     }
-
+    public void setHologramLowPowerSide2(World world, boolean lowPower) {
+        setHologramLowPowerForSide(world, Side.SIDE2, lowPower);
+    }
+    public void setHologramLowPower(World world, Boolean side1, Boolean side2) {
+        if (world == null) return;
+        if (side1 != null) setHologramLowPowerForSide(world, Side.SIDE1, side1);
+        if (side2 != null) setHologramLowPowerForSide(world, Side.SIDE2, side2);
+    }
     private void setHologramLowPowerForSide(World world, Side side, boolean lowPower) {
-        if (world == null) return;
-        List<BlockPos> list = (side == Side.SIDE1) ? hologramSide1 : hologramSide2;
-        for (BlockPos p : list) {
-            BlockEntity be = world.getBlockEntity(p);
-            if (be instanceof HologramProjectorBlockEntity holo) {
-                holo.setLowpower(lowPower);
+        for (BlockPos pos : side == Side.SIDE1 ? hologramSide1 : hologramSide2) {
+            if (world.getBlockEntity(pos) instanceof HologramProjectorBlockEntity hologram) {
+                hologram.setLowpower(lowPower);
             }
         }
     }
 
-    /**
-     * Called by a hologram when its symbol changes.
-     * Update the required karma for its own side AND mirror to the other side so both holograms match.
-     */
-    public void setKarma(BlockPos pos, KarmaLevel lvl) {
+    public void setKarma(BlockPos hologramPos, KarmaLevel level) {
         World world = controllerBE.getWorld();
-        if (world == null || lvl == null) return;
-        Side side = null;
-        if (hologramSide1.contains(pos)) side = Side.SIDE1; else if (hologramSide2.contains(pos)) side = Side.SIDE2;
-
-        // Fallback classification if lists are stale (e.g., hologram placed after initial bind)
-        if (side == null) {
-            side = classifySide(pos, world);
-            // Optionally add to list so future updates are instant
-            if (side == Side.SIDE1 && !hologramSide1.contains(pos)) hologramSide1.add(pos);
-            else if (side == Side.SIDE2 && !hologramSide2.contains(pos)) hologramSide2.add(pos);
-        }
-
-        if (side != null) {
-            setKarmaForSide(world, side, lvl); // ONLY update that side now (no mirroring)
-            KarmaGateMod.LOGGER.info("[GateCtrl @{}] setKarma from hologram {} → {} (side={})", controllerBE.getPos(), pos, lvl, side);
-        } else {
-            KarmaGateMod.LOGGER.warn("[GateCtrl @{}] setKarma could not classify hologram {}", controllerBE.getPos(), pos);
-        }
+        if (world == null || level == null) return;
+        Side side = hologramSide1.contains(hologramPos) ? Side.SIDE1
+                : hologramSide2.contains(hologramPos) ? Side.SIDE2 : classifySide(hologramPos, world);
+        if (side == null) return;
+        List<BlockPos> list = side == Side.SIDE1 ? hologramSide1 : hologramSide2;
+        if (!list.contains(hologramPos)) list.add(hologramPos);
+        setKarmaForSide(world, side, level);
     }
 
-    /** Determine side of a hologram relative to controller using geometry if not already bound. */
-    private Side classifySide(BlockPos holoPos, World world) {
-        try {
-            BlockPos cPos = controllerBE.getPos();
-            BlockState state = world.getBlockState(cPos);
-            if (!(state.getBlock() instanceof KarmaGateBlock)) return null;
-            Direction.Axis gateAxis = state.get(KarmaGateBlock.AXIS);
-            Direction.Axis normalAxis = (gateAxis == Direction.Axis.X) ? Direction.Axis.Z : Direction.Axis.X;
-        int diff = (normalAxis == Direction.Axis.X)
-            ? (holoPos.getX() - cPos.getX())
-            : (holoPos.getZ() - cPos.getZ());
-            return diff < 0 ? Side.SIDE1 : Side.SIDE2;
-        } catch (Exception e) {
-            return null;
-        }
+    private Side classifySide(BlockPos pos, World world) {
+        BlockState state = world.getBlockState(controllerBE.getPos());
+        if (!(state.getBlock() instanceof KarmaGateBlock)) return null;
+        Direction.Axis axis = state.get(KarmaGateBlock.AXIS);
+        return axisCoordinate(pos, axis) < axisCoordinate(controllerBE.getPos(), axis)
+                ? Side.SIDE1 : Side.SIDE2;
     }
 
-    /**
-     * Sets the karma level for the specified side and updates all holograms on that side.
-     */
-    private void setKarmaForSide(World world, Side side, KarmaLevel lvl) {
-        if (lvl == null) return;
-        if (side == Side.SIDE1) {
-            if (lvl == karmaSide1) return;
-            karmaSide1 = lvl;
-            applyKarmaToList(world, hologramSide1, karmaSide1);
-        } else {
-            if (lvl == karmaSide2) return;
-            karmaSide2 = lvl;
-            applyKarmaToList(world, hologramSide2, karmaSide2);
-        }
+    private void setKarmaForSide(World world, Side side, KarmaLevel level) {
+        if (level == null) return;
+        if (side == Side.SIDE1) karmaSide1 = level;
+        else karmaSide2 = level;
+        applyKarmaToList(world, side == Side.SIDE1 ? hologramSide1 : hologramSide2, level);
         controllerBE.markDirty();
     }
 
-    private void applyKarmaToList(World world, List<BlockPos> list, KarmaLevel lvl) {
+    private static void applyKarmaToList(World world, List<BlockPos> positions, KarmaLevel level) {
         if (world == null) return;
-        for (BlockPos p : list) {
-            BlockEntity be = world.getBlockEntity(p);
-            if (be instanceof HologramProjectorBlockEntity holo) {
-                // This now also updates symbolIdx/symbolKey for visuals
-                holo.setKarmaLevelEnum(lvl);
+        for (BlockPos pos : positions) {
+            if (world.getBlockEntity(pos) instanceof HologramProjectorBlockEntity hologram) {
+                hologram.setKarmaLevelEnum(level);
             }
         }
     }
 
-    /* ===================== NBT ===================== */
-
     public void writeNbt(NbtCompound nbt) {
-        // gates
-        if (gate1 != null) {
-            NbtCompound g1 = new NbtCompound();
-            g1.putInt("x", gate1.getX());
-            g1.putInt("y", gate1.getY());
-            g1.putInt("z", gate1.getZ());
-            nbt.put("gate1", g1);
-        }
-        if (gate2 != null) {
-            NbtCompound g2 = new NbtCompound();
-            g2.putInt("x", gate2.getX());
-            g2.putInt("y", gate2.getY());
-            g2.putInt("z", gate2.getZ());
-            nbt.put("gate2", g2);
-        }
-
-        // timers/state
-        nbt.putInt("prepare1", prepare1);
-        nbt.putInt("prepare2", prepare2);
-        nbt.putInt("washTicks", washTicks);
-        nbt.putInt("cooldownTicks", cooldownTicks);
-        nbt.putInt("lampBlink", lampBlink);
-        nbt.putInt("outerAnimWait", outerAnimWait);
-        nbt.putInt("innerAnimWait", innerAnimWait);
-
+        writePos(nbt, "gate1", gate1);
+        writePos(nbt, "gate2", gate2);
+        nbt.putString("gateType", gateType.name());
         nbt.putString("mode", mode.name());
         nbt.putString("entrySide", entrySide == null ? "null" : entrySide.name());
-
-        // lights
+        nbt.putBoolean("dontOpen", dontOpen);
+        nbt.putInt("startCounter", startCounter);
+        nbt.putInt("washingCounter", washingCounter);
+        nbt.putInt("recoveryCounter", recoveryCounter);
+        nbt.putInt("lampBlink", lampBlink);
+        nbt.putBoolean("recoveryActive", recoveryActive);
+        nbt.putFloat("recoveryStartResource", recoveryStartResource);
+        nbt.putFloat("waterLeft", waterLeft);
+        nbt.putFloat("outletLag", outletLag);
+        nbt.putFloat("batteryLeft", batteryLeft);
+        nbt.putFloat("electricSteam", electricSteam);
+        for (int i = 0; i < 3; i++) {
+            nbt.putFloat("doorClosed" + i, doorClosed[i]);
+            nbt.putFloat("doorGoal" + i, doorGoal[i]);
+        }
+        for (int i = 0; i < 2; i++) {
+            nbt.putFloat("waterFlow" + i, waterFlow[i]);
+            nbt.putFloat("waterSetFlow" + i, waterSetFlow[i]);
+            nbt.putFloat("heaterHeat" + i, heaterHeat[i]);
+            nbt.putFloat("heaterTarget" + i, heaterTarget[i]);
+        }
+        for (int i = 0; i < 4; i++) nbt.putBoolean("lamp" + i, lampsOn[i]);
         lightsSide1.writeNbt(nbt, "lightsSide1");
         lightsSide2.writeNbt(nbt, "lightsSide2");
-
-        // effect lists
         writePosList(nbt, "waterSide1", waterSide1);
         writePosList(nbt, "waterSide2", waterSide2);
-        writePosList(nbt, "heatSide1",  heatSide1);
-        writePosList(nbt, "heatSide2",  heatSide2);
+        writePosList(nbt, "heatSide1", heatSide1);
+        writePosList(nbt, "heatSide2", heatSide2);
         writePosList(nbt, "steamSide1", steamSide1);
         writePosList(nbt, "steamSide2", steamSide2);
         writePosList(nbt, "holoSide1", hologramSide1);
         writePosList(nbt, "holoSide2", hologramSide2);
-
-        // enum names
         nbt.putString("karmaSide1", karmaSide1.name());
         nbt.putString("karmaSide2", karmaSide2.name());
     }
 
     public void readNbt(NbtCompound nbt) {
-        gate1 = nbt.contains("gate1") ? new BlockPos(
-                nbt.getCompound("gate1").getInt("x"),
-                nbt.getCompound("gate1").getInt("y"),
-                nbt.getCompound("gate1").getInt("z")) : null;
-
-        gate2 = nbt.contains("gate2") ? new BlockPos(
-                nbt.getCompound("gate2").getInt("x"),
-                nbt.getCompound("gate2").getInt("y"),
-                nbt.getCompound("gate2").getInt("z")) : null;
-
-        prepare1 = nbt.getInt("prepare1");
-        prepare2 = nbt.getInt("prepare2");
-        washTicks = nbt.getInt("washTicks");
-        cooldownTicks = nbt.getInt("cooldownTicks");
+        gate1 = readPos(nbt, "gate1");
+        gate2 = readPos(nbt, "gate2");
+        boolean storedGateType = nbt.contains("gateType");
+        gateType = readEnum(nbt.getString("gateType"), GateType.class, GateType.BROKEN);
+        mode = readEnum(nbt.getString("mode"), Mode.class, Mode.MiddleClosed);
+        entrySide = "null".equals(nbt.getString("entrySide"))
+                ? null : readEnum(nbt.getString("entrySide"), Side.class, null);
+        dontOpen = nbt.getBoolean("dontOpen");
+        startCounter = nbt.contains("startCounter") ? nbt.getInt("startCounter")
+                : Math.max(nbt.getInt("prepare1"), nbt.getInt("prepare2")) * 2;
+        washingCounter = nbt.contains("washingCounter") ? nbt.getInt("washingCounter")
+                : nbt.getInt("washTicks") * 2;
+        recoveryCounter = nbt.getInt("recoveryCounter");
         lampBlink = nbt.getInt("lampBlink");
-        outerAnimWait = nbt.getInt("outerAnimWait");
-        innerAnimWait = nbt.getInt("innerAnimWait");
-
-        try { mode = Mode.valueOf(nbt.getString("mode")); }
-        catch (IllegalArgumentException e) { mode = Mode.MiddleClosed; }
-
-        String es = nbt.getString("entrySide");
-        if (es == null || es.isEmpty() || "null".equals(es)) entrySide = null;
-        else {
-            try { entrySide = Side.valueOf(es); } catch (IllegalArgumentException e) { entrySide = null; }
+        recoveryActive = nbt.getBoolean("recoveryActive");
+        recoveryStartResource = nbt.contains("recoveryStartResource")
+                ? nbt.getFloat("recoveryStartResource") : 1.0f;
+        waterLeft = nbt.contains("waterLeft") ? nbt.getFloat("waterLeft") : 1.0f;
+        outletLag = nbt.getFloat("outletLag");
+        batteryLeft = nbt.contains("batteryLeft") ? nbt.getFloat("batteryLeft") : 1.0f;
+        electricSteam = nbt.getFloat("electricSteam");
+        for (int i = 0; i < 3; i++) {
+            doorClosed[i] = nbt.contains("doorClosed" + i) ? nbt.getFloat("doorClosed" + i)
+                    : i == 1 ? 1.0f : 0.0f;
+            doorGoal[i] = nbt.contains("doorGoal" + i) ? nbt.getFloat("doorGoal" + i)
+                    : i == 1 ? 1.0f : 0.0f;
         }
-
+        for (int i = 0; i < 2; i++) {
+            waterFlow[i] = nbt.getFloat("waterFlow" + i);
+            waterSetFlow[i] = nbt.getFloat("waterSetFlow" + i);
+            heaterHeat[i] = nbt.getFloat("heaterHeat" + i);
+            heaterTarget[i] = nbt.getFloat("heaterTarget" + i);
+        }
+        for (int i = 0; i < 4; i++) lampsOn[i] = nbt.getBoolean("lamp" + i);
         lightsSide1.readNbt(nbt, "lightsSide1");
         lightsSide2.readNbt(nbt, "lightsSide2");
-
-        waterSide1.clear(); waterSide2.clear();
-        heatSide1.clear();  heatSide2.clear();
         readPosList(nbt, "waterSide1", waterSide1);
         readPosList(nbt, "waterSide2", waterSide2);
-        readPosList(nbt, "heatSide1",  heatSide1);
-        readPosList(nbt, "heatSide2",  heatSide2);
+        readPosList(nbt, "heatSide1", heatSide1);
+        readPosList(nbt, "heatSide2", heatSide2);
         readPosList(nbt, "steamSide1", steamSide1);
         readPosList(nbt, "steamSide2", steamSide2);
         readPosList(nbt, "holoSide1", hologramSide1);
         readPosList(nbt, "holoSide2", hologramSide2);
-
-        // enum-or-float back-compat
-        if (nbt.contains("karmaSide1")) {
-            if (nbt.get("karmaSide1") instanceof net.minecraft.nbt.NbtString) {
-                try { karmaSide1 = KarmaLevel.valueOf(nbt.getString("karmaSide1")); }
-                catch (IllegalArgumentException e) { karmaSide1 = KarmaLevel.LEVEL_0; }
-            } else {
-                karmaSide1 = KarmaLevel.fromFloat(nbt.getFloat("karmaSide1"));
-            }
-        }
-        if (nbt.contains("karmaSide2")) {
-            if (nbt.get("karmaSide2") instanceof net.minecraft.nbt.NbtString) {
-                try { karmaSide2 = KarmaLevel.valueOf(nbt.getString("karmaSide2")); }
-                catch (IllegalArgumentException e) { karmaSide2 = KarmaLevel.LEVEL_0; }
-            } else {
-                karmaSide2 = KarmaLevel.fromFloat(nbt.getFloat("karmaSide2"));
-            }
-        }
-
-        KarmaGateMod.LOGGER.info("[GateCtrl @{}] readNbt: mode={}, entrySide={}, effects w(S1={},S2={}) h(S1={},S2={}) s(S1={},S2={})",
-                controllerBE.getPos(), mode, entrySide, waterSide1.size(), waterSide2.size(), heatSide1.size(), heatSide2.size(), steamSide1.size(), steamSide2.size());
+        if (!storedGateType) gateType = inferGateType();
+        karmaSide1 = readEnum(nbt.getString("karmaSide1"), KarmaLevel.class, KarmaLevel.LEVEL_0);
+        karmaSide2 = readEnum(nbt.getString("karmaSide2"), KarmaLevel.class, KarmaLevel.LEVEL_0);
     }
 
-    /* ===================== Small NBT helpers ===================== */
-    private static void writePosList(NbtCompound root, String key, List<BlockPos> list) {
-        NbtCompound bag = new NbtCompound();
-        bag.putInt("n", list.size());
-        for (int i = 0; i < list.size(); i++) {
-            BlockPos p = list.get(i);
-            NbtCompound e = new NbtCompound();
-            e.putInt("x", p.getX());
-            e.putInt("y", p.getY());
-            e.putInt("z", p.getZ());
-            bag.put("p" + i, e);
-        }
-        root.put(key, bag);
+    private static void writePos(NbtCompound root, String key, BlockPos pos) {
+        if (pos == null) return;
+        NbtCompound value = new NbtCompound();
+        value.putInt("x", pos.getX());
+        value.putInt("y", pos.getY());
+        value.putInt("z", pos.getZ());
+        root.put(key, value);
     }
-    private static void readPosList(NbtCompound root, String key, List<BlockPos> out) {
+
+    private static BlockPos readPos(NbtCompound root, String key) {
+        if (!root.contains(key)) return null;
+        NbtCompound value = root.getCompound(key);
+        return new BlockPos(value.getInt("x"), value.getInt("y"), value.getInt("z"));
+    }
+
+    private static void writePosList(NbtCompound root, String key, List<BlockPos> positions) {
+        NbtCompound value = new NbtCompound();
+        value.putInt("n", positions.size());
+        for (int i = 0; i < positions.size(); i++) writePos(value, "p" + i, positions.get(i));
+        root.put(key, value);
+    }
+
+    private static void readPosList(NbtCompound root, String key, List<BlockPos> output) {
+        output.clear();
         if (!root.contains(key)) return;
-        NbtCompound bag = root.getCompound(key);
-        int n = bag.getInt("n");
-        for (int i = 0; i < n; i++) {
-            NbtCompound e = bag.getCompound("p" + i);
-            out.add(new BlockPos(e.getInt("x"), e.getInt("y"), e.getInt("z")));
+        NbtCompound value = root.getCompound(key);
+        for (int i = 0; i < value.getInt("n"); i++) {
+            BlockPos pos = readPos(value, "p" + i);
+            if (pos != null) output.add(pos);
         }
     }
 
-    public BlockPos getPos() {
-        //return controllerBE.getPos();
-        return controllerBE == null ? null : controllerBE.getPos();
+    private static <E extends Enum<E>> E readEnum(String value, Class<E> type, E fallback) {
+        try { return Enum.valueOf(type, value); }
+        catch (IllegalArgumentException | NullPointerException ignored) { return fallback; }
+    }
+
+    public BlockPos getPos() { return controllerBE.getPos(); }
+
+    private static float clamp01(float value) { return Math.max(0.0f, Math.min(1.0f, value)); }
+    private static float lerp(float from, float to, float amount) { return from + (to - from) * amount; }
+    private static float inverseLerp(float from, float to, float value) {
+        return clamp01((value - from) / (to - from));
+    }
+    private static float moveTowards(float current, float target, float maximumDelta) {
+        if (Math.abs(target - current) <= maximumDelta) return target;
+        return current + Math.copySign(maximumDelta, target - current);
+    }
+
+    private record Region(double centerX, double centerZ, double halfX, double halfZ, double axisHalf) {
+        boolean contains(PlayerEntity player) {
+            return Math.abs(player.getX() - centerX) <= halfX
+                    && Math.abs(player.getZ() - centerZ) <= halfZ;
+        }
+    }
+
+    private record Detection(boolean side1, boolean side2, boolean center,
+                             boolean side1Stationary, boolean side2Stationary) {
+        Side startingSide() {
+            if (center || side1 == side2) return null;
+            return side1 ? Side.SIDE1 : Side.SIDE2;
+        }
+        boolean allThrough(Side entry) {
+            return !center && (entry == Side.SIDE1 ? !side1 && side2 : !side2 && side1);
+        }
+        boolean anyInsideGate() { return side1 || side2 || center; }
     }
 }
