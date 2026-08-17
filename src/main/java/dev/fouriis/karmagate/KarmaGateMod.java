@@ -21,6 +21,8 @@ import dev.fouriis.karmagate.entity.oracle.FivePebblesEntity;
 import dev.fouriis.karmagate.entity.oracle.LooksToTheMoonEntity;
 import dev.fouriis.karmagate.entity.oracle.OracleEntity;
 import dev.fouriis.karmagate.entity.overseer.YellowOverseerEntity;
+import dev.fouriis.karmagate.entity.poleplant.PolePlantEntity;
+import dev.fouriis.karmagate.entity.poleplant.PolePlantSegmentEntity;
 import dev.fouriis.karmagate.entity.spider.SpiderEntity;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugEntity;
 import dev.fouriis.karmagate.item.ModItems;
@@ -231,6 +233,26 @@ public class KarmaGateMod implements ModInitializer {
                     .build()
     );
 
+    public static final EntityType<PolePlantEntity> POLE_PLANT_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "pole_plant"),
+            FabricEntityTypeBuilder.<PolePlantEntity>create(SpawnGroup.MONSTER, PolePlantEntity::new)
+                    .dimensions(EntityDimensions.fixed(0.5f, 0.5f))
+                    .trackRangeBlocks(160)
+                    .trackedUpdateRate(1)
+                    .build()
+    );
+
+    public static final EntityType<PolePlantSegmentEntity> POLE_PLANT_SEGMENT_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "pole_plant_segment"),
+            FabricEntityTypeBuilder.<PolePlantSegmentEntity>create(SpawnGroup.MISC, PolePlantSegmentEntity::new)
+                    .dimensions(EntityDimensions.fixed(0.5f, 0.5f))
+                    .trackRangeBlocks(160)
+                    .trackedUpdateRate(1)
+                    .build()
+    );
+
 
     @Override
     public void onInitialize() {
@@ -261,6 +283,8 @@ public class KarmaGateMod implements ModInitializer {
         FabricDefaultAttributeRegistry.register(FIVE_PEBBLES_ENTITY_TYPE, OracleEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(LOOKS_TO_THE_MOON_ENTITY_TYPE, OracleEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(ECHO_ENTITY_TYPE, EchoEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(POLE_PLANT_ENTITY_TYPE, PolePlantEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(POLE_PLANT_SEGMENT_ENTITY_TYPE, PolePlantSegmentEntity.createAttributes());
 
         // Register networking
         ModNetworking.register();

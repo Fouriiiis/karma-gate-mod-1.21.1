@@ -36,6 +36,8 @@ import dev.fouriis.karmagate.entity.daddy.DaddyLongLegsRenderer;
 import dev.fouriis.karmagate.entity.garbworm.GarbageWormRenderer;
 import dev.fouriis.karmagate.entity.oracle.OracleEntityRenderer;
 import dev.fouriis.karmagate.entity.overseer.OverseerEntityRenderer;
+import dev.fouriis.karmagate.entity.poleplant.PolePlantRenderer;
+import dev.fouriis.karmagate.entity.poleplant.PolePlantSegmentRenderer;
 import dev.fouriis.karmagate.entity.karmagate.WaterStreamBlockEntity;
 import dev.fouriis.karmagate.entity.spider.SpiderEntityRenderer;
 import dev.fouriis.karmagate.entity.stowaway.StowawayBugRenderer;
@@ -152,6 +154,9 @@ public class KarmaGateModClient implements ClientModInitializer {
 		// Register Oracle renderers
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.FIVE_PEBBLES_ENTITY_TYPE, OracleEntityRenderer::new);
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.LOOKS_TO_THE_MOON_ENTITY_TYPE, OracleEntityRenderer::new);
+
+		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.POLE_PLANT_ENTITY_TYPE, PolePlantRenderer::new);
+		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.POLE_PLANT_SEGMENT_ENTITY_TYPE, PolePlantSegmentRenderer::new);
 
 		// --- Cube fold effect ---
 		UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
