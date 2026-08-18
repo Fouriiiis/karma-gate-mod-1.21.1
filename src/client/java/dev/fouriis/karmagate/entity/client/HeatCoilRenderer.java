@@ -1,7 +1,7 @@
 package dev.fouriis.karmagate.entity.client;
 
-import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.platform.GlStateManager;
+import com.mojang.blaze3d.systems.RenderSystem;
 import dev.fouriis.karmagate.block.karmagate.HeatCoilBlock;
 import dev.fouriis.karmagate.entity.karmagate.HeatCoilBlockEntity;
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
@@ -10,18 +10,18 @@ import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.ShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.Shaders;
-import net.minecraft.client.render.LightmapTextureManager;
-import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
 import net.minecraft.client.render.Camera;
 import net.minecraft.client.render.GameRenderer;
+import net.minecraft.client.render.LightmapTextureManager;
+import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
 import net.minecraft.client.render.Tessellator;
-import net.minecraft.client.render.VertexFormat;
-import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.render.VertexConsumer;
 import net.minecraft.client.render.VertexConsumerProvider;
+import net.minecraft.client.render.VertexFormat;
+import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactory;
 import net.minecraft.client.util.math.MatrixStack;
@@ -37,9 +37,19 @@ import org.joml.Vector3f;
 public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlockEntity> {
     private static final float PIXELS_PER_BLOCK = 20.0f;
     private static final float HEATER_MODEL_DEPTH_PIXELS = 3.0f;
-    private static final float HEATER_BASE_HEIGHT_PIXELS = 0.2f;
+
+    // Tilt the heater 45 degrees around its LOCAL X axis. FACING still
+    // controls horizontal yaw; this tilt rotates only the local Y/Z plane.
+    private static final float HEATER_SIDEWAYS_TILT_DEGREES = -45.0f;
+
+    // Small extra separation, in blocks, between the front-most possible point
+    // on the heater and the camera-facing post-effect plane. The main separation
+    // comes from the model's calculated bounding radius below.
+    private static final float EFFECT_SURFACE_CLEARANCE = 0.025f;
+
     private static final int GLOW_SEGMENTS = 48;
     private static final int GLOW_RINGS = 12;
+
     // Run after libMod's conventional priority-1000 post effects. Recapturing
     // immediately before every coil prevents one grabtex shader from restoring
     // a stale scene over another, and also composes overlapping heat coils.
@@ -54,6 +64,7 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
     private static final Rgb FOG_COLOR = new Rgb(107.0f / 255.0f, 171.0f / 255.0f, 165.0f / 255.0f);
 
     private static FAtlasSpriteModel heaterModel;
+    private static ModelBounds heaterModelBounds;
 
     public HeatCoilRenderer(BlockEntityRendererFactory.Context context) {
     }
@@ -64,6 +75,9 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
         FAtlasSpriteModel model = getHeaterModel();
         if (model == null || model.element().textureIdentifier == null) return;
 
+        ModelBounds bounds = getHeaterModelBounds(model);
+        float effectCameraBias = getEffectCameraBias(bounds);
+
         float heat = MathHelper.clamp(heater.getInterpolatedHeaterHeat(tickDelta), 0.0f, 1.0f);
         Rgb hotColor = heaterColor(heat);
         Rgb shadeTarget = mix(BLACK_COLOR, FOG_COLOR, MathHelper.lerp(heat, 0.3f, 0.8f));
@@ -73,13 +87,13 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
         VertexConsumer vertices = consumers.getBuffer(
                 RenderLayer.getEntityCutoutNoCull(model.element().textureIdentifier));
 
-        renderHeaterModel(vertices, matrix, facing, model, hotColor, shadeColor);
+        renderHeaterModel(vertices, matrix, facing, model, bounds, hotColor, shadeColor);
 
-        queueHeatGlow(heater, heat);
-        queueHeatDistortion(heater, tickDelta);
+        queueHeatGlow(heater, heat, effectCameraBias);
+        queueHeatDistortion(heater, tickDelta, effectCameraBias);
     }
 
-    private static void queueHeatGlow(HeatCoilBlockEntity heater, float heat) {
+    private static void queueHeatGlow(HeatCoilBlockEntity heater, float heat, float cameraBias) {
         if (heat <= 0.05f) return;
 
         float alpha = (float) Math.pow(
@@ -91,18 +105,36 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
         Rgb glowColor = hslToRgb(hue, 1.0f, lightness);
         float radius = MathHelper.lerp(MathHelper.sin(MathHelper.PI * heat), 10.0f, 15.0f);
         double centerX = heater.getPos().getX() + 0.5;
-        double centerY = heater.getPos().getY() + 2.0f / PIXELS_PER_BLOCK;
+        double centerY = heater.getPos().getY() + 0.5;
         double centerZ = heater.getPos().getZ() + 0.5;
 
         // Draw just before libMod captures GrabTexture for HeatDistortion, so
         // the screen-blended light is part of the scene that gets distorted.
+        // The billboard is pushed toward the camera by enough to clear the
+        // complete heater model, preventing the heater from cutting holes in
+        // its own glow at shallow/edge-on viewing angles.
         RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall(camera ->
-                renderGlow(camera, centerX, centerY, centerZ, radius, glowColor, alpha), false), 990);
+                renderGlow(camera, centerX, centerY, centerZ, radius, glowColor, alpha, cameraBias), false), 990);
     }
 
     private static void renderGlow(Camera camera, double worldX, double worldY, double worldZ,
-                                   float radius, Rgb color, float alpha) {
+                                   float radius, Rgb color, float alpha, float cameraBias) {
         Vec3d cameraPos = camera.getPos();
+
+        // Move the entire billboard toward the camera instead of disabling the
+        // depth test. This keeps normal world occlusion (walls can still hide the
+        // glow) while ensuring the coil itself is always behind its effect plane.
+        double toCameraX = cameraPos.x - worldX;
+        double toCameraY = cameraPos.y - worldY;
+        double toCameraZ = cameraPos.z - worldZ;
+        double distanceSquared = toCameraX * toCameraX + toCameraY * toCameraY + toCameraZ * toCameraZ;
+        if (distanceSquared > 1.0e-8) {
+            double inverseDistance = 1.0 / Math.sqrt(distanceSquared);
+            worldX += toCameraX * inverseDistance * cameraBias;
+            worldY += toCameraY * inverseDistance * cameraBias;
+            worldZ += toCameraZ * inverseDistance * cameraBias;
+        }
+
         float cx = (float) (worldX - cameraPos.x);
         float cy = (float) (worldY - cameraPos.y);
         float cz = (float) (worldZ - cameraPos.z);
@@ -161,43 +193,78 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
     }
 
     private static void renderHeaterModel(VertexConsumer vertices, Matrix4f matrix, Direction facing,
-                                          FAtlasSpriteModel model, Rgb hotColor, Rgb shadeColor) {
+                                          FAtlasSpriteModel model, ModelBounds bounds,
+                                          Rgb hotColor, Rgb shadeColor) {
         for (FAtlasSpriteModel.Quad quad : model.quads()) {
             // The sprite model's +Z face becomes the heater's upward face. Its
             // lower face retains the C# shade color; edge extrusion is blended
             // between them so the generated silhouette reads as solid.
             float upward = MathHelper.clamp(quad.normalZ() * 0.5f + 0.5f, 0.0f, 1.0f);
             Rgb color = mix(shadeColor, hotColor, upward);
-            emitModelVertex(vertices, matrix, facing, model, quad, quad.a(), color);
-            emitModelVertex(vertices, matrix, facing, model, quad, quad.b(), color);
-            emitModelVertex(vertices, matrix, facing, model, quad, quad.c(), color);
-            emitModelVertex(vertices, matrix, facing, model, quad, quad.d(), color);
+            emitModelVertex(vertices, matrix, facing, bounds, quad, quad.a(), color);
+            emitModelVertex(vertices, matrix, facing, bounds, quad, quad.b(), color);
+            emitModelVertex(vertices, matrix, facing, bounds, quad, quad.c(), color);
+            emitModelVertex(vertices, matrix, facing, bounds, quad, quad.d(), color);
         }
     }
 
     private static void emitModelVertex(VertexConsumer vertices, Matrix4f matrix, Direction facing,
-                                        FAtlasSpriteModel model, FAtlasSpriteModel.Quad quad,
+                                        ModelBounds bounds, FAtlasSpriteModel.Quad quad,
                                         FAtlasSpriteModel.Vertex vertex, Rgb color) {
-        float angle = facing.asRotation() * MathHelper.RADIANS_PER_DEGREE;
-        float cos = MathHelper.cos(angle);
-        float sin = MathHelper.sin(angle);
-        float localX = (vertex.x() - model.width() * 0.5f) / PIXELS_PER_BLOCK;
-        float localZ = (vertex.y() - model.height() * 0.5f) / PIXELS_PER_BLOCK;
-        float localY = (HEATER_BASE_HEIGHT_PIXELS + vertex.z() + model.depth() * 0.5f)
-                / PIXELS_PER_BLOCK;
-        float rotatedX = localX * cos - localZ * sin;
-        float rotatedZ = localX * sin + localZ * cos;
-        float normalX = quad.normalX() * cos - quad.normalY() * sin;
-        float normalZ = quad.normalX() * sin + quad.normalY() * cos;
-        vertices.vertex(matrix, 0.5f + rotatedX, localY, 0.5f + rotatedZ)
+        // FACING remains the only horizontal rotation. The extra 45 degrees is
+        // applied around the model's local X axis, so the heater tilts through
+        // its Y/Z plane rather than rotating horizontally.
+        float yaw = facing.asRotation() * MathHelper.RADIANS_PER_DEGREE;
+        float yawCos = MathHelper.cos(yaw);
+        float yawSin = MathHelper.sin(yaw);
+        float tilt = HEATER_SIDEWAYS_TILT_DEGREES * MathHelper.RADIANS_PER_DEGREE;
+        float tiltCos = MathHelper.cos(tilt);
+        float tiltSin = MathHelper.sin(tilt);
+
+        // Centre all three model axes around the actual generated geometry. In
+        // this renderer atlas X -> local X, atlas Y -> local Z, and extrusion Z
+        // -> local Y. With no additional base-height offset, the transformed
+        // model's centre is exactly the block centre at (0.5, 0.5, 0.5).
+        float localX = (vertex.x() - bounds.centerX()) / PIXELS_PER_BLOCK;
+        float localY = (vertex.z() - bounds.centerZ()) / PIXELS_PER_BLOCK;
+        float localZ = (vertex.y() - bounds.centerY()) / PIXELS_PER_BLOCK;
+
+        // Sideways tilt around the model's local X axis. This changes Y/Z
+        // while leaving local X unchanged.
+        // LOCAL X-AXIS ROTATION: X stays fixed, Y/Z rotate.
+        float tiltedX = localX;
+        float tiltedY = localY * tiltCos - localZ * tiltSin;
+        float tiltedZ = localY * tiltSin + localZ * tiltCos;
+
+        // Then orient that tilted model horizontally according to block FACING.
+        float rotatedX = tiltedX * yawCos - tiltedZ * yawSin;
+        float rotatedZ = tiltedX * yawSin + tiltedZ * yawCos;
+
+        // FAtlasSpriteModel normals use atlas X/Y plus extrusion Z, so remap
+        // them into the same local X/Y/Z basis and apply the identical rotations.
+        float localNormalX = quad.normalX();
+        float localNormalY = quad.normalZ();
+        float localNormalZ = quad.normalY();
+        // Apply the same LOCAL X-axis rotation to the normal.
+        float tiltedNormalX = localNormalX;
+        float tiltedNormalY = localNormalY * tiltCos - localNormalZ * tiltSin;
+        float tiltedNormalZ = localNormalY * tiltSin + localNormalZ * tiltCos;
+        float normalX = tiltedNormalX * yawCos - tiltedNormalZ * yawSin;
+        float normalZ = tiltedNormalX * yawSin + tiltedNormalZ * yawCos;
+
+        vertices.vertex(matrix,
+                        0.5f + rotatedX,
+                        0.5f + tiltedY,
+                        0.5f + rotatedZ)
                 .color(color.r, color.g, color.b, 1.0f)
                 .texture(vertex.u(), vertex.v())
                 .overlay(OverlayTexture.DEFAULT_UV)
                 .light(FULL_BRIGHT)
-                .normal(normalX, quad.normalZ(), normalZ);
+                .normal(normalX, tiltedNormalY, normalZ);
     }
 
-    private static void queueHeatDistortion(HeatCoilBlockEntity heater, float tickDelta) {
+    private static void queueHeatDistortion(HeatCoilBlockEntity heater, float tickDelta,
+                                            float cameraBias) {
         float targetHeat = MathHelper.clamp(heater.getVisualHeat(), 0.0f, 1.0f);
         if (targetHeat <= 0.0f || heater.getWorld() == null) return;
         float factor = inverseLerp(0.15f, 0.8f, targetHeat);
@@ -206,7 +273,7 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
         float alpha = sCurve(targetHeat, 1.5f);
         float rain = (heater.getWorld().getTime() + tickDelta) / 100.0f;
         double centerX = heater.getPos().getX() + 0.5;
-        double centerY = heater.getPos().getY() + 0.2f / PIXELS_PER_BLOCK + 2.0f * factor;
+        double centerY = heater.getPos().getY() + 0.5 + 2.0f * factor;
         double centerZ = heater.getPos().getZ() + 0.5;
 
         RenderUtils.drawCameraFacingBillboardOffset(() -> {
@@ -217,7 +284,11 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
                     RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
                 },
                 centerX, centerY, centerZ,
-                halfWidth, halfHeight, 0.0f,
+                halfWidth, halfHeight,
+                // Camera-local +Z is toward the camera for the camera-facing
+                // billboard helper. Push the distortion plane far enough forward
+                // to clear the complete heater bounding sphere at every view angle.
+                cameraBias,
                 0.0f, 0.0f, 0.0f,
                 1.0f, 1.0f, 1.0f, alpha, FULL_BRIGHT,
                 true, HEAT_DISTORTION_PRIORITY);
@@ -228,10 +299,65 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
         try {
             heaterModel = LibrainworldmcClient.getAtlasManager()
                     .getModelWithName("RegionGate_Heater", HEATER_MODEL_DEPTH_PIXELS);
+            heaterModelBounds = null;
         } catch (IllegalStateException ignored) {
             // libMod atlas initialization can briefly lag the first rendered frame.
         }
         return heaterModel;
+    }
+
+    private static ModelBounds getHeaterModelBounds(FAtlasSpriteModel model) {
+        if (heaterModelBounds != null) return heaterModelBounds;
+
+        float minX = Float.POSITIVE_INFINITY;
+        float minY = Float.POSITIVE_INFINITY;
+        float minZ = Float.POSITIVE_INFINITY;
+        float maxX = Float.NEGATIVE_INFINITY;
+        float maxY = Float.NEGATIVE_INFINITY;
+        float maxZ = Float.NEGATIVE_INFINITY;
+
+        for (FAtlasSpriteModel.Quad quad : model.quads()) {
+            FAtlasSpriteModel.Vertex a = quad.a();
+            FAtlasSpriteModel.Vertex b = quad.b();
+            FAtlasSpriteModel.Vertex c = quad.c();
+            FAtlasSpriteModel.Vertex d = quad.d();
+
+            minX = Math.min(minX, Math.min(Math.min(a.x(), b.x()), Math.min(c.x(), d.x())));
+            minY = Math.min(minY, Math.min(Math.min(a.y(), b.y()), Math.min(c.y(), d.y())));
+            minZ = Math.min(minZ, Math.min(Math.min(a.z(), b.z()), Math.min(c.z(), d.z())));
+            maxX = Math.max(maxX, Math.max(Math.max(a.x(), b.x()), Math.max(c.x(), d.x())));
+            maxY = Math.max(maxY, Math.max(Math.max(a.y(), b.y()), Math.max(c.y(), d.y())));
+            maxZ = Math.max(maxZ, Math.max(Math.max(a.z(), b.z()), Math.max(c.z(), d.z())));
+        }
+
+        // Defensive fallback for an unexpectedly empty model. In normal use the
+        // quad-derived bounds are preferred because they describe the real geometry.
+        if (!Float.isFinite(minX) || !Float.isFinite(minY) || !Float.isFinite(minZ)
+                || !Float.isFinite(maxX) || !Float.isFinite(maxY) || !Float.isFinite(maxZ)) {
+            minX = 0.0f;
+            minY = 0.0f;
+            minZ = -model.depth() * 0.5f;
+            maxX = model.width();
+            maxY = model.height();
+            maxZ = model.depth() * 0.5f;
+        }
+
+        heaterModelBounds = new ModelBounds(
+                (minX + maxX) * 0.5f,
+                (minY + maxY) * 0.5f,
+                (minZ + maxZ) * 0.5f,
+                (maxX - minX) * 0.5f,
+                (maxY - minY) * 0.5f,
+                (maxZ - minZ) * 0.5f);
+        return heaterModelBounds;
+    }
+
+    private static float getEffectCameraBias(ModelBounds bounds) {
+        float halfX = bounds.halfWidth() / PIXELS_PER_BLOCK;
+        float halfY = bounds.halfDepth() / PIXELS_PER_BLOCK;
+        float halfZ = bounds.halfHeight() / PIXELS_PER_BLOCK;
+        return (float) Math.sqrt(halfX * halfX + halfY * halfY + halfZ * halfZ)
+                + EFFECT_SURFACE_CLEARANCE;
     }
 
     private static Rgb heaterColor(float heat) {
@@ -283,6 +409,10 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
     private static Rgb mix(Rgb a, Rgb b, float amount) {
         return new Rgb(MathHelper.lerp(amount, a.r, b.r),
                 MathHelper.lerp(amount, a.g, b.g), MathHelper.lerp(amount, a.b, b.b));
+    }
+
+    private record ModelBounds(float centerX, float centerY, float centerZ,
+                               float halfWidth, float halfHeight, float halfDepth) {
     }
 
     private record Rgb(float r, float g, float b) {
