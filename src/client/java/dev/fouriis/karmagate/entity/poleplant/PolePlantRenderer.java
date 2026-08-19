@@ -130,6 +130,7 @@ public final class PolePlantRenderer extends EntityRenderer<PolePlantEntity> {
 
             for (int sideIndex = 0; sideIndex < 2; sideIndex++) {
                 double angle = pair * GOLDEN_ANGLE + (sideIndex == 0 ? 0.0 : Math.PI);
+                //double angle = sideIndex == 0 ? 0.0 : Math.PI;
                 Vec3d radial = radial(tangent, angle);
                 LeafState leaf = visual.leaves[pair][sideIndex];
                 Vec3d top = leaf.lastPosition.lerp(leaf.position, tickDelta);
@@ -143,11 +144,29 @@ public final class PolePlantRenderer extends EntityRenderer<PolePlantEntity> {
                 float leafMimic = MathHelper.lerp(tickDelta, leaf.lastMimic, leaf.mimic);
                 float unfold = (float) Math.sqrt(inverseLerp(1.0, 0.6, leafMimic));
                 float flip = -MathHelper.lerp(tickDelta, leaf.lastFlip, leaf.flip);
-                if (f >= 0.75f) flip = Math.abs(flip);
-                float sideSign = sideIndex == 0 ? -1.0f : 1.0f;
-                float signedWidth = sideSign * flip * leafWidth * unfold * (float) SOURCE_UNIT;
-                renderLeafSprite(consumers, matrix, baseSprite, bottom, top, widthAxis,
-                        signedWidth, faceColor[0], faceColor[1], faceColor[2], 255, false, light);
+
+                if (f >= 0.75f) {
+                    flip = Math.abs(flip);
+                }
+
+                float signedWidth =
+                        -flip * leafWidth * unfold * (float) SOURCE_UNIT;
+
+                renderLeafSprite(
+                        consumers,
+                        matrix,
+                        baseSprite,
+                        bottom,
+                        top,
+                        widthAxis,
+                        signedWidth,
+                        faceColor[0],
+                        faceColor[1],
+                        faceColor[2],
+                        255,
+                        false,
+                        light
+                );
 
                 if (pair < pairs * 0.6f) {
                     FAtlasElement detailSprite = f < 0.75f ? scaleB3 : scaleB0;
@@ -248,6 +267,7 @@ public final class PolePlantRenderer extends EntityRenderer<PolePlantEntity> {
                     if (allOpen && leaf.targetMimic > 0.5f) allOpen = false;
 
                     double angle = pair * GOLDEN_ANGLE + (side == 0 ? 0.0 : Math.PI);
+                    //double angle = side == 0 ? 0.0 : Math.PI;
                     Vec3d radial = radial(tangent, angle);
                     Vec3d openDirection = safeNormalize(tangent.multiply(forward(f))
                             .add(radial.multiply(perpendicular(f))), radial);
