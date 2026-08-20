@@ -17,12 +17,21 @@ import java.util.Set;
 /**
  * Manages gate lights for one side (SIDE1 / SIDE2).
  *
- * Per-side we now support up to 4 lamps: two columns along the gate axis (NEAR/FAR),
- * each column can have a bottom and a top. We sort each column bottom->top.
+ * Per chamber we support four physical lamps: two parallel wall columns
+ * (NEAR/FAR), each with a top and bottom fixture. Columns are sorted
+ * bottom -> top.
  *
- * Mirroring rule:
- *  - "bottom pair" lights NEAR-bottom + FAR-top
- *  - "top pair"    lights NEAR-top    + FAR-bottom
+ * <p>The new gate controller addresses physical lamps directly:</p>
+ * <pre>
+ * a = FAR top
+ * b = FAR bottom
+ * c = NEAR top
+ * d = NEAR bottom
+ * </pre>
+ *
+ * <p>That mapping intentionally preserves the requested diagonal startup
+ * sequence: {@code a+d} is the old mirrored "bottom pair", while
+ * {@code b+c} is the old mirrored "top pair".</p>
  */
 public class GateLightGroup {
     /** Save connected gate lights to NBT. */
@@ -197,6 +206,53 @@ public class GateLightGroup {
         lightTopPair(world, true);
     }
 
+    /**
+     * Apply the four physical lamp states supplied by the new gate controller.
+     *
+     * <pre>
+     * a = FAR top
+     * b = FAR bottom
+     * c = NEAR top
+     * d = NEAR bottom
+     * </pre>
+     *
+     * <p>If a malformed build has fewer than four distinct fixtures, duplicate
+     * top/bottom references are ORed naturally: a physical lamp is on when any
+     * logical physical slot resolving to that block position is on.</p>
+     */
+    public void setPhysicalStates(
+            World world,
+            boolean a,
+            boolean b,
+            boolean c,
+            boolean d
+    ) {
+        Set<BlockPos> lit = new HashSet<>();
+
+        addIfLit(lit, topFar(), a);
+        addIfLit(lit, bottomFar(), b);
+        addIfLit(lit, topNear(), c);
+        addIfLit(lit, bottomNear(), d);
+
+        for (LightRef ref : nearCol) {
+            setOne(world, ref.pos, lit.contains(ref.pos));
+        }
+
+        for (LightRef ref : farCol) {
+            setOne(world, ref.pos, lit.contains(ref.pos));
+        }
+    }
+
+    private static void addIfLit(
+            Set<BlockPos> lit,
+            LightRef ref,
+            boolean on
+    ) {
+        if (on && ref != null) {
+            lit.add(ref.pos);
+        }
+    }
+
     /** Apply the two logical RegionGate lamp states represented by this side. */
     public void setPairStates(World world, boolean bottom, boolean top) {
         Set<BlockPos> lit = new HashSet<>();
@@ -256,17 +312,17 @@ public class GateLightGroup {
         if (!(world instanceof ServerWorld sw)) return;
         for (LightRef ref : nearCol) {
             BlockEntity be = sw.getBlockEntity(ref.pos);
-            if (be instanceof GateLightBlockEntity lamp) lamp.setLit(lit);
+            if (be instanceof GateLightBlockEntity lamp) lamp.setGateLit(lit);
         }
         for (LightRef ref : farCol) {
             BlockEntity be = sw.getBlockEntity(ref.pos);
-            if (be instanceof GateLightBlockEntity lamp) lamp.setLit(lit);
+            if (be instanceof GateLightBlockEntity lamp) lamp.setGateLit(lit);
         }
     }
 
     private void setOne(World world, BlockPos pos, boolean lit) {
         if (!(world instanceof ServerWorld sw)) return;
         BlockEntity be = sw.getBlockEntity(pos);
-        if (be instanceof GateLightBlockEntity lamp) lamp.setLit(lit);
+        if (be instanceof GateLightBlockEntity lamp) lamp.setGateLit(lit);
     }
 }

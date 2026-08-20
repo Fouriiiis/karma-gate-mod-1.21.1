@@ -83,6 +83,18 @@ public class GateLightBlockEntity extends BlockEntity implements GeoBlockEntity 
 
     public boolean isLit() { return lit; }
 
+    /**
+     * Gate-controller-specific setter.
+     *
+     * <p>The controller now resolves the physical a/b/c/d lamp state itself.
+     * GateLightGroup calls this method for each physical fixture. The block
+     * entity remains responsible only for applying/syncing the final lit
+     * state.</p>
+     */
+    public void setGateLit(boolean value) {
+        setLit(value);
+    }
+
     public void tick(World world, BlockPos pos, BlockState state, GateLightBlockEntity be) {
         // Server-side safety: if the block becomes broken while lit, force it off
         if (!world.isClient) {

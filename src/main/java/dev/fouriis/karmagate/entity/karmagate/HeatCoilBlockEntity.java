@@ -21,6 +21,18 @@ public class HeatCoilBlockEntity extends BlockEntity {
     private boolean enabled = false;
     private boolean gateManaged = false;
 
+    /*
+     * Exact state supplied by KarmaGateController while gateManaged.
+     *
+     * heat remains the source "current heat" so existing renderers/getHeat()
+     * continue to work. The additional fields expose the rest of
+     * RegionGateGraphics' heater state instead of recomputing it locally.
+     */
+    private float gateTargetHeat = 0.0f;
+    private float gateLightAlpha = 0.0f;
+    private float gateLightRadius = 0.0f;
+    private float gateDistortionAlpha = 0.0f;
+
     // all external/additional contributions for the *current* server tick
     private float pendingDelta = 0f;
 
@@ -104,6 +116,12 @@ public class HeatCoilBlockEntity extends BlockEntity {
      */
     public float getVisualHeat() {
         float baseNow = this.heat;
+
+        // Gate puffs already cool currentHeat in KarmaGateController using the
+        // source stochastic formula. Do not apply the old client-only cooling
+        // pulse a second time to gate-managed heaters.
+        if (gateManaged) return baseNow;
+
         if (world == null || !world.isClient || clientFlickerDuration <= 0 || clientFlickerDip <= 0f) return baseNow;
         long now = world.getTime();
         int elapsed = (int)Math.max(0L, now - clientFlickerStartTick);
@@ -169,26 +187,79 @@ public class HeatCoilBlockEntity extends BlockEntity {
 
     public boolean isEnabled() { return enabled; }
 
-    /** Server-authoritative heat (client will read the synced value). */
+    /** Server-authoritative current heat (client reads the synced value). */
     public float getHeat() { return heat; }
+
+    public boolean isGateManaged() { return gateManaged; }
+    public float getGateTargetHeat() { return gateTargetHeat; }
+    public float getGateLightAlpha() { return gateLightAlpha; }
+    public float getGateLightRadius() { return gateLightRadius; }
+    public float getGateDistortionAlpha() { return gateDistortionAlpha; }
+
+    /**
+     * Exact RegionGateGraphics state supplied by the 40 Hz gate simulation.
+     *
+     * <p>No heating/cooling is performed here. The controller is authoritative
+     * for current heat, target heat, water-induced cooling, light flicker and
+     * distortion intensity.</p>
+     */
+    public void setGateHeatState(
+            float currentHeat,
+            float targetHeat,
+            float lightAlpha,
+            float lightRadius,
+            float distortionAlpha
+    ) {
+        if (world != null && world.isClient) return;
+
+        float nextHeat = clamp01(currentHeat);
+        float nextTarget = clamp01(targetHeat);
+        float nextLightAlpha = clamp01(lightAlpha);
+        float nextLightRadius = Math.max(0.0f, lightRadius);
+        float nextDistortionAlpha = clamp01(distortionAlpha);
+
+        boolean changed =
+                !gateManaged
+                || Math.abs(nextHeat - heat) > EPS
+                || Math.abs(nextTarget - gateTargetHeat) > EPS
+                || Math.abs(nextLightAlpha - gateLightAlpha) > EPS
+                || Math.abs(nextLightRadius - gateLightRadius) > EPS
+                || Math.abs(nextDistortionAlpha - gateDistortionAlpha) > EPS;
+
+        gateManaged = true;
+        enabled = false;
+        pendingDelta = 0.0f;
+
+        heat = nextHeat;
+        gateTargetHeat = nextTarget;
+        gateLightAlpha = nextLightAlpha;
+        gateLightRadius = nextLightRadius;
+        gateDistortionAlpha = nextDistortionAlpha;
+
+        if (changed) {
+            markDirtySync();
+        }
+    }
+
+    /**
+     * Legacy single-value gate hook retained for old callers. New controller
+     * code should use {@link #setGateHeatState(float, float, float, float, float)}.
+     */
+    public void setGateHeat(float value) {
+        setGateHeatState(
+                value,
+                value,
+                0.0f,
+                0.0f,
+                0.0f
+        );
+    }
 
     /**
      * Exact RegionGateGraphics heat supplied by the 40 Hz gate simulation.
      * This bypasses the older generic on/off heater rate while the coil is
      * bound to a gate.
      */
-    public void setGateHeat(float value) {
-        if (world != null && world.isClient) return;
-        gateManaged = true;
-        enabled = false;
-        pendingDelta = 0.0f;
-        float next = clamp01(value);
-        if (Math.abs(next - heat) > EPS) {
-            heat = next;
-            markDirtySync();
-        }
-    }
-
     /* ================= ticking ================= */
 
     /** Server tick: accumulate all contributions and apply once. */
@@ -229,8 +300,21 @@ public class HeatCoilBlockEntity extends BlockEntity {
             return;
         }
 
+        if (gateManaged) {
+            /*
+             * readNbt() advances previousClientHeaterHeat -> clientHeaterHeat
+             * whenever a new authoritative sample arrives. Do not overwrite
+             * those endpoints in the client tick or render interpolation would
+             * collapse to a constant value.
+             */
+            clientLightFlicker = 1.0f;
+            clientLightColorFlicker = 1.0f;
+            return;
+        }
+
         previousClientHeaterHeat = clientHeaterHeat;
-        // RegionGateGraphics updates at 40 Hz; advance twice per Minecraft tick.
+
+        // Preserve the old standalone-heater visual behavior.
         for (int step = 0; step < 2; step++) {
             clientHeaterHeat += (target - clientHeaterHeat) * 0.7f;
             clientLightFlicker = 0.8f + 0.2f * world.random.nextFloat();
@@ -252,15 +336,39 @@ public class HeatCoilBlockEntity extends BlockEntity {
         nbt.putFloat("heat", heat);
         nbt.putBoolean("enabled", enabled);
         nbt.putBoolean("gateManaged", gateManaged);
+        nbt.putFloat("gateTargetHeat", gateTargetHeat);
+        nbt.putFloat("gateLightAlpha", gateLightAlpha);
+        nbt.putFloat("gateLightRadius", gateLightRadius);
+        nbt.putFloat("gateDistortionAlpha", gateDistortionAlpha);
         // pendingDelta is transient per tick and not persisted
     }
 
     @Override
     public void readNbt(NbtCompound nbt, RegistryWrapper.WrapperLookup lookup) {
         super.readNbt(nbt, lookup);
-        this.heat = nbt.getFloat("heat");
+
+        float incomingHeat = clamp01(nbt.getFloat("heat"));
+
+        if (world != null && world.isClient && clientHeaterVisualInitialized) {
+            previousClientHeaterHeat = clientHeaterHeat;
+            clientHeaterHeat = incomingHeat;
+        }
+
+        this.heat = incomingHeat;
         this.enabled = nbt.getBoolean("enabled");
         this.gateManaged = nbt.getBoolean("gateManaged");
+        this.gateTargetHeat = nbt.contains("gateTargetHeat")
+                ? clamp01(nbt.getFloat("gateTargetHeat"))
+                : this.heat;
+        this.gateLightAlpha = nbt.contains("gateLightAlpha")
+                ? clamp01(nbt.getFloat("gateLightAlpha"))
+                : 0.0f;
+        this.gateLightRadius = nbt.contains("gateLightRadius")
+                ? Math.max(0.0f, nbt.getFloat("gateLightRadius"))
+                : 0.0f;
+        this.gateDistortionAlpha = nbt.contains("gateDistortionAlpha")
+                ? clamp01(nbt.getFloat("gateDistortionAlpha"))
+                : 0.0f;
         this.pendingDelta = 0f;
     }
 
