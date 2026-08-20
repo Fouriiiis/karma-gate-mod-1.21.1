@@ -21,6 +21,7 @@ import net.minecraft.client.render.VertexFormat;
 import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactory;
+import net.minecraft.client.texture.AbstractTexture;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.client.texture.SpriteAtlasTexture;
 import net.minecraft.util.Identifier;
@@ -40,6 +41,9 @@ public final class HologramProjectorRenderer
     private static final float GLYPH_FROM_WALL_PIXELS = 3.4f;
     private static final float HOLOGRAM_THRESHOLD = 0.5f;
     private static final int FULL_BRIGHT = LightmapTextureManager.MAX_LIGHT_COORDINATE;
+    // GateHologram multiplies u_RAIN by 145.14 in a float shader. Wrapping the
+    // clock preserves sub-tick precision in worlds with very large game times.
+    private static final long SHADER_TIME_PERIOD_TICKS = 409_600L;
 
     // The glyph is intentionally before steam and grab-texture distortion passes,
     // allowing all of the libMod effects to compose in scene order.
@@ -47,6 +51,7 @@ public final class HologramProjectorRenderer
     private static final Identifier NOISE_TEXTURE =
             Identifier.of("librainworldmc", "textures/rainworld/palettes/noise2.png");
     private static final Map<String, FAtlasElement> GLYPHS = new HashMap<>();
+    private static AbstractTexture filteredNoiseTexture;
 
     public HologramProjectorRenderer(BlockEntityRendererFactory.Context context) {
     }
@@ -57,6 +62,7 @@ public final class HologramProjectorRenderer
         if (glyph.getWorld() == null) return;
         FAtlasElement element = getGlyph(glyph.getSymbolKey());
         if (element == null || element.textureIdentifier == null) return;
+        ensureUnityNoiseFiltering();
 
         float fade = MathHelper.clamp(glyph.getInterpolatedFade(tickDelta), 0.0f, 1.0f);
         if (fade <= 0.001f) return;
@@ -65,7 +71,10 @@ public final class HologramProjectorRenderer
         double anchorX = glyph.getPos().getX() + 0.5;
         double anchorY = glyph.getPos().getY() + ANCHOR_Y_PIXELS / PIXELS_PER_BLOCK;
         double anchorZ = glyph.getPos().getZ() + 0.5;
-        float rain = (glyph.getWorld().getTime() + tickDelta) / 100.0f;
+        long wrappedTime = Math.floorMod(
+                glyph.getWorld().getTime(),
+                SHADER_TIME_PERIOD_TICKS);
+        float rain = (wrappedTime + tickDelta) / 100.0f;
 
         RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall(camera ->
                 renderGlyph(camera, facing, anchorX, anchorY, anchorZ,
@@ -119,6 +128,11 @@ public final class HologramProjectorRenderer
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
         RenderSystem.disableCull();
+        /*
+         * Match GateHologram exactly: vertex alpha controls the animated noise
+         * cutoff and horizontal stabilization, while surviving pixels remain
+         * fully luminous. It is deliberately not a conventional opacity fade.
+         */
         RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
         boolean shaderApplied = false;
         try {
@@ -143,6 +157,7 @@ public final class HologramProjectorRenderer
         RenderSystem.setShaderTexture(0, element.textureIdentifier);
         BufferRenderer.drawWithGlobalProgram(buffer.end());
 
+        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
         RenderSystem.setShader(GameRenderer::getParticleProgram);
         RenderSystem.setShaderTexture(0, SpriteAtlasTexture.PARTICLE_ATLAS_TEXTURE);
         RenderSystem.depthMask(true);
@@ -169,6 +184,21 @@ public final class HologramProjectorRenderer
         } catch (IllegalStateException ignored) {
             return null;
         }
+    }
+
+    /**
+     * Unity imports _NoiseTex2 with bilinear filtering. Minecraft resource
+     * textures default to nearest filtering without an mcmeta file; noise2 is
+     * strongly quantized, so nearest filtering turns the intended progressive
+     * cutoff into a few abrupt on/off bands.
+     */
+    private static void ensureUnityNoiseFiltering() {
+        AbstractTexture texture = MinecraftClient.getInstance()
+                .getTextureManager()
+                .getTexture(NOISE_TEXTURE);
+        if (texture == filteredNoiseTexture) return;
+        texture.setFilter(true, false);
+        filteredNoiseTexture = texture;
     }
 
     private static float positive(float preferred, float fallback) {

@@ -18,6 +18,13 @@ import net.minecraft.util.math.BlockPos;
 import java.util.Random;
 
 public class HologramProjectorBlockEntity extends BlockEntity {
+    private static final int ELECTRIC_GATE_COLOR = 0xFFBF80;
+    // Rain World palette1, Unity pixel (13, 7). Unity addresses textures from
+    // the bottom, so this is the PNG's top-row white pixel, not the dark pixel
+    // at top-origin image coordinate (13, 7).
+    private static final int WATER_GATE_COLOR = 0xFFFFFF;
+    private static final int UNLOCKED_COLOR = 0x33CCFF;
+
     // server-authoritative selected symbol (0..5 plus D mapped to 6)
     // 0..5 => gateSymbol0.png..gateSymbol5.png, 6 => gateSymbolD.png
     private int symbolIdx = 0;
@@ -28,7 +35,9 @@ public class HologramProjectorBlockEntity extends BlockEntity {
     // 40 Hz, so the Minecraft ticker advances it twice per game tick.
     private float fade = 1.0f;
     private float previousFade = 1.0f;
-    private float goalFade = 1.0f;
+    // C# fields default to zero; the constructor initializes fade/lastFade,
+    // but deliberately leaves goalFade at its language default.
+    private float goalFade;
     private float flicker;
     private float sinAdder;
     private float redSine;
@@ -42,10 +51,24 @@ public class HologramProjectorBlockEntity extends BlockEntity {
     private final Random visualRandom;
     private float targetLevel = 0.0f;
 
+    /*
+     * Server-synchronised inputs to the original GateKarmaGlyph state machine.
+     * Sending these instead of a precomputed alpha is important: goalFade,
+     * fade and flicker all have independent history in the C# implementation.
+     */
+    private boolean controllerDriven;
+    private boolean electricGate;
+    private boolean gateClosedLike = true;
+    private boolean thisSideSelected;
+    private boolean electricLampsActive;
+    private boolean energyEnough = true;
+    private boolean gateUnlocked;
+    private int gateStartCounter;
+
     // Authoritative enum (no raw float/int for karma kept as state)
     private KarmaLevel karmaLevel = KarmaLevel.LEVEL_0;
 
-    // palette1 (13,0), the shortcut color used by the water-gate glyph.
+    // Custom base color used only by an unbound/standalone projector.
     private int colorRGB = 0xFFFFFF;
     // red for low power mode
     private int lowPowerRGB = 0xFF0000;
@@ -87,7 +110,11 @@ public class HologramProjectorBlockEntity extends BlockEntity {
 
     // client: used by renderer
     public void setSymbolKey(String key) { this.symbolKey = key; }
-    public String getSymbolKey() { return symbolKey; }
+    public String getSymbolKey() {
+        return controllerDriven && gateUnlocked
+                ? keyFor(KarmaLevel.LEVEL_0)
+                : symbolKey;
+    }
     public int getSymbolIndex() { return symbolIdx; }
 
     public float getStaticLevel() { return targetLevel; }
@@ -154,11 +181,13 @@ public class HologramProjectorBlockEntity extends BlockEntity {
 
     private void updateClientVisuals() {
         if (!visualStateInitialized) {
-            float[] base = unpack(colorRGB);
+            float[] base = unpack(defaultColorRGB());
             colorRed = previousColorRed = base[0];
             colorGreen = previousColorGreen = base[1];
             colorBlue = previousColorBlue = base[2];
-            fade = previousFade = 1.0f - targetLevel;
+            // GateKarmaGlyph constructs both fade values at one, then lets the
+            // reference state machine settle them toward goalFade.
+            fade = previousFade = 1.0f;
             visualStateInitialized = true;
         }
 
@@ -172,21 +201,54 @@ public class HologramProjectorBlockEntity extends BlockEntity {
     }
 
     private void updateClientVisualStep() {
-        // Low power controls color and extra flicker; the controller supplies
-        // the independent reference fade target for the current gate mode.
-        goalFade = 1.0f - targetLevel;
+        boolean noEnergy = controllerDriven ? !energyEnough : lowPower;
+
+        if (controllerDriven) {
+            // GateKarmaGlyph.Update, unchanged apart from receiving the gate
+            // fields over block-entity sync and running two steps per MC tick.
+            if (gateClosedLike) {
+                if (thisSideSelected || electricGate) {
+                    if (electricGate && electricLampsActive) {
+                        goalFade = Math.max(0.0f, goalFade - 0.025f);
+                    } else {
+                        goalFade = noEnergy
+                                ? 0.82f
+                                : inverseLerp(
+                                        electricGate ? 10.0f : 40.0f,
+                                        0.0f,
+                                        gateStartCounter);
+                    }
+                } else {
+                    goalFade = Math.min(
+                            noEnergy ? 0.82f : 1.0f,
+                            goalFade + 1.0f / 30.0f);
+                }
+            } else {
+                goalFade = Math.max(0.0f, goalFade - 0.025f);
+            }
+        } else {
+            // Preserve the sneak-use visibility control for projectors that
+            // are deliberately placed without a KarmaGateController.
+            goalFade = 1.0f - targetLevel;
+        }
+
         fade = lerpAndTick(fade, Math.min(goalFade, 1.0f - flicker), 0.01f, 0.05f);
 
         float period = flicker == 0.0f ? lerp(30.0f, 780.0f, goalFade) : 30.0f;
         if (visualRandom.nextFloat() < 1.0f / period) flicker = visualRandom.nextFloat();
-        if (lowPower && visualRandom.nextFloat() < 1.0f / 70.0f) {
+        if (noEnergy && visualRandom.nextFloat() < 1.0f / 70.0f) {
             flicker = Math.max(flicker, visualRandom.nextFloat());
         }
         if (flicker > 0.0f) flicker = Math.max(0.0f, flicker - 0.05f);
 
-        float[] target = unpack(colorRGB);
-        if (lowPower) {
-            sinAdder += 1.0f;
+        float[] target = unpack(defaultColorRGB());
+        if (controllerDriven && gateUnlocked) {
+            float[] unlocked = unpack(UNLOCKED_COLOR);
+            target[0] = lerp(target[0], unlocked[0], 0.6f);
+            target[1] = lerp(target[1], unlocked[1], 0.6f);
+            target[2] = lerp(target[2], unlocked[2], 0.6f);
+        }
+        if (noEnergy) {
             float redMix = clamp01(0.4f + 0.5f * (float) Math.sin(sinAdder / 12.0f));
             float[] low = unpack(lowPowerRGB);
             target[0] = lerp(target[0], low[0], redMix);
@@ -204,6 +266,14 @@ public class HologramProjectorBlockEntity extends BlockEntity {
             colorGreen = pulse;
             colorBlue = pulse;
         }
+
+        // The source increments this after evaluating GetToColor.
+        if (noEnergy) sinAdder += 1.0f;
+    }
+
+    private int defaultColorRGB() {
+        if (!controllerDriven) return colorRGB;
+        return electricGate ? ELECTRIC_GATE_COLOR : WATER_GATE_COLOR;
     }
 
     private static float lerpAndTick(float from, float to, float lerp, float tick) {
@@ -217,6 +287,11 @@ public class HologramProjectorBlockEntity extends BlockEntity {
 
     private static float clamp01(float value) {
         return Math.max(0.0f, Math.min(1.0f, value));
+    }
+
+    private static float inverseLerp(float from, float to, float value) {
+        if (from == to) return 0.0f;
+        return clamp01((value - from) / (to - from));
     }
 
     private static float[] unpack(int rgb) {
@@ -238,10 +313,47 @@ public class HologramProjectorBlockEntity extends BlockEntity {
         // Do NOT overwrite base color; we blend between existing base (colorRGB) and lowPowerRGB in getDisplayColor.
         boolean changed = (this.lowPower != lowPower);
         this.lowPower = lowPower;
-        if (changed) {
-            System.out.println("HologramProjectorBlockEntity: setLowpower " + this.lowPower);
-            markDirtySync(); // sync the flag so clients update pulsing
-        }
+        if (changed) markDirtySync();
+    }
+
+    /**
+     * Supplies the semantic RegionGate fields consumed by GateKarmaGlyph.
+     * Visual history remains client-local, matching Rain World's cosmetic
+     * object instead of snapping to a server-computed opacity.
+     */
+    public void setGateGlyphState(
+            KarmaGateController.GateType type,
+            boolean closedLike,
+            boolean sideSelected,
+            int startCounter,
+            boolean lampsActive,
+            boolean hasEnergy,
+            boolean unlocked
+    ) {
+        if (world != null && world.isClient) return;
+
+        boolean nextElectric = type == KarmaGateController.GateType.ELECTRIC;
+        int nextCounter = Math.max(0, startCounter);
+        boolean changed = !controllerDriven
+                || electricGate != nextElectric
+                || gateClosedLike != closedLike
+                || thisSideSelected != sideSelected
+                || gateStartCounter != nextCounter
+                || electricLampsActive != lampsActive
+                || energyEnough != hasEnergy
+                || gateUnlocked != unlocked;
+
+        controllerDriven = true;
+        electricGate = nextElectric;
+        gateClosedLike = closedLike;
+        thisSideSelected = sideSelected;
+        gateStartCounter = nextCounter;
+        electricLampsActive = lampsActive;
+        energyEnough = hasEnergy;
+        gateUnlocked = unlocked;
+        lowPower = !hasEnergy;
+
+        if (changed) markDirtySync();
     }
 
     /* ================= sync & NBT ================= */
@@ -260,6 +372,14 @@ public class HologramProjectorBlockEntity extends BlockEntity {
         nbt.putInt("colorRGB", colorRGB);
         nbt.putBoolean("lowPower", lowPower); // ensure client knows to pulse
         nbt.putInt("lowPowerRGB", lowPowerRGB); // in case this is customized later
+        nbt.putBoolean("controllerDriven", controllerDriven);
+        nbt.putBoolean("electricGate", electricGate);
+        nbt.putBoolean("gateClosedLike", gateClosedLike);
+        nbt.putBoolean("thisSideSelected", thisSideSelected);
+        nbt.putBoolean("electricLampsActive", electricLampsActive);
+        nbt.putBoolean("energyEnough", energyEnough);
+        nbt.putBoolean("gateUnlocked", gateUnlocked);
+        nbt.putInt("gateStartCounter", gateStartCounter);
         // put controller position
         if (controller != null) {
             BlockPos ctrlPos = controller.getPos();
@@ -305,6 +425,18 @@ public class HologramProjectorBlockEntity extends BlockEntity {
         }
         if (nbt.contains("lowPower")) this.lowPower = nbt.getBoolean("lowPower");
         if (nbt.contains("lowPowerRGB")) this.lowPowerRGB = nbt.getInt("lowPowerRGB") & 0xFFFFFF;
+        if (nbt.contains("controllerDriven")) this.controllerDriven = nbt.getBoolean("controllerDriven");
+        if (nbt.contains("electricGate")) this.electricGate = nbt.getBoolean("electricGate");
+        if (nbt.contains("gateClosedLike")) this.gateClosedLike = nbt.getBoolean("gateClosedLike");
+        if (nbt.contains("thisSideSelected")) this.thisSideSelected = nbt.getBoolean("thisSideSelected");
+        if (nbt.contains("electricLampsActive")) this.electricLampsActive = nbt.getBoolean("electricLampsActive");
+        if (nbt.contains("energyEnough")) {
+            this.energyEnough = nbt.getBoolean("energyEnough");
+        } else {
+            this.energyEnough = !lowPower;
+        }
+        if (nbt.contains("gateUnlocked")) this.gateUnlocked = nbt.getBoolean("gateUnlocked");
+        if (nbt.contains("gateStartCounter")) this.gateStartCounter = Math.max(0, nbt.getInt("gateStartCounter"));
         // read controller position and link (if possible)
         if (nbt.contains("controllerX") && nbt.contains("controllerY") && nbt.contains("controllerZ")) {
             BlockPos ctrlPos = new BlockPos(nbt.getInt("controllerX"), nbt.getInt("controllerY"), nbt.getInt("controllerZ"));

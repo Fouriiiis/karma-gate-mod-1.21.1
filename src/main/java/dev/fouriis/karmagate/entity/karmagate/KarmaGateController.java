@@ -2325,96 +2325,95 @@ public final class KarmaGateController {
     }
 
     private void applyHologramControls(World world) {
-        boolean unavailable =
-                mode == Mode.Recharge
-                        || !energyEnoughToOpen();
+        /*
+         * GateKarmaGlyph is a stateful 40 Hz cosmetic object. Do not collapse
+         * its inputs into a binary visibility value here: the client needs the
+         * actual gate fields to reproduce goalFade, fade and flicker.
+         */
+        boolean closedLike =
+                mode == Mode.MiddleClosed
+                        || mode == Mode.Closed
+                        || mode == Mode.Recharge
+                        || mode == Mode.Broken;
 
-        float side1Fade;
-        float side2Fade;
-
-        if (mode == Mode.MiddleClosed) {
-            side1Fade = 1.0f;
-            side2Fade = 1.0f;
-
-            if (gateType == GateType.WATER) {
-                if (startCounterSide1 > 0) {
-                    side1Fade =
-                            inverseLerp(
-                                    40.0f,
-                                    0.0f,
-                                    startCounterSide1
-                            );
-                }
-
-                if (startCounterSide2 > 0) {
-                    side2Fade =
-                            inverseLerp(
-                                    40.0f,
-                                    0.0f,
-                                    startCounterSide2
-                            );
-                }
-            } else if (gateType == GateType.ELECTRIC) {
-                if (startCounterSide1 > 0) {
-                    float preparingFade =
-                            inverseLerp(
-                                    10.0f,
-                                    0.0f,
-                                    startCounterSide1
-                            );
-
-                    side1Fade =
-                            lampVisible[1]
-                                    || lampVisible[2]
-                                    ? 0.0f
-                                    : preparingFade;
-                }
-
-                if (startCounterSide2 > 0) {
-                    float preparingFade =
-                            inverseLerp(
-                                    10.0f,
-                                    0.0f,
-                                    startCounterSide2
-                            );
-
-                    side2Fade =
-                            lampVisible[0]
-                                    || lampVisible[3]
-                                    ? 0.0f
-                                    : preparingFade;
-                }
+        boolean anyLogicalLamp = false;
+        for (boolean lampOn : lampsOn) {
+            if (lampOn) {
+                anyLogicalLamp = true;
+                break;
             }
-        } else if (mode == Mode.Closed) {
-            side1Fade =
-                    side2Fade =
-                            unavailable
-                                    ? 0.82f
-                                    : 1.0f;
-        } else if (mode == Mode.Recharge) {
-            /*
-             * Show recharge progress rather than pretending the gate is ready
-             * as soon as the resource crosses 0.5.
-             */
-            float progress = rechargeProgress();
-            side1Fade = 1.0f - progress;
-            side2Fade = 1.0f - progress;
-        } else {
-            side1Fade = 0.0f;
-            side2Fade = 0.0f;
         }
 
-        setHologramTargetLevels(
+        int activeStartCounter =
+                entrySide == null
+                        ? 0
+                        : startupCounter(entrySide);
+
+        /*
+         * Closed and Recharge are the Minecraft reusable-gate lifecycle. Once
+         * a cycle has completed, keep GateKarmaGlyph in its no-energy state
+         * for the whole cooldown/recharge, even when the resource crosses the
+         * source's 50% opening threshold. It becomes ready only after the
+         * lifecycle has fully reset the controller to MiddleClosed.
+         */
+        boolean resetComplete =
+                mode != Mode.Closed
+                        && mode != Mode.Recharge;
+        boolean hasEnergy =
+                resetComplete
+                        && energyEnoughToOpen();
+
+        setHologramGateStateForSide(
                 world,
-                1.0f - side1Fade,
-                1.0f - side2Fade
+                Side.SIDE1,
+                closedLike,
+                entrySide == Side.SIDE1,
+                activeStartCounter,
+                anyLogicalLamp,
+                hasEnergy
         );
 
-        setHologramLowPower(
+        setHologramGateStateForSide(
                 world,
-                unavailable,
-                unavailable
+                Side.SIDE2,
+                closedLike,
+                entrySide == Side.SIDE2,
+                activeStartCounter,
+                anyLogicalLamp,
+                hasEnergy
         );
+    }
+
+    private void setHologramGateStateForSide(
+            World world,
+            Side side,
+            boolean closedLike,
+            boolean sideSelected,
+            int startCounter,
+            boolean lampsActive,
+            boolean hasEnergy
+    ) {
+        List<BlockPos> positions =
+                side == Side.SIDE1
+                        ? hologramSide1
+                        : hologramSide2;
+
+        for (BlockPos pos : positions) {
+            if (
+                    world.getBlockEntity(pos)
+                            instanceof HologramProjectorBlockEntity hologram
+            ) {
+                hologram.setGateGlyphState(
+                        gateType,
+                        closedLike,
+                        sideSelected,
+                        startCounter,
+                        lampsActive,
+                        hasEnergy,
+                        false
+                );
+            }
+        }
     }
 
     private boolean energyEnoughToOpen() {
