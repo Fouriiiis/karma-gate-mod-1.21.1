@@ -72,7 +72,7 @@ public final class PolePlantRenderer extends EntityRenderer<PolePlantEntity> {
 
         Matrix4f matrix = matrices.peek().getPositionMatrix();
         float visualLook = MathHelper.lerp(tickDelta, visual.lastLook, visual.look);
-        int[] bodyColor = mixColor(7, 8, 9, 64, 79, 56, visualLook);
+        int[] bodyColor = mixColor(7, 8, 9, 130, 107, 194, visualLook);
         renderStem(path, visual, tickDelta, bodyColor, matrix, consumers, light);
         renderLeaves(entity, path, visual, tickDelta, bodyColor, matrix, consumers, light);
     }
