@@ -1,0 +1,8 @@
+{
+  "variants": {
+    "facing=north": { "model": "karma-gate-mod:block/gravity_disruptor" },
+    "facing=east":  { "model": "karma-gate-mod:block/gravity_disruptor", "y": 90 },
+    "facing=south": { "model": "karma-gate-mod:block/gravity_disruptor", "y": 180 },
+    "facing=west":  { "model": "karma-gate-mod:block/gravity_disruptor", "y": 270 }
+  }
+}

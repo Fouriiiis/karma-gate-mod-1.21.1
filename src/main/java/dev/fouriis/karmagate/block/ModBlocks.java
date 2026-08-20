@@ -8,6 +8,7 @@ import dev.fouriis.karmagate.block.karmagate.WaterStreamBlock;
 import dev.fouriis.karmagate.block.karmagate.WaterfallBlock;
 import dev.fouriis.karmagate.block.karmagate.GateLightBlock;
 import dev.fouriis.karmagate.block.karmagate.HeatCoilBlock;
+import dev.fouriis.karmagate.block.gravity.GravityDisruptorBlock;
 import dev.fouriis.karmagate.block.shelterdoor.ShelterDoorBlock;
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
 import dev.fouriis.karmagate.item.KarmaGateItem;
@@ -60,6 +61,12 @@ public class ModBlocks {
     public static final Block STEAM_EMITTER = registerBlock("steam_emitter",
         new SteamEmitterBlock(Block.Settings.create()
             .strength(3.0f)
+            .sounds(BlockSoundGroup.METAL)
+            .nonOpaque()));
+
+    public static final Block GRAVITY_DISRUPTOR = registerBlock("gravity_disruptor",
+        new GravityDisruptorBlock(Block.Settings.create()
+            .strength(5.0f)
             .sounds(BlockSoundGroup.METAL)
             .nonOpaque()));
 
@@ -145,6 +152,7 @@ public class ModBlocks {
             entries.add(WATER_STREAM);
             entries.add(WATERFALL);
             entries.add(STEAM_EMITTER);
+            entries.add(GRAVITY_DISRUPTOR);
             entries.add(HOLOGRAM_PROJECTOR);
             entries.add(SHELTER_DOOR);
             entries.add(WORM_GRASS);
