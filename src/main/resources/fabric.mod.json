@@ -24,6 +24,7 @@
 			"dev.fouriis.karmagate.client.AtcCloudShaders",
 			"dev.fouriis.karmagate.client.gridproject.GridProjectShaders",
 			"dev.fouriis.karmagate.client.waterfall.WaterfallShaders",
+			"dev.fouriis.karmagate.client.rot.RotShaders",
 			"dev.fouriis.karmagate.client.graffiti.GraffitiShaders"
 		]
 	},

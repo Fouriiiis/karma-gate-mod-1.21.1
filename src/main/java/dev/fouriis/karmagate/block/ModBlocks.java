@@ -107,7 +107,7 @@ public class ModBlocks {
             .sounds(BlockSoundGroup.GRASS)
             .dropsNothing()));
 
-    // Rot (Daddy Corruption): invisible block that renders flesh clusters on adjacent surfaces
+    // Rot (Daddy Corruption): invisible placed-object anchor with a persistent radius
     public static final Block ROT_BLOCK = registerBlock("rot_block",
         new RotBlock(Block.Settings.create()
             .mapColor(MapColor.CLEAR)

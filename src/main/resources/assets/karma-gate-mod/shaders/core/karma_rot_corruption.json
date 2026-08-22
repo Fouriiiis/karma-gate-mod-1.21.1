@@ -1,0 +1,20 @@
+{
+  "blend": { "func": "add", "srcrgb": "src_alpha", "dstrgb": "one_minus_src_alpha" },
+  "vertex": "karma-gate-mod:karma_rot_corruption",
+  "fragment": "karma-gate-mod:karma_rot_corruption",
+  "attributes": [ "Position", "Color", "UV0", "UV2", "Normal" ],
+  "samplers": [
+    { "name": "Sampler0", "wrap": "repeat", "minfilter": "linear", "magfilter": "linear" },
+    { "name": "Sampler1", "minfilter": "linear", "magfilter": "linear" }
+  ],
+  "uniforms": [
+    { "name": "ModelViewMat", "type": "matrix4x4", "count": 16,
+      "values": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] },
+    { "name": "ProjMat", "type": "matrix4x4", "count": 16,
+      "values": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] },
+    { "name": "uViewMat", "type": "matrix4x4", "count": 16,
+      "values": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] },
+    { "name": "uMode", "type": "float", "count": 1, "values": [0] },
+    { "name": "uViewDepthBias", "type": "float", "count": 1, "values": [0] }
+  ]
+}

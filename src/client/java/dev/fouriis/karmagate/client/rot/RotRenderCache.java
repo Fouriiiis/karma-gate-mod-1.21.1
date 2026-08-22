@@ -55,11 +55,13 @@ public final class RotRenderCache {
         } else {
             CHUNK_TO_POSITIONS.put(key, positions);
         }
+        RotWorldRenderer.markDirty();
     }
 
     public static void onChunkUnload(ClientWorld world, Chunk chunk) {
         long key = ChunkPos.toLong(chunk.getPos().x, chunk.getPos().z);
         CHUNK_TO_POSITIONS.remove(key);
+        RotWorldRenderer.markDirty();
     }
 
     public static List<Long> getPositionsForChunk(int chunkX, int chunkZ) {
@@ -81,6 +83,7 @@ public final class RotRenderCache {
         }
         long lp = BlockPos.asLong(pos.getX(), pos.getY(), pos.getZ());
         if (!list.contains(lp)) list.add(lp);
+        RotWorldRenderer.markDirty();
     }
 
     public static void onBlockRemoved(ClientWorld world, BlockPos pos) {
@@ -93,6 +96,7 @@ public final class RotRenderCache {
         long lp = BlockPos.asLong(pos.getX(), pos.getY(), pos.getZ());
         list.remove(lp);
         if (list.isEmpty()) CHUNK_TO_POSITIONS.remove(key);
+        RotWorldRenderer.markDirty();
     }
 
     public static void clearAll() {

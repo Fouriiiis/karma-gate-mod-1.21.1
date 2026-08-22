@@ -1,788 +1,834 @@
 package dev.fouriis.karmagate.client.rot;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import dev.fouriis.karmagate.block.ModBlocks;
+import dev.fouriis.karmagate.entity.rot.RotBlockEntity;
+import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
+import net.minecraft.block.BlockRenderType;
+import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.OverlayTexture;
-import net.minecraft.client.render.RenderLayer;
-import net.minecraft.client.render.VertexConsumer;
-import net.minecraft.client.render.VertexConsumerProvider;
-import net.minecraft.client.render.WorldRenderer;
-import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.client.gl.GlUniform;
+import net.minecraft.client.gl.ShaderProgram;
+import net.minecraft.client.render.*;
+import net.minecraft.client.render.model.BakedModel;
+import net.minecraft.client.render.model.BakedQuad;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.util.Identifier;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
-import net.minecraft.util.math.ChunkPos;
+import net.minecraft.util.math.*;
+import net.minecraft.util.shape.VoxelShape;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Random;
+import java.util.*;
 
-/**
- * World renderer for Rot / Daddy Corruption visuals.
- * Renders clusters of black spherical "bulbs" with blue X-pattern eyes
- * on all adjacent solid surface blocks to RotBlock positions.
- * 
- * Inspired by Rain World's DaddyCorruption system.
- */
+/** Three-dimensional port of DaddyCorruption and CorruptionBulb. */
 public final class RotWorldRenderer {
-    private static final Identifier WHITE = Identifier.ofVanilla("textures/misc/white.png");
-    
+    private static final Identifier NOISE_TEXTURE =
+            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise2.png");
+    private static final Identifier CORRUPTION_TEXTURE =
+            Identifier.of("karma-gate-mod", "textures/effect/corruption.png");
     private static final int VIEW_DISTANCE_CHUNKS = 8;
-    
-    // Bulb visual parameters (scaled from Rain World's ~20px per tile to 1 block)
-    private static final float MIN_BULB_RADIUS = 0.08f;  // 4px scaled
-    private static final float MAX_BULB_RADIUS = 0.5f;   // 20px scaled
-    
-    // Colors
-    private static final float BULB_R = 0.02f;
-    private static final float BULB_G = 0.02f;
-    private static final float BULB_B = 0.02f;
-    
-    // Eye color (blue X pattern)
-    private static final float EYE_R = 0.1f;
-    private static final float EYE_G = 0.3f;
-    private static final float EYE_B = 0.9f;
-    
-    // Bulb generation parameters
-    private static final int MIN_BULBS_PER_SURFACE = 2;
-    private static final int MAX_BULBS_PER_SURFACE = 6;
-    private static final float EYE_PROBABILITY = 0.4f;
-    
-    // Sphere rendering detail
-    private static final int SPHERE_SEGMENTS = 12;
-    private static final int SPHERE_RINGS = 8;
-    
-    // Tentacle parameters
-    private static final int TENTACLE_SEGMENTS = 8;
-    private static final float TENTACLE_BASE_WIDTH = 0.06f;
-    private static final float TENTACLE_TIP_WIDTH = 0.02f;
-    private static final float MIN_TENTACLE_LENGTH = 0.3f;
-    private static final float MAX_TENTACLE_LENGTH = 1.5f;
-    private static final float TENTACLE_PROBABILITY = 0.6f;
-    private static final int MAX_TENTACLES_PER_BULB = 3;
-    
-    // Darkness/goo overlay parameters
-    private static final float GOO_RADIUS = 2.5f;
-    private static final float GOO_ALPHA = 0.4f;
-    private static final int GOO_LAYERS = 3;
-    
-    // Cache of bulb data keyed by surface position
-    private static final Map<Long, List<Bulb>> BULB_CACHE = new HashMap<>();
-    
-    /**
-     * Represents a single corruption bulb with position, size, and eye data.
-     */
-    private static class Bulb {
-        final Vec3d pos;
-        final float radius;
-        final boolean hasEye;
-        final float rotation;     // Eye rotation in degrees
-        final float eyeRadius;    // Size of eye relative to bulb
-        final List<Tentacle> tentacles;
-        
-        // Animation state
-        float offsetX, offsetY, offsetZ;
-        float velX, velY, velZ;
-        
-        Bulb(Vec3d pos, float radius, boolean hasEye, float rotation, float eyeRadius, List<Tentacle> tentacles) {
-            this.pos = pos;
-            this.radius = radius;
-            this.hasEye = hasEye;
-            this.rotation = rotation;
-            this.eyeRadius = eyeRadius;
-            this.tentacles = tentacles;
-        }
-    }
-    
-    /**
-     * Represents a static tentacle extending from a bulb.
-     */
-    private static class Tentacle {
-        final Vec3d[] segments;       // World positions of each segment
-        final float[] widths;         // Width at each segment
-        final List<TentacleBump> bumps;  // Bumps along the tentacle
-        
-        Tentacle(Vec3d[] segments, float[] widths, List<TentacleBump> bumps) {
-            this.segments = segments;
-            this.widths = widths;
-            this.bumps = bumps;
-        }
-    }
-    
-    /**
-     * A bump (small sphere) on a tentacle, optionally with an eye.
-     */
-    private static class TentacleBump {
-        final float t;         // Position along tentacle (0-1)
-        final float offset;    // Lateral offset (-1 to 1)
-        final float size;      // Relative size
-        final boolean hasEye;
-        final float eyeSize;
-        final float rotation;
-        
-        TentacleBump(float t, float offset, float size, boolean hasEye, float eyeSize, float rotation) {
-            this.t = t;
-            this.offset = offset;
-            this.size = size;
-            this.hasEye = hasEye;
-            this.eyeSize = eyeSize;
-            this.rotation = rotation;
-        }
-    }
-    
+    private static final int FULL_BRIGHT = 0x00F000F0;
+    // 1 block = 20 Rain World pixels. A quarter-pixel separation is enough to
+    // prevent depth-buffer fighting without making the painted layer float.
+    private static final float DECAL_OFFSET = 0.0125f;
+    // Shader packs lose more effective depth precision on nearly horizontal
+    // decals. Bias only their depth by half a Rain World pixel in view space;
+    // the vertex shader preserves the original screen-space position.
+    private static final float IRIS_DECAL_DEPTH_BIAS = 0.025f;
+    private static final SphereMesh[] BULB_MESHES = createBulbMeshes();
+    private static final SphereMesh NODULE_MESH = createIcosphere(0, 0);
+    /** Runtime toggle for LittleLeg gravity. Disabled for the current 3D presentation. */
+    public static boolean ROT_GRAVITY_ENABLED = false;
+    private static CorruptionSystem system;
+    private static long anchorSignature = Long.MIN_VALUE;
+
+    private RotWorldRenderer() { }
+
     public static void render(WorldRenderContext context) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.world == null || client.player == null) return;
-        
-        ClientWorld world = client.world;
-        Vec3d cam = context.camera().getPos();
+        List<Anchor> anchors = collectAnchors(client.world, context.camera().getPos());
+        long signature = signature(anchors);
+        if (anchors.isEmpty()) {
+            system = null;
+            anchorSignature = signature;
+            return;
+        }
+        // Chunk streaming used to set a global dirty bit and reconstruct the whole
+        // simulation every few seconds. The anchor signature already captures every
+        // addition, removal and radius change that affects this renderer, so retain
+        // live physics whenever that signature is unchanged.
+        if (system == null || signature != anchorSignature) {
+            system = CorruptionSystem.build(client.world, anchors);
+            anchorSignature = signature;
+        }
+        system.update(client.world, client.player.getPos(), client.player.getVelocity());
+        CorruptionSystem captured = system;
         float tickDelta = context.tickCounter().getTickDelta(true);
-        
-        MatrixStack matrices = context.matrixStack();
-        VertexConsumerProvider vertexConsumers = context.consumers();
-        if (vertexConsumers == null) return;
-        
-        // Get positions to render
-        int playerChunkX = (int) Math.floor(cam.x) >> 4;
-        int playerChunkZ = (int) Math.floor(cam.z) >> 4;
-        
-        List<BlockPos> rotPositions = new ArrayList<>();
-        
+        RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall(
+                camera -> captured.render(camera, tickDelta), false), 720);
+    }
+
+    public static void markDirty() {
+        // Kept as the RotRenderCache notification hook. Anchor changes are detected
+        // by signature without resetting an otherwise identical live simulation.
+    }
+    public static void clearCache() { system = null; anchorSignature = Long.MIN_VALUE; }
+
+    private static List<Anchor> collectAnchors(ClientWorld world, Vec3d camera) {
+        int chunkX = MathHelper.floor(camera.x) >> 4;
+        int chunkZ = MathHelper.floor(camera.z) >> 4;
+        ArrayList<Anchor> anchors = new ArrayList<>();
         for (int dx = -VIEW_DISTANCE_CHUNKS; dx <= VIEW_DISTANCE_CHUNKS; dx++) {
             for (int dz = -VIEW_DISTANCE_CHUNKS; dz <= VIEW_DISTANCE_CHUNKS; dz++) {
-                int cx = playerChunkX + dx;
-                int cz = playerChunkZ + dz;
-                
-                List<Long> positions = RotRenderCache.getPositionsForChunk(cx, cz);
-                for (long packed : positions) {
+                for (long packed : RotRenderCache.getPositionsForChunk(chunkX + dx, chunkZ + dz)) {
                     BlockPos pos = BlockPos.fromLong(packed);
-                    rotPositions.add(pos);
+                    if (world.getBlockState(pos).getBlock() != ModBlocks.ROT_BLOCK) continue;
+                    float radius = world.getBlockEntity(pos) instanceof RotBlockEntity rot
+                            ? rot.getRadius() : RotBlockEntity.DEFAULT_RADIUS;
+                    anchors.add(new Anchor(pos.toImmutable(), Vec3d.ofCenter(pos), radius));
                 }
             }
         }
-        
-        if (rotPositions.isEmpty()) return;
-        
-        // Collect all surfaces that should have corruption
-        List<SurfaceInfo> surfaces = new ArrayList<>();
-        for (BlockPos rotPos : rotPositions) {
-            collectAdjacentSurfaces(world, rotPos, surfaces);
+        anchors.sort(Comparator.comparingLong(a -> a.pos.asLong()));
+        return anchors;
+    }
+
+    private static long signature(List<Anchor> anchors) {
+        long value = 0xCBF29CE484222325L;
+        for (Anchor anchor : anchors) {
+            value = (value ^ anchor.pos.asLong()) * 0x100000001B3L;
+            value = (value ^ Float.floatToIntBits(anchor.radius)) * 0x100000001B3L;
         }
-        
-        // Render corruption on each surface
-        matrices.push();
-        matrices.translate(-cam.x, -cam.y, -cam.z);
-        
-        VertexConsumer vc = vertexConsumers.getBuffer(RenderLayer.getEntityCutoutNoCull(WHITE));
-        
-        // Render bulbs and tentacles
-        for (SurfaceInfo surface : surfaces) {
-            int light = WorldRenderer.getLightmapCoordinates(world, surface.solidBlock.offset(surface.exposedFace));
-            List<Bulb> bulbs = getOrCreateBulbs(surface);
-            for (Bulb bulb : bulbs) {
-                // Render tentacles first (behind bulb)
-                for (Tentacle tentacle : bulb.tentacles) {
-                    renderTentacle(matrices, vc, tentacle, cam, light);
+        return value;
+    }
+
+    private record Anchor(BlockPos pos, Vec3d center, float radius) { }
+
+    private static final class CorruptionSystem {
+        private final List<SurfaceQuad> surfaceQuads;
+        private final List<CorruptionBulb> bulbs;
+        private long lastTick = Long.MIN_VALUE;
+
+        private CorruptionSystem(List<SurfaceQuad> surfaceQuads, List<CorruptionBulb> bulbs) {
+            this.surfaceQuads = surfaceQuads;
+            this.bulbs = bulbs;
+        }
+
+        private static CorruptionSystem build(ClientWorld world, List<Anchor> anchors) {
+            ArrayList<SurfaceQuad> decals = new ArrayList<>();
+            LinkedHashMap<SurfaceKey, SurfaceCell> cells = new LinkedHashMap<>();
+            MinecraftClient client = MinecraftClient.getInstance();
+            for (long packed : collectCandidateBlocks(anchors)) {
+                BlockPos pos = BlockPos.fromLong(packed);
+                BlockState state = world.getBlockState(pos);
+                if (state.isAir() || state.getBlock() == ModBlocks.ROT_BLOCK
+                        || state.getRenderType() != BlockRenderType.MODEL) continue;
+                BakedModel model = client.getBlockRenderManager().getModel(state);
+                net.minecraft.util.math.random.Random modelRandom =
+                        net.minecraft.util.math.random.Random.create(pos.asLong());
+                for (Direction direction : Direction.values()) {
+                    for (BakedQuad quad : model.getQuads(state, direction, modelRandom))
+                        extractQuad(world, anchors, decals, cells, pos, quad, direction);
                 }
-                // Render the bulb
-                renderBulb(matrices, vc, bulb, tickDelta, cam, light);
+                for (BakedQuad quad : model.getQuads(state, null, modelRandom))
+                    extractQuad(world, anchors, decals, cells, pos, quad, quad.getFace());
             }
-        }
-        
-        matrices.pop();
-    }
-    
-    /**
-     * Info about a surface that should have corruption rendered on it.
-     */
-    private static class SurfaceInfo {
-        final BlockPos solidBlock;
-        final Direction exposedFace;
-        final long cacheKey;
-        
-        SurfaceInfo(BlockPos solidBlock, Direction exposedFace) {
-            this.solidBlock = solidBlock;
-            this.exposedFace = exposedFace;
-            // Unique key combining position and face
-            this.cacheKey = BlockPos.asLong(solidBlock.getX(), solidBlock.getY(), solidBlock.getZ()) * 7 + exposedFace.ordinal();
-        }
-    }
-    
-    /**
-     * Find all solid surface blocks adjacent to a rot block.
-     */
-    private static void collectAdjacentSurfaces(ClientWorld world, BlockPos rotPos, List<SurfaceInfo> surfaces) {
-        for (Direction dir : Direction.values()) {
-            BlockPos adjacent = rotPos.offset(dir);
-            if (world.getBlockState(adjacent).isSolidBlock(world, adjacent)) {
-                // This solid block has a face exposed toward the rot block
-                Direction exposedFace = dir.getOpposite();
-                SurfaceInfo info = new SurfaceInfo(adjacent, exposedFace);
-                
-                // Avoid duplicates
-                boolean exists = false;
-                for (SurfaceInfo s : surfaces) {
-                    if (s.cacheKey == info.cacheKey) {
-                        exists = true;
-                        break;
+
+            ArrayList<CorruptionBulb> bulbs = new ArrayList<>();
+            for (Map.Entry<SurfaceKey, SurfaceCell> entry : cells.entrySet()) {
+                SurfaceCell cell = entry.getValue();
+                float level = corruptionLevel(cell.center(), anchors);
+                Random random = new Random(entry.getKey().seed() ^ anchors.getFirst().pos.asLong());
+                // Rain World's population is distributed along a 2D boundary. Repeating its
+                // 2-4 bulbs on every face of a 3D volume cubes the workload and turns the
+                // individual shapes into a solid mass. Preserve the apparent projected
+                // density instead: most occupied faces receive one bulb and deep corruption
+                // occasionally receives a second.
+                int count = random.nextFloat() < lerp(.32, .72, level) ? 1 : 0;
+                if (count > 0 && random.nextFloat() < lerp(.04, .24, level)) count++;
+                for (int i = 0; i < count; i++) {
+                    SurfacePatch support = cell.patches.get(random.nextInt(cell.patches.size()));
+                    Vec3d point = support.sample(random.nextDouble(), random.nextDouble());
+                    Vec3d normal = support.quad.normal;
+                    float radius = (float) lerp(0.2, 0.5 + 0.5 * random.nextDouble(), level);
+                    Vec3d stuck = point.add(normal.multiply(Math.max(0.012, radius * 0.12)));
+                    boolean eye = random.nextFloat() < level;
+                    if (eye) for (CorruptionBulb existing : bulbs) {
+                        if (existing.hasEye && existing.stuck.squaredDistanceTo(stuck)
+                                < square(radius + existing.radius)) { eye = false; break; }
                     }
-                }
-                if (!exists) {
-                    surfaces.add(info);
-                }
-            }
-        }
-    }
-    
-    /**
-     * Get or create a cached set of bulbs for a surface.
-     */
-    private static List<Bulb> getOrCreateBulbs(SurfaceInfo surface) {
-        List<Bulb> bulbs = BULB_CACHE.get(surface.cacheKey);
-        if (bulbs != null) return bulbs;
-        
-        bulbs = new ArrayList<>();
-        
-        // Deterministic random based on position
-        long seed = surface.solidBlock.asLong() * 31 + surface.exposedFace.ordinal();
-        Random rand = new Random(seed);
-        
-        int numBulbs = MIN_BULBS_PER_SURFACE + rand.nextInt(MAX_BULBS_PER_SURFACE - MIN_BULBS_PER_SURFACE + 1);
-        
-        // Surface center and tangent vectors
-        Vec3d center = Vec3d.ofCenter(surface.solidBlock);
-        Vec3d normal = Vec3d.of(surface.exposedFace.getVector());
-        
-        // Offset center to the surface face
-        center = center.add(normal.multiply(0.5));
-        
-        // Get tangent vectors for the face
-        Vec3d tangent1, tangent2;
-        if (surface.exposedFace.getAxis() == Direction.Axis.Y) {
-            tangent1 = new Vec3d(1, 0, 0);
-            tangent2 = new Vec3d(0, 0, 1);
-        } else if (surface.exposedFace.getAxis() == Direction.Axis.X) {
-            tangent1 = new Vec3d(0, 1, 0);
-            tangent2 = new Vec3d(0, 0, 1);
-        } else {
-            tangent1 = new Vec3d(1, 0, 0);
-            tangent2 = new Vec3d(0, 1, 0);
-        }
-        
-        for (int i = 0; i < numBulbs; i++) {
-            // Random position on face with some spread
-            float u = (rand.nextFloat() - 0.5f) * 0.8f;
-            float v = (rand.nextFloat() - 0.5f) * 0.8f;
-            
-            Vec3d bulbPos = center
-                .add(tangent1.multiply(u))
-                .add(tangent2.multiply(v))
-                .add(normal.multiply(rand.nextFloat() * 0.1f)); // Slight protrusion
-            
-            float radius = MIN_BULB_RADIUS + rand.nextFloat() * (MAX_BULB_RADIUS - MIN_BULB_RADIUS);
-            
-            // Larger bulbs more likely to have eyes
-            boolean hasEye = rand.nextFloat() < EYE_PROBABILITY * (radius / MAX_BULB_RADIUS);
-            float rotation = rand.nextFloat() * 360f;
-            float eyeRadius = 0.3f + rand.nextFloat() * 0.5f;
-            
-            // Generate tentacles for this bulb
-            List<Tentacle> tentacles = new ArrayList<>();
-            if (rand.nextFloat() < TENTACLE_PROBABILITY) {
-                int numTentacles = 1 + rand.nextInt(MAX_TENTACLES_PER_BULB);
-                for (int t = 0; t < numTentacles; t++) {
-                    tentacles.add(generateTentacle(rand, bulbPos, normal, tangent1, tangent2, radius));
+                    CorruptionBulb bulb = new CorruptionBulb(stuck, normal, radius, eye, random);
+                    // LittleLegs are also surface-area corrected for 3D. Their construction
+                    // and motion remain the C# implementation scaled at 20 px = 1 block.
+                    if (random.nextFloat() < 0.075f && random.nextFloat() < level) {
+                        float length = (float) lerp(1.0, 7.5, Math.sqrt(random.nextDouble()) * level);
+                        bulb.tube = new CorruptionTube(stuck, normal, length, random);
+                    }
+                    bulbs.add(bulb);
                 }
             }
-            
-            bulbs.add(new Bulb(bulbPos, radius, hasEye, rotation, eyeRadius, tentacles));
+            return new CorruptionSystem(decals, bulbs);
         }
-        
-        BULB_CACHE.put(surface.cacheKey, bulbs);
-        return bulbs;
-    }
-    
-    /**
-     * Generate a static tentacle extending from a bulb.
-     */
-    private static Tentacle generateTentacle(Random rand, Vec3d bulbPos, Vec3d normal, 
-                                              Vec3d tangent1, Vec3d tangent2, float bulbRadius) {
-        float length = MIN_TENTACLE_LENGTH + rand.nextFloat() * (MAX_TENTACLE_LENGTH - MIN_TENTACLE_LENGTH);
-        
-        // Random direction biased outward from surface
-        float dirU = (rand.nextFloat() - 0.5f) * 2f;
-        float dirV = (rand.nextFloat() - 0.5f) * 2f;
-        float dirN = 0.5f + rand.nextFloat() * 0.5f;  // Always extends outward somewhat
-        
-        Vec3d baseDir = normal.multiply(dirN)
-            .add(tangent1.multiply(dirU))
-            .add(tangent2.multiply(dirV))
-            .normalize();
-        
-        // Build segments with slight curvature
-        Vec3d[] segments = new Vec3d[TENTACLE_SEGMENTS];
-        float[] widths = new float[TENTACLE_SEGMENTS];
-        
-        Vec3d currentDir = baseDir;
-        Vec3d currentPos = bulbPos.add(normal.multiply(bulbRadius * 0.8)); // Start at bulb surface
-        
-        for (int s = 0; s < TENTACLE_SEGMENTS; s++) {
-            float t = (float) s / (TENTACLE_SEGMENTS - 1);
-            segments[s] = currentPos;
-            widths[s] = MathHelper.lerp(t, TENTACLE_BASE_WIDTH, TENTACLE_TIP_WIDTH);
-            
-            // Add some curve/droop
-            float segLen = length / TENTACLE_SEGMENTS;
-            Vec3d gravity = new Vec3d(0, -0.15 * t, 0);  // Slight droop
-            Vec3d perturbation = new Vec3d(
-                (rand.nextFloat() - 0.5f) * 0.3f,
-                (rand.nextFloat() - 0.5f) * 0.3f,
-                (rand.nextFloat() - 0.5f) * 0.3f
-            );
-            currentDir = currentDir.add(gravity).add(perturbation).normalize();
-            currentPos = currentPos.add(currentDir.multiply(segLen));
+
+        private static Set<Long> collectCandidateBlocks(List<Anchor> anchors) {
+            HashSet<Long> result = new HashSet<>();
+            for (Anchor anchor : anchors) {
+                int reach = MathHelper.ceil(anchor.radius) + 1;
+                double maximum = square(anchor.radius + 0.9);
+                for (int x = -reach; x <= reach; x++) for (int y = -reach; y <= reach; y++)
+                    for (int z = -reach; z <= reach; z++) {
+                        BlockPos candidate = anchor.pos.add(x, y, z);
+                        if (Vec3d.ofCenter(candidate).squaredDistanceTo(anchor.center) <= maximum)
+                            result.add(candidate.asLong());
+                    }
+            }
+            return result;
         }
-        
-        // Generate bumps along tentacle
-        List<TentacleBump> bumps = new ArrayList<>();
-        int numBumps = 2 + rand.nextInt(4);
-        for (int b = 0; b < numBumps; b++) {
-            float bumpT = 0.1f + rand.nextFloat() * 0.8f;  // Avoid very ends
-            float offset = (rand.nextFloat() - 0.5f) * 2f;
-            float size = 0.3f + rand.nextFloat() * 0.7f;
-            boolean bumpHasEye = rand.nextFloat() < 0.2f * size;
-            float bumpEyeSize = 0.3f + rand.nextFloat() * 0.4f;
-            float bumpRot = rand.nextFloat() * 360f;
-            bumps.add(new TentacleBump(bumpT, offset, size, bumpHasEye, bumpEyeSize, bumpRot));
+
+        private static void extractQuad(ClientWorld world, List<Anchor> anchors,
+                                        List<SurfaceQuad> decals, Map<SurfaceKey, SurfaceCell> cells,
+                                        BlockPos blockPos, BakedQuad baked, Direction face) {
+            int[] data = baked.getVertexData();
+            int stride = data.length / 4;
+            if (stride < 3) return;
+            Vec3d[] points = new Vec3d[4];
+            Vec3d center = Vec3d.ZERO;
+            for (int i = 0; i < 4; i++) {
+                int offset = i * stride;
+                points[i] = new Vec3d(blockPos.getX() + Float.intBitsToFloat(data[offset]),
+                        blockPos.getY() + Float.intBitsToFloat(data[offset + 1]),
+                        blockPos.getZ() + Float.intBitsToFloat(data[offset + 2]));
+                center = center.add(points[i]);
+            }
+            center = center.multiply(0.25);
+            if (corruptionLevel(center, anchors) <= 0.0f
+                    || isBoundaryQuadOccluded(world, blockPos, face, center)) return;
+            Vec3d nominalNormal = Vec3d.of(face.getVector());
+            Vec3d normal = points[1].subtract(points[0]).crossProduct(points[3].subtract(points[0]));
+            if (normal.lengthSquared() < 1.0e-10) normal = nominalNormal;
+            else {
+                normal = normal.normalize();
+                if (normal.dotProduct(nominalNormal) < 0) normal = normal.negate();
+            }
+            float[] levels = new float[4], u = new float[4], v = new float[4];
+            float[] noiseU = new float[4], noiseV = new float[4];
+            long nearestSeed = nearestAnchor(center, anchors).pos.asLong();
+            float seedU = ((nearestSeed >>> 8) & 1023L) / 1023.0f;
+            float seedV = ((nearestSeed >>> 20) & 1023L) / 1023.0f;
+            for (int i = 0; i < 4; i++) {
+                levels[i] = corruptionLevel(points[i], anchors);
+                points[i] = points[i].add(normal.multiply(DECAL_OFFSET));
+                Vec3d p = points[i];
+                switch (face.getAxis()) {
+                    case X -> {
+                        u[i] = (float) p.z * .22f + seedU;
+                        v[i] = (float) p.y * .22f + seedV;
+                        noiseU[i] = (float) p.z * .47f + seedU;
+                        noiseV[i] = (float) p.y * .47f + seedV;
+                    }
+                    case Y -> {
+                        u[i] = (float) p.x * .22f + seedU;
+                        v[i] = (float) p.z * .22f + seedV;
+                        noiseU[i] = (float) p.x * .47f + seedU;
+                        noiseV[i] = (float) p.z * .47f + seedV;
+                    }
+                    case Z -> {
+                        u[i] = (float) p.x * .22f + seedU;
+                        v[i] = (float) p.y * .22f + seedV;
+                        noiseU[i] = (float) p.x * .47f + seedU;
+                        noiseV[i] = (float) p.y * .47f + seedV;
+                    }
+                    default -> throw new IllegalStateException("Unexpected face axis");
+                }
+            }
+            SurfaceQuad quad = new SurfaceQuad(points, normal, levels, u, v, noiseU, noiseV);
+            decals.add(quad);
+            addSurfacePatches(cells, quad, face, anchors);
         }
-        
-        return new Tentacle(segments, widths, bumps);
-    }
-    
-    /**
-     * Render a single corruption bulb as a sphere with optional X-pattern eye.
-     */
-    private static void renderBulb(MatrixStack matrices, VertexConsumer consumer, Bulb bulb, float tickDelta, Vec3d cam, int light) {
-        matrices.push();
-        
-        // Subtle idle animation
-        double time = System.currentTimeMillis() / 1000.0;
-        float wobble = (float) Math.sin(time * 0.5 + bulb.pos.x * 3.7 + bulb.pos.z * 2.3) * 0.02f;
-        
-        matrices.translate(bulb.pos.x + wobble, bulb.pos.y + wobble * 0.5f, bulb.pos.z);
-        
-        // Draw the black sphere body
-        renderSphere(matrices, consumer, bulb.radius, BULB_R, BULB_G, BULB_B, 1.0f, light);
-        
-        // Draw eye X pattern if present
-        if (bulb.hasEye) {
-            renderEye(matrices, consumer, bulb, cam, light);
-        }
-        
-        matrices.pop();
-    }
-    
-    /**
-     * Render a simple sphere using quads (4 vertices per face for entity rendering).
-     */
-    private static void renderSphere(MatrixStack matrices, VertexConsumer consumer, 
-                                      float radius, float r, float g, float b, float a, int light) {
-        Matrix4f posMatrix = matrices.peek().getPositionMatrix();
-        
-        for (int ring = 0; ring < SPHERE_RINGS; ring++) {
-            float theta1 = (float) (ring * Math.PI / SPHERE_RINGS);
-            float theta2 = (float) ((ring + 1) * Math.PI / SPHERE_RINGS);
-            
-            float y1 = (float) Math.cos(theta1) * radius;
-            float y2 = (float) Math.cos(theta2) * radius;
-            float r1 = (float) Math.sin(theta1) * radius;
-            float r2 = (float) Math.sin(theta2) * radius;
-            
-            for (int seg = 0; seg < SPHERE_SEGMENTS; seg++) {
-                float phi1 = (float) (seg * 2 * Math.PI / SPHERE_SEGMENTS);
-                float phi2 = (float) ((seg + 1) * 2 * Math.PI / SPHERE_SEGMENTS);
-                
-                float x11 = (float) Math.cos(phi1) * r1;
-                float z11 = (float) Math.sin(phi1) * r1;
-                float x12 = (float) Math.cos(phi2) * r1;
-                float z12 = (float) Math.sin(phi2) * r1;
-                
-                float x21 = (float) Math.cos(phi1) * r2;
-                float z21 = (float) Math.sin(phi1) * r2;
-                float x22 = (float) Math.cos(phi2) * r2;
-                float z22 = (float) Math.sin(phi2) * r2;
-                
-                // Compute normals
-                Vector3f n11 = new Vector3f(x11, y1, z11).normalize();
-                Vector3f n12 = new Vector3f(x12, y1, z12).normalize();
-                Vector3f n21 = new Vector3f(x21, y2, z21).normalize();
-                Vector3f n22 = new Vector3f(x22, y2, z22).normalize();
-                
-                // Emit as a quad (4 vertices in proper winding order for entity rendering)
-                vertex(consumer, posMatrix, x11, y1, z11, r, g, b, a, 0f, 0f, light, n11.x, n11.y, n11.z);
-                vertex(consumer, posMatrix, x21, y2, z21, r, g, b, a, 0f, 1f, light, n21.x, n21.y, n21.z);
-                vertex(consumer, posMatrix, x22, y2, z22, r, g, b, a, 1f, 1f, light, n22.x, n22.y, n22.z);
-                vertex(consumer, posMatrix, x12, y1, z12, r, g, b, a, 1f, 0f, light, n12.x, n12.y, n12.z);
+
+        /** Divides a baked quad into Rain World tile-sized spawning regions.
+         * Atlas-backed block models can extend many blocks beyond their source
+         * BlockPos; grouping by that source position produced only one random
+         * bulb for the entire gravity disruptor. */
+        private static void addSurfacePatches(Map<SurfaceKey, SurfaceCell> cells,
+                                              SurfaceQuad quad, Direction face,
+                                              List<Anchor> anchors) {
+            double edgeU = Math.max(quad.points[0].distanceTo(quad.points[1]),
+                    quad.points[3].distanceTo(quad.points[2]));
+            double edgeV = Math.max(quad.points[0].distanceTo(quad.points[3]),
+                    quad.points[1].distanceTo(quad.points[2]));
+            int stepsU = MathHelper.clamp(MathHelper.ceil(edgeU), 1, 16);
+            int stepsV = MathHelper.clamp(MathHelper.ceil(edgeV), 1, 16);
+            for (int patchU = 0; patchU < stepsU; patchU++) {
+                double u0 = patchU / (double) stepsU;
+                double u1 = (patchU + 1) / (double) stepsU;
+                for (int patchV = 0; patchV < stepsV; patchV++) {
+                    double v0 = patchV / (double) stepsV;
+                    double v1 = (patchV + 1) / (double) stepsV;
+                    SurfacePatch patch = new SurfacePatch(quad, u0, u1, v0, v1);
+                    Vec3d patchCenter = patch.sample(.5, .5);
+                    // Evaluate the patch itself. Large quads can have all four outer
+                    // vertices beyond the Rot radius while their middle crosses it.
+                    if (corruptionLevel(patchCenter, anchors) <= 0) continue;
+                    Vec3d supportedCenter = patchCenter.subtract(
+                            quad.normal.multiply(DECAL_OFFSET + .001));
+                    BlockPos tile = BlockPos.ofFloored(supportedCenter);
+                    // Detailed atlas models contain many parallel decorative fragments.
+                    // Merge those within one world tile/face so model size produces more
+                    // coverage, while internal mesh complexity does not produce more physics.
+                    SurfaceKey key = new SurfaceKey(tile.asLong(), face);
+                    cells.computeIfAbsent(key, ignored -> new SurfaceCell()).add(patch, patchCenter);
+                }
             }
         }
-    }
-    
-    // Number of segments for curved eye slits
-    private static final int EYE_SEGMENTS = 8;
-    
-    /**
-     * Render the X-pattern eye curved on the sphere surface.
-     * Creates two perpendicular slits that form an X, following the sphere curvature.
-     */
-    private static void renderEye(MatrixStack matrices, VertexConsumer consumer, Bulb bulb, Vec3d cam, int light) {
-        // Direction from bulb center toward camera
-        Vec3d toCamera = cam.subtract(bulb.pos).normalize();
-        
-        // Angular size of the eye on the sphere (in radians)
-        float eyeAngularSize = bulb.eyeRadius * 0.8f; // radians
-        float slitAngularThickness = eyeAngularSize * 0.12f;
-        
-        matrices.push();
-        
-        Matrix4f posMatrix = matrices.peek().getPositionMatrix();
-        
-        // Build rotation basis: eye center faces camera
-        // Up vector for the eye coordinate system
-        Vector3f forward = new Vector3f((float)toCamera.x, (float)toCamera.y, (float)toCamera.z);
-        Vector3f worldUp = new Vector3f(0, 1, 0);
-        
-        // If forward is nearly parallel to worldUp, use a different reference
-        if (Math.abs(forward.dot(worldUp)) > 0.99f) {
-            worldUp = new Vector3f(1, 0, 0);
+
+        private static boolean isBoundaryQuadOccluded(ClientWorld world, BlockPos pos,
+                                                       Direction face, Vec3d center) {
+            double local = switch (face.getAxis()) {
+                case X -> center.x - pos.getX(); case Y -> center.y - pos.getY();
+                case Z -> center.z - pos.getZ();
+            };
+            boolean boundary = face.getDirection() == Direction.AxisDirection.POSITIVE
+                    ? local > .999 : local < .001;
+            if (!boundary) return false;
+            BlockPos front = pos.offset(face);
+            BlockState state = world.getBlockState(front);
+            if (!state.isOpaque()) return false;
+            VoxelShape shape = state.getOutlineShape(world, front);
+            for (Box box : shape.getBoundingBoxes()) if (box.minX <= .001 && box.minY <= .001
+                    && box.minZ <= .001 && box.maxX >= .999 && box.maxY >= .999 && box.maxZ >= .999)
+                return true;
+            return false;
         }
-        
-        // Create orthonormal basis for the eye plane
-        Vector3f right = new Vector3f(forward).cross(worldUp).normalize();
-        Vector3f up = new Vector3f(right).cross(forward).normalize();
-        
-        // Apply bulb's rotation around the forward axis
-        float rotRad = (float) Math.toRadians(bulb.rotation);
-        float cosRot = (float) Math.cos(rotRad);
-        float sinRot = (float) Math.sin(rotRad);
-        Vector3f rotatedRight = new Vector3f(
-            right.x * cosRot + up.x * sinRot,
-            right.y * cosRot + up.y * sinRot,
-            right.z * cosRot + up.z * sinRot
-        );
-        Vector3f rotatedUp = new Vector3f(
-            -right.x * sinRot + up.x * cosRot,
-            -right.y * sinRot + up.y * cosRot,
-            -right.z * sinRot + up.z * cosRot
-        );
-        
-        // Draw two curved slits forming an X (at 45 and -45 degrees)
-        renderCurvedSlit(posMatrix, consumer, bulb.radius, forward, rotatedRight, rotatedUp,
-                         eyeAngularSize, slitAngularThickness, 45f, EYE_R, EYE_G, EYE_B, light);
-        renderCurvedSlit(posMatrix, consumer, bulb.radius, forward, rotatedRight, rotatedUp,
-                         eyeAngularSize, slitAngularThickness, -45f, EYE_R, EYE_G, EYE_B, light);
-        
-        matrices.pop();
-    }
-    
-    /**
-     * Render a single curved slit of the X pattern on the sphere surface.
-     * The slit follows the sphere curvature using multiple quad segments.
-     */
-    private static void renderCurvedSlit(Matrix4f posMatrix, VertexConsumer consumer,
-                                          float sphereRadius, Vector3f center, Vector3f right, Vector3f up,
-                                          float angularLength, float angularThickness, float rotationDeg,
-                                          float r, float g, float b, int light) {
-        // Rotate the slit direction
-        float rotRad = (float) Math.toRadians(rotationDeg);
-        float cosRot = (float) Math.cos(rotRad);
-        float sinRot = (float) Math.sin(rotRad);
-        
-        // Slit direction (along the slit) and perpendicular (slit width)
-        Vector3f slitDir = new Vector3f(
-            right.x * cosRot + up.x * sinRot,
-            right.y * cosRot + up.y * sinRot,
-            right.z * cosRot + up.z * sinRot
-        );
-        Vector3f slitPerp = new Vector3f(
-            -right.x * sinRot + up.x * cosRot,
-            -right.y * sinRot + up.y * cosRot,
-            -right.z * sinRot + up.z * cosRot
-        );
-        
-        float halfLen = angularLength * 0.5f;
-        float halfThick = angularThickness * 0.5f;
-        
-        // Render as multiple segments along the slit length
-        for (int i = 0; i < EYE_SEGMENTS; i++) {
-            float t0 = (float) i / EYE_SEGMENTS;
-            float t1 = (float) (i + 1) / EYE_SEGMENTS;
-            
-            // Angular positions along the slit (-halfLen to +halfLen)
-            float angle0 = -halfLen + t0 * angularLength;
-            float angle1 = -halfLen + t1 * angularLength;
-            
-            // Get 4 corners of this segment on the sphere surface
-            Vector3f p00 = projectToSphere(center, slitDir, slitPerp, angle0, -halfThick, sphereRadius);
-            Vector3f p01 = projectToSphere(center, slitDir, slitPerp, angle0, halfThick, sphereRadius);
-            Vector3f p10 = projectToSphere(center, slitDir, slitPerp, angle1, -halfThick, sphereRadius);
-            Vector3f p11 = projectToSphere(center, slitDir, slitPerp, angle1, halfThick, sphereRadius);
-            
-            // Normals point outward from sphere center
-            Vector3f n00 = new Vector3f(p00).normalize();
-            Vector3f n01 = new Vector3f(p01).normalize();
-            Vector3f n10 = new Vector3f(p10).normalize();
-            Vector3f n11 = new Vector3f(p11).normalize();
-            
-            // Emit quad (proper winding for outward-facing)
-            float u0 = t0;
-            float u1 = t1;
-            vertex(consumer, posMatrix, p00.x, p00.y, p00.z, r, g, b, 1f, u0, 0f, light, n00.x, n00.y, n00.z);
-            vertex(consumer, posMatrix, p10.x, p10.y, p10.z, r, g, b, 1f, u1, 0f, light, n10.x, n10.y, n10.z);
-            vertex(consumer, posMatrix, p11.x, p11.y, p11.z, r, g, b, 1f, u1, 1f, light, n11.x, n11.y, n11.z);
-            vertex(consumer, posMatrix, p01.x, p01.y, p01.z, r, g, b, 1f, u0, 1f, light, n01.x, n01.y, n01.z);
-        }
-    }
-    
-    /**
-     * Project a point onto the sphere surface given angular offsets from center.
-     * @param center The direction from sphere origin to eye center (unit vector)
-     * @param alongDir Direction along the slit (unit vector, tangent to sphere)
-     * @param perpDir Direction perpendicular to slit (unit vector, tangent to sphere)
-     * @param alongAngle Angular offset along the slit direction (radians)
-     * @param perpAngle Angular offset perpendicular to slit (radians)
-     * @param radius Sphere radius
-     * @return Point on sphere surface
-     */
-    private static Vector3f projectToSphere(Vector3f center, Vector3f alongDir, Vector3f perpDir,
-                                             float alongAngle, float perpAngle, float radius) {
-        // Start from center direction, rotate by angular offsets
-        // This creates a great-circle arc on the sphere
-        
-        // First rotate around perpDir axis by alongAngle (moves along slit)
-        Vector3f dir = rotateAroundAxis(center, perpDir, alongAngle);
-        // Then rotate around the new alongDir by perpAngle (moves perpendicular)
-        dir = rotateAroundAxis(dir, alongDir, perpAngle);
-        
-        // Scale to sphere surface (slightly outside to avoid z-fighting)
-        return new Vector3f(dir.x * radius * 1.002f, dir.y * radius * 1.002f, dir.z * radius * 1.002f);
-    }
-    
-    /**
-     * Rotate a vector around an axis using Rodrigues' rotation formula.
-     */
-    private static Vector3f rotateAroundAxis(Vector3f v, Vector3f axis, float angle) {
-        float cos = (float) Math.cos(angle);
-        float sin = (float) Math.sin(angle);
-        
-        // v_rot = v*cos(θ) + (axis × v)*sin(θ) + axis*(axis·v)*(1-cos(θ))
-        float dot = v.dot(axis);
-        Vector3f cross = new Vector3f(axis).cross(v);
-        
-        return new Vector3f(
-            v.x * cos + cross.x * sin + axis.x * dot * (1 - cos),
-            v.y * cos + cross.y * sin + axis.y * dot * (1 - cos),
-            v.z * cos + cross.z * sin + axis.z * dot * (1 - cos)
-        );
-    }
-    
-    /**
-     * Helper to emit a vertex with all required attributes for entity rendering.
-     */
-    private static void vertex(VertexConsumer vc, Matrix4f posMat,
-                               float x, float y, float z,
-                               float r, float g, float b, float a,
-                               float u, float v,
-                               int light,
-                               float nx, float ny, float nz) {
-        vc.vertex(posMat, x, y, z)
-          .color(r, g, b, a)
-          .texture(u, v)
-          .overlay(OverlayTexture.DEFAULT_UV)
-          .light(light)
-          .normal(nx, ny, nz);
-    }
-    
-    /**
-     * Render darkness/goo overlay as concentric semi-transparent spheres.
-     * NOTE: Disabled - entity cutout render layer doesn't support alpha blending.
-     * Would need a separate translucent render pass to work properly.
-     */
-    private static void renderDarknessGoo(MatrixStack matrices, VertexConsumer consumer, Vec3d center, int light) {
-        // Disabled for now - the cutout render layer renders these as solid black squares
-        // TODO: Implement with a translucent render layer in a separate pass
-    }
-    
-    /**
-     * Render a camera-facing goo quad (billboard).
-     */
-    private static void renderGooBillboard(MatrixStack matrices, VertexConsumer consumer, 
-                                            float radius, float r, float g, float b, float a, int light) {
-        Matrix4f posMatrix = matrices.peek().getPositionMatrix();
-        
-        // Simple billboard quad facing all directions (rendered as 3 intersecting quads)
-        // XY plane
-        vertex(consumer, posMatrix, -radius, -radius, 0, r, g, b, a, 0, 0, light, 0, 0, 1);
-        vertex(consumer, posMatrix, -radius, radius, 0, r, g, b, a, 0, 1, light, 0, 0, 1);
-        vertex(consumer, posMatrix, radius, radius, 0, r, g, b, a, 1, 1, light, 0, 0, 1);
-        vertex(consumer, posMatrix, radius, -radius, 0, r, g, b, a, 1, 0, light, 0, 0, 1);
-        
-        // XZ plane
-        vertex(consumer, posMatrix, -radius, 0, -radius, r, g, b, a, 0, 0, light, 0, 1, 0);
-        vertex(consumer, posMatrix, -radius, 0, radius, r, g, b, a, 0, 1, light, 0, 1, 0);
-        vertex(consumer, posMatrix, radius, 0, radius, r, g, b, a, 1, 1, light, 0, 1, 0);
-        vertex(consumer, posMatrix, radius, 0, -radius, r, g, b, a, 1, 0, light, 0, 1, 0);
-        
-        // YZ plane
-        vertex(consumer, posMatrix, 0, -radius, -radius, r, g, b, a, 0, 0, light, 1, 0, 0);
-        vertex(consumer, posMatrix, 0, -radius, radius, r, g, b, a, 0, 1, light, 1, 0, 0);
-        vertex(consumer, posMatrix, 0, radius, radius, r, g, b, a, 1, 1, light, 1, 0, 0);
-        vertex(consumer, posMatrix, 0, radius, -radius, r, g, b, a, 1, 0, light, 1, 0, 0);
-    }
-    
-    /**
-     * Render a tentacle as a tube with bumps.
-     */
-    private static void renderTentacle(MatrixStack matrices, VertexConsumer consumer, 
-                                        Tentacle tentacle, Vec3d cam, int light) {
-        matrices.push();
-        
-        Matrix4f posMatrix = matrices.peek().getPositionMatrix();
-        
-        // Render tube segments
-        for (int i = 0; i < tentacle.segments.length - 1; i++) {
-            Vec3d p0 = tentacle.segments[i];
-            Vec3d p1 = tentacle.segments[i + 1];
-            float w0 = tentacle.widths[i];
-            float w1 = tentacle.widths[i + 1];
-            
-            renderTubeSegment(posMatrix, consumer, p0, p1, w0, w1, light);
-        }
-        
-        // Render bumps along the tentacle
-        for (TentacleBump bump : tentacle.bumps) {
-            Vec3d bumpPos = getTentaclePosition(tentacle, bump.t, bump.offset);
-            float bumpRadius = TENTACLE_BASE_WIDTH * 1.5f * bump.size;
-            
-            matrices.push();
-            matrices.translate(bumpPos.x, bumpPos.y, bumpPos.z);
-            renderSphere(matrices, consumer, bumpRadius, BULB_R, BULB_G, BULB_B, 1.0f, light);
-            
-            // Render eye on bump if present
-            if (bump.hasEye) {
-                // Create a temporary bulb for eye rendering
-                Bulb fakeBulb = new Bulb(bumpPos, bumpRadius, true, bump.rotation, bump.eyeSize, List.of());
-                matrices.pop();
-                matrices.push();
-                matrices.translate(bumpPos.x, bumpPos.y, bumpPos.z);
-                renderEyeOnSphere(matrices, consumer, fakeBulb, cam, light);
+
+        private static Anchor nearestAnchor(Vec3d point, List<Anchor> anchors) {
+            Anchor nearest = anchors.getFirst(); double best = point.squaredDistanceTo(nearest.center);
+            for (int i = 1; i < anchors.size(); i++) {
+                double distance = point.squaredDistanceTo(anchors.get(i).center);
+                if (distance < best) { best = distance; nearest = anchors.get(i); }
             }
-            
-            matrices.pop();
+            return nearest;
         }
-        
-        matrices.pop();
+
+        private static float corruptionLevel(Vec3d point, List<Anchor> anchors) {
+            float result = 0;
+            for (Anchor anchor : anchors) {
+                double distance = point.distanceTo(anchor.center);
+                if (distance >= anchor.radius) continue;
+                float radial = inverseLerp(anchor.radius, 0, distance);
+                float depth = inverseLerp(0, 10, anchor.radius - distance);
+                result = Math.max(result, MathHelper.lerp(.5f, radial, depth));
+            }
+            return result;
+        }
+
+        private void update(ClientWorld world, Vec3d playerPosition, Vec3d playerVelocity) {
+            long now = world.getTime();
+            if (lastTick == now) return;
+            for (CorruptionBulb bulb : bulbs) bulb.captureRenderState();
+            int elapsed = lastTick == Long.MIN_VALUE ? 1 : (int) MathHelper.clamp(now - lastTick, 1L, 20L);
+            lastTick = now;
+            boolean movement = playerVelocity.lengthSquared() > .0016;
+            for (int tick = 0; tick < elapsed; tick++) {
+                if (movement && (now + tick) % 8 == 0) for (CorruptionBulb bulb : bulbs) {
+                    double distance = bulb.position.distanceTo(playerPosition);
+                    if (distance < 13) bulb.heardNoise(playerPosition, (float) (1 - distance / 13));
+                }
+                for (int step = 0; step < 2; step++) for (CorruptionBulb bulb : bulbs) bulb.update(world);
+            }
+        }
+
+        private void render(Camera camera, float delta) {
+            renderSurfaceDecals(camera);
+            renderSolidBodies(camera, delta);
+            renderTubes(camera, delta);
+            // Cross eyes are deliberately submitted last, after their opaque parent
+            // bulbs and every tube/nodule pass.
+            renderBulbEyes(camera, delta);
+        }
+
+        private void renderSurfaceDecals(Camera camera) {
+            ShaderProgram program = RotShaders.PROGRAM;
+            if (program == null || surfaceQuads.isEmpty()) return;
+            Vec3d cam = camera.getPos();
+            BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS,
+                    VertexFormats.POSITION_COLOR_TEXTURE_LIGHT_NORMAL);
+            for (SurfaceQuad quad : surfaceQuads) for (int i = 0; i < 4; i++) {
+                Vec3d p = quad.points[i];
+                buffer.vertex((float) (p.x - cam.x), (float) (p.y - cam.y), (float) (p.z - cam.z))
+                        .color(1, 1, 1, quad.levels[i]).texture(quad.u[i], quad.v[i]).light(FULL_BRIGHT)
+                        // Normal is not used for lighting in this shader; carry a second
+                        // UV set for independently seeded BlackGoo noise.
+                        .normal(quad.noiseU[i], quad.noiseV[i], 0);
+            }
+            drawRotBuffer(buffer, camera, program);
+        }
+
+        private void renderSolidBodies(Camera camera, float delta) {
+            if (bulbs.isEmpty()) return;
+            Vec3d cam = camera.getPos();
+            Matrix4f view = new Matrix4f(RenderUtils.getCameraMatrix(camera));
+            BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.TRIANGLES,
+                    VertexFormats.POSITION_COLOR);
+            for (CorruptionBulb bulb : bulbs) {
+                appendSphere(buffer, view, cam, bulb.renderPosition(delta), bulb.radius,
+                        BULB_MESHES[bulb.meshVariant]);
+                if (bulb.tube != null) for (TubeBump bump : bulb.tube.bumps)
+                    appendSphere(buffer, view, cam, bulb.tube.positionAt(bump.along, delta),
+                            (float) lerp(.05, .15, bump.size), NODULE_MESH);
+            }
+            var built = buffer.endNullable();
+            if (built == null) return;
+            RenderSystem.enableDepthTest();
+            RenderSystem.depthMask(true);
+            RenderSystem.disableBlend();
+            RenderSystem.disableCull();
+            RenderSystem.setShader(GameRenderer::getPositionColorProgram);
+            BufferRenderer.drawWithGlobalProgram(built);
+            RenderSystem.enableCull();
+        }
+
+        private void renderTubes(Camera camera, float delta) {
+            Vec3d cam = camera.getPos();
+            Matrix4f view = new Matrix4f(RenderUtils.getCameraMatrix(camera));
+            Vector3f f3 = new Vector3f(0, 0, -1).rotate(camera.getRotation());
+            Vector3f r3 = new Vector3f(1, 0, 0).rotate(camera.getRotation());
+            Vector3f u3 = new Vector3f(0, 1, 0).rotate(camera.getRotation());
+            Vec3d forward = new Vec3d(f3.x, f3.y, f3.z), right = new Vec3d(r3.x, r3.y, r3.z),
+                    up = new Vec3d(u3.x, u3.y, u3.z);
+            BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS,
+                    VertexFormats.POSITION_COLOR);
+            for (CorruptionBulb bulb : bulbs) {
+                if (bulb.tube != null) for (int i = 1; i < bulb.tube.segments.length; i++) {
+                    Vec3d a = bulb.tube.interpolated(i - 1, delta), b = bulb.tube.interpolated(i, delta);
+                    Vec3d side = b.subtract(a).crossProduct(forward);
+                    if (side.lengthSquared() < 1e-8) side = right;
+                    side = side.normalize().multiply(.1);
+                    float mix = (float) Math.pow(i / (float) (bulb.tube.segments.length - 1), 1.5) * .4f;
+                    float green = MathHelper.lerp(mix, .008f, 0), blue = MathHelper.lerp(mix, .012f, 1);
+                    colorVertex(buffer, view, cam, a.add(side), 0, green, blue);
+                    colorVertex(buffer, view, cam, b.add(side), 0, green, blue);
+                    colorVertex(buffer, view, cam, b.subtract(side), 0, green, blue);
+                    colorVertex(buffer, view, cam, a.subtract(side), 0, green, blue);
+                }
+                if (bulb.tube != null) for (TubeBump bump : bulb.tube.bumps) {
+                    if (bump.eyeSize <= 0) continue;
+                    float bodyRadius = (float) lerp(.05, .15, bump.size);
+                    Vec3d p = bulb.tube.positionAt(bump.along, delta)
+                            .subtract(forward.multiply(bodyRadius + .004));
+                    float eyeSize = bodyRadius * bump.eyeSize;
+                    appendEyeArm(buffer, view, cam, p, right, up, eyeSize, eyeSize, 0);
+                }
+            }
+            var built = buffer.endNullable();
+            if (built == null) return;
+            setupRenderState(); RenderSystem.setShader(GameRenderer::getPositionColorProgram);
+            BufferRenderer.drawWithGlobalProgram(built); restoreRenderState();
+        }
+
+        private void renderBulbEyes(Camera camera, float delta) {
+            Vec3d cam = camera.getPos();
+            Matrix4f view = new Matrix4f(RenderUtils.getCameraMatrix(camera));
+            BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS,
+                    VertexFormats.POSITION_COLOR);
+            for (CorruptionBulb bulb : bulbs) {
+                if (!bulb.hasEye) continue;
+                Vec3d center = bulb.renderPosition(delta);
+                // C#: DirVec(eyeStalkPos, interpolated bulb position). This moves
+                // with the bulb itself but never changes when the camera rotates.
+                Vec3d outward = safeNormalize(center.subtract(bulb.eyeStalk), bulb.direction);
+                Vec3d reference = Math.abs(outward.y) < .9 ? new Vec3d(0, 1, 0) : new Vec3d(1, 0, 0);
+                Vec3d tangentRight = safeNormalize(outward.crossProduct(reference), new Vec3d(1, 0, 0));
+                Vec3d tangentUp = safeNormalize(tangentRight.crossProduct(outward), new Vec3d(0, 0, 1));
+                float cos = (float) Math.cos(bulb.rotation), sin = (float) Math.sin(bulb.rotation);
+                Vec3d eyeRight = tangentRight.multiply(cos).add(tangentUp.multiply(sin));
+                Vec3d eyeUp = tangentUp.multiply(cos).subtract(tangentRight.multiply(sin));
+                float eyeRadius = MathHelper.lerp(bulb.eyeRadius, bulb.radius * .5f, bulb.radius);
+                float white = MathHelper.clamp(bulb.renderLightNoise, 0, 1);
+                appendWrappedEyeArm(buffer, view, cam, center, outward, eyeRight, eyeUp,
+                        bulb.radius, eyeRadius * .9f,
+                        Math.max(.025f, eyeRadius * .09f), white);
+                appendWrappedEyeArm(buffer, view, cam, center, outward, eyeUp, eyeRight,
+                        bulb.radius, eyeRadius * .9f,
+                        Math.max(.025f, eyeRadius * .09f), white);
+            }
+            var built = buffer.endNullable();
+            if (built == null) return;
+            setupRenderState();
+            RenderSystem.setShader(GameRenderer::getPositionColorProgram);
+            BufferRenderer.drawWithGlobalProgram(built);
+            restoreRenderState();
+        }
+
+        private static void appendSphere(BufferBuilder buffer, Matrix4f view, Vec3d camera,
+                                         Vec3d center, float radius, SphereMesh mesh) {
+            for (SphereVertex vertex : mesh.vertices) {
+                Vec3d point = center.add(vertex.position.multiply(radius));
+                float green = .006f + vertex.light * .010f;
+                float blue = .009f + vertex.light * .014f;
+                colorVertex(buffer, view, camera, point, 0, green, blue);
+            }
+        }
+
+        private static void appendEyeArm(BufferBuilder b, Matrix4f view, Vec3d cam, Vec3d center,
+                                         Vec3d along, Vec3d across, float length, float width, float white) {
+            Vec3d l = along.normalize().multiply(length), w = across.normalize().multiply(width);
+            colorVertex(b, view, cam, center.subtract(l), white, white, 1);
+            colorVertex(b, view, cam, center.subtract(w), white, white, 1);
+            colorVertex(b, view, cam, center.add(l), white, white, 1);
+            colorVertex(b, view, cam, center.add(w), white, white, 1);
+        }
+
+        /** Projects each strip vertex onto the visible hemisphere instead of drawing
+         * the cross as a tangent-plane decal. This is the 3D equivalent of C#'s
+         * BulgeVertex slit mesh and keeps large eyes conforming to their bulbs. */
+        private static void appendWrappedEyeArm(BufferBuilder b, Matrix4f view, Vec3d cam,
+                                                Vec3d center, Vec3d outward,
+                                                Vec3d along, Vec3d across, float radius,
+                                                float length, float width, float white) {
+            final int segments = 8;
+            float wrappedLength = Math.min(length, radius * .92f);
+            for (int i = 0; i < segments; i++) {
+                float t0 = i / (float) segments;
+                float t1 = (i + 1) / (float) segments;
+                float x0 = MathHelper.lerp(t0, -wrappedLength, wrappedLength);
+                float x1 = MathHelper.lerp(t1, -wrappedLength, wrappedLength);
+                float w0 = width * (.22f + .78f * (float) Math.sin(Math.PI * t0));
+                float w1 = width * (.22f + .78f * (float) Math.sin(Math.PI * t1));
+                wrappedEyeVertex(b, view, cam, center, outward, along, across,
+                        radius, x0, -w0, white);
+                wrappedEyeVertex(b, view, cam, center, outward, along, across,
+                        radius, x1, -w1, white);
+                wrappedEyeVertex(b, view, cam, center, outward, along, across,
+                        radius, x1, w1, white);
+                wrappedEyeVertex(b, view, cam, center, outward, along, across,
+                        radius, x0, w0, white);
+            }
+        }
+
+        private static void wrappedEyeVertex(BufferBuilder b, Matrix4f view, Vec3d cam,
+                                             Vec3d center, Vec3d outward,
+                                             Vec3d along, Vec3d across, float radius,
+                                             float x, float y, float white) {
+            Vec3d tangent = along.normalize().multiply(x).add(across.normalize().multiply(y));
+            double maximum = radius * .965;
+            if (tangent.lengthSquared() > maximum * maximum)
+                tangent = tangent.normalize().multiply(maximum);
+            double depth = Math.sqrt(Math.max(0, radius * radius - tangent.lengthSquared()));
+            Vec3d radial = tangent.add(outward.normalize().multiply(depth)).normalize();
+            // The body roughness hash is defined only at the shared icosphere
+            // vertices. Sampling it continuously here made adjacent eye vertices
+            // jump between unrelated radii and folded the strip into spikes.
+            // A smooth shell just outside the maximum body radius is stable and
+            // guarantees the final eye pass cannot clip into its parent.
+            double eyeShellRadius = radius * 1.102 + .003;
+            Vec3d point = center.add(radial.multiply(eyeShellRadius));
+            colorVertex(b, view, cam, point, white, white, 1);
+        }
+
+        private static void colorVertex(VertexConsumer b, Matrix4f view, Vec3d cam, Vec3d p,
+                                        float red, float green, float blue) {
+            b.vertex(view, (float) (p.x - cam.x), (float) (p.y - cam.y), (float) (p.z - cam.z))
+                    .color(red, green, blue, 1);
+        }
+
+        private static void drawRotBuffer(BufferBuilder buffer, Camera camera, ShaderProgram program) {
+            var built = buffer.endNullable(); if (built == null) return;
+            setupRenderState();
+            RenderSystem.setShader(() -> program); RenderSystem.setShaderTexture(0, NOISE_TEXTURE);
+            program.addSampler("Sampler0", MinecraftClient.getInstance().getTextureManager().getTexture(NOISE_TEXTURE));
+            RenderSystem.setShaderTexture(1, CORRUPTION_TEXTURE);
+            program.addSampler("Sampler1", MinecraftClient.getInstance().getTextureManager()
+                    .getTexture(CORRUPTION_TEXTURE));
+            // Shader packs render the world with libMod's captured bobbed view
+            // matrix. Using the raw camera rotation here makes an otherwise
+            // coplanar decal disagree with Iris's depth buffer, most visibly as
+            // screen-space horizontal bands over floors.
+            setUniform(program, "uViewMat", new Matrix4f(RenderUtils.getCameraMatrix(camera)));
+            setUniform(program, "uMode", 0);
+            setUniform(program, "uViewDepthBias",
+                    isIrisShaderPackActive() ? IRIS_DECAL_DEPTH_BIAS : 0.0f);
+            BufferRenderer.drawWithGlobalProgram(built);
+            restoreRenderState();
+        }
+
+        private static void setupRenderState() {
+            RenderSystem.enableDepthTest(); RenderSystem.depthMask(false); RenderSystem.enableBlend();
+            RenderSystem.defaultBlendFunc(); RenderSystem.disableCull();
+        }
+        private static void restoreRenderState() {
+            RenderSystem.depthMask(true); RenderSystem.enableCull(); RenderSystem.disableBlend();
+        }
     }
-    
+
+    private record SurfaceKey(long position, Direction face) {
+        private long seed() { return position * 31 + face.ordinal(); }
+    }
+    private static final class SurfaceCell {
+        private final ArrayList<SurfacePatch> patches = new ArrayList<>();
+        private Vec3d centerSum = Vec3d.ZERO;
+        private void add(SurfacePatch patch, Vec3d center) {
+            patches.add(patch);
+            centerSum = centerSum.add(center);
+        }
+        private Vec3d center() { return centerSum.multiply(1.0 / patches.size()); }
+    }
+    private record SurfacePatch(SurfaceQuad quad, double u0, double u1, double v0, double v1) {
+        private Vec3d sample(double u, double v) {
+            return quad.sample(lerp(u0, u1, u), lerp(v0, v1, v));
+        }
+    }
+    private static final class SurfaceQuad {
+        private final Vec3d[] points; private final Vec3d normal;
+        private final float[] levels, u, v, noiseU, noiseV;
+        private SurfaceQuad(Vec3d[] p, Vec3d n, float[] levels, float[] u, float[] v,
+                            float[] noiseU, float[] noiseV) {
+            points = p; normal = n; this.levels = levels; this.u = u; this.v = v;
+            this.noiseU = noiseU; this.noiseV = noiseV;
+        }
+        private Vec3d sample(double u, double v) {
+            return points[0].lerp(points[1], u).lerp(points[3].lerp(points[2], u), v);
+        }
+    }
+
+    private static final class CorruptionBulb {
+        private final Random random; private final Vec3d stuck, direction, eyeStalk;
+        private final float radius, rotation, eyeRadius; private final boolean hasEye;
+        private final int meshVariant;
+        private Vec3d position, previousRenderPosition, velocity = Vec3d.ZERO;
+        private Vec3d lookDirection, lastLookDirection, nextLookDirection, legReachPosition;
+        private int reactionDelay; private boolean heardSound;
+        private float light, renderLightNoise, focus, focusGoal; private CorruptionTube tube;
+        private CorruptionBulb(Vec3d stuck, Vec3d direction, float radius, boolean eye, Random source) {
+            random = new Random(source.nextLong()); this.stuck = stuck; this.direction = direction;
+            this.radius = radius; hasEye = eye; position = previousRenderPosition = stuck;
+            eyeStalk = stuck.subtract(direction.multiply(lerp(.5, 2.5, random.nextDouble())));
+            rotation = random.nextFloat() * MathHelper.TAU; eyeRadius = random.nextFloat();
+            meshVariant = random.nextInt(BULB_MESHES.length);
+            lookDirection = lastLookDirection = nextLookDirection = randomUnit(random);
+        }
+        private void captureRenderState() { previousRenderPosition = position; if (tube != null) tube.capture(); }
+        private void update(ClientWorld world) {
+            position = position.add(velocity);
+            velocity = velocity.multiply(.9).add(lookDirection.multiply(.005))
+                    .subtract(position.subtract(stuck).multiply(.1));
+            Vec3d offset = position.subtract(stuck); double limit = radius * .5;
+            if (offset.lengthSquared() > limit * limit) {
+                Vec3d correction = offset.normalize().multiply(offset.length() - limit);
+                velocity = velocity.subtract(correction); position = position.subtract(correction);
+            }
+            if (tube != null) {
+                velocity = velocity.add(safeNormalize(tube.segments[tube.segments.length / 2].position
+                        .subtract(position), Vec3d.ZERO).multiply(.05));
+                tube.update(world, legReachPosition);
+            }
+            float changed = light * inverseLerp(0, 1, lastLookDirection.distanceTo(lookDirection));
+            light = Math.max(0, light - .05f); renderLightNoise = random.nextFloat() * light;
+            if (random.nextFloat() < changed) focusGoal = Math.max(focusGoal, random.nextFloat());
+            else if (random.nextFloat() < 1f / 70f) focusGoal = 0;
+            focus = moveTowards(focus, focusGoal, .05f);
+            if (random.nextFloat() < .01f) legReachPosition = null;
+            lastLookDirection = lookDirection;
+            if (reactionDelay < 1) {
+                lookDirection = nextLookDirection;
+                if (heardSound) { light = Math.max(light, random.nextFloat());
+                    legReachPosition = position.add(lookDirection.multiply(lerp(5, 10, random.nextDouble()))); }
+                heardSound = false; reactionDelay = 10 + random.nextInt(10);
+            } else reactionDelay--;
+            if (random.nextFloat() < .00125f) nextLookDirection = randomUnit(random);
+        }
+        private void heardNoise(Vec3d p, float intensity) {
+            nextLookDirection = safeNormalize(p.subtract(stuck), nextLookDirection); heardSound = true;
+            light = Math.max(light, intensity); if (legReachPosition == null) legReachPosition = p;
+        }
+        private Vec3d renderPosition(float delta) { return previousRenderPosition.lerp(position, delta); }
+    }
+
+    private static final class CorruptionTube {
+        private static final double CONNECTION_RADIUS = .5, PUSH_APART = .15 / 20;
+        private final Random random; private final Vec3d mountedDirection;
+        private final TubeSegment[] segments; private final TubeBump[] bumps; private int moveCounter;
+        private CorruptionTube(Vec3d start, Vec3d direction, float length, Random source) {
+            random = new Random(source.nextLong()); mountedDirection = direction;
+            int count = Math.max(2, Math.min(200, (int) (length / CONNECTION_RADIUS)));
+            segments = new TubeSegment[count];
+            for (int i = 0; i < count; i++) {
+                Vec3d p = start.lerp(start.add(direction.multiply(length)), i / (double) (count - 1))
+                        .add(randomUnit(random).multiply(random.nextDouble() / 20));
+                segments[i] = new TubeSegment(p, randomUnit(random).multiply(random.nextDouble() / 20));
+            }
+            bumps = new TubeBump[count / 2 + 5 + random.nextInt(3)];
+            for (int i = 0; i < bumps.length; i++) {
+                float amount = (float) Math.sqrt(random.nextDouble()); if (i == 0) amount = 1;
+                float along = (float) lerp(inverseLerp(0, count, count - 20), 1, amount);
+                float size = (float) lerp(random.nextDouble(), amount, random.nextDouble());
+                float eye = random.nextFloat() * 1.6f < lerp(0, .6, amount)
+                        ? (float) lerp(.2, .8, random.nextDouble()) : 0;
+                bumps[i] = new TubeBump((float) lerp(-.15, .15, random.nextDouble()) * amount,
+                        along, size, eye);
+            }
+        }
+        private void capture() { for (TubeSegment s : segments) s.previousRenderPosition = s.position; }
+        private void update(ClientWorld world, Vec3d reach) {
+            for (int i = 2; i < segments.length; i++) {
+                Vec3d apart = safeNormalize(segments[i].position.subtract(segments[i - 2].position),
+                        new Vec3d(0, 1, 0));
+                segments[i - 2].velocity = segments[i - 2].velocity.subtract(apart.multiply(PUSH_APART));
+                segments[i].velocity = segments[i].velocity.add(apart.multiply(PUSH_APART));
+            }
+            for (int i = 0; i < segments.length; i++) {
+                TubeSegment s = segments[i];
+                if (ROT_GRAVITY_ENABLED)
+                    s.velocity = s.velocity.add(0, -.045 * inverseLerp(2, 5, i), 0);
+                s.position = s.position.add(s.velocity); s.velocity = s.velocity.multiply(.999);
+                if (i > 2) resolveTerrain(world, s, .1);
+            }
+            connectWall(); for (int i = segments.length - 1; i > 0; i--) connect(i, i - 1);
+            connectWall(); for (int i = 1; i < segments.length; i++) connect(i, i - 1); connectWall();
+            for (int i = 0; i < segments.length; i++) {
+                float along = i / (float) (segments.length - 1);
+                segments[i].velocity = segments[i].velocity.add(mountedDirection.multiply(
+                        .05 * inverseLerp(5, 1, i)));
+                if (reach != null) segments[i].velocity = segments[i].velocity.add(safeNormalize(
+                        reach.subtract(segments[i].position), Vec3d.ZERO).multiply(.01 * random.nextDouble()));
+                else if (moveCounter < 0) segments[i].velocity = segments[i].velocity.add(
+                        randomUnit(random).multiply(.1 * random.nextDouble() * along));
+            }
+            moveCounter--; if (moveCounter < 0 && random.nextFloat() < .025f) moveCounter = 80 + random.nextInt(220);
+        }
+        private static void resolveTerrain(ClientWorld world, TubeSegment s, double radius) {
+            BlockPos pos = BlockPos.ofFloored(s.position); VoxelShape shape = world.getBlockState(pos).getCollisionShape(world, pos);
+            double x = s.position.x - pos.getX(), y = s.position.y - pos.getY(), z = s.position.z - pos.getZ();
+            for (Box box : shape.getBoundingBoxes()) {
+                if (x <= box.minX || x >= box.maxX || y <= box.minY || y >= box.maxY || z <= box.minZ || z >= box.maxZ) continue;
+                double[] d = {x-box.minX,box.maxX-x,y-box.minY,box.maxY-y,z-box.minZ,box.maxZ-z}; int side=0;
+                for (int i=1;i<6;i++) if(d[i]<d[side]) side=i; Vec3d old=s.position;
+                s.position = switch(side) {
+                    case 0 -> new Vec3d(pos.getX()+box.minX-radius,old.y,old.z);
+                    case 1 -> new Vec3d(pos.getX()+box.maxX+radius,old.y,old.z);
+                    case 2 -> new Vec3d(old.x,pos.getY()+box.minY-radius,old.z);
+                    case 3 -> new Vec3d(old.x,pos.getY()+box.maxY+radius,old.z);
+                    case 4 -> new Vec3d(old.x,old.y,pos.getZ()+box.minZ-radius);
+                    default -> new Vec3d(old.x,old.y,pos.getZ()+box.maxZ+radius); };
+                Vec3d delta=s.position.subtract(old); s.velocity=new Vec3d(delta.x!=0?s.velocity.x*-.15:s.velocity.x,
+                        delta.y!=0?s.velocity.y*-.15:s.velocity.y,delta.z!=0?s.velocity.z*-.15:s.velocity.z); return;
+            }
+        }
+        private void connectWall() { segments[0].position=segments[0].stuck; segments[0].velocity=Vec3d.ZERO; }
+        private void connect(int a,int b) {
+            Vec3d dir=safeNormalize(segments[a].position.subtract(segments[b].position),new Vec3d(0,1,0));
+            double distance=segments[a].position.distanceTo(segments[b].position);
+            Vec3d correction=dir.multiply((CONNECTION_RADIUS-distance)*.5*inverseLerp(0,CONNECTION_RADIUS,distance));
+            segments[a].position=segments[a].position.add(correction); segments[a].velocity=segments[a].velocity.add(correction);
+            segments[b].position=segments[b].position.subtract(correction); segments[b].velocity=segments[b].velocity.subtract(correction);
+        }
+        private Vec3d interpolated(int i,float d) { return segments[i].previousRenderPosition.lerp(segments[i].position,d); }
+        private Vec3d positionAt(float amount,float d) {
+            float scaled=MathHelper.clamp(amount,0,1)*(segments.length-1); int a=MathHelper.clamp(MathHelper.floor(scaled),0,segments.length-1);
+            int b=Math.min(a+1,segments.length-1); return interpolated(a,d).lerp(interpolated(b,d),scaled-a);
+        }
+    }
+    private static final class TubeSegment {
+        private Vec3d position, previousRenderPosition, velocity; private final Vec3d stuck;
+        private TubeSegment(Vec3d p,Vec3d v) { position=previousRenderPosition=stuck=p; velocity=v; }
+    }
+    private record TubeBump(float offset,float along,float size,float eyeSize) { }
+
+    private record SphereVertex(Vec3d position, float light) { }
+    private record SphereMesh(SphereVertex[] vertices) { }
+    private record SphereTriangle(Vec3d a, Vec3d b, Vec3d c) { }
+
+    private static SphereMesh[] createBulbMeshes() {
+        SphereMesh[] meshes = new SphereMesh[8];
+        for (int i = 0; i < meshes.length; i++) meshes[i] = createIcosphere(1, i + 1);
+        return meshes;
+    }
+
     /**
-     * Get the world position at a point along the tentacle.
+     * Precomputes a small set of closed, irregular sphere meshes. The old UV
+     * spheres evaluated trigonometry and emitted 640 vertices for every bulb
+     * and nodule every frame. Main bulbs now emit 240 precomputed vertices and
+     * tiny nodules just 60, while deterministic radial displacement retains the
+     * uneven JaggedCircle silhouette without transparent holes.
      */
-    private static Vec3d getTentaclePosition(Tentacle tentacle, float t, float lateralOffset) {
-        float scaledT = t * (tentacle.segments.length - 1);
-        int idx = (int) scaledT;
-        float frac = scaledT - idx;
-        
-        if (idx >= tentacle.segments.length - 1) {
-            idx = tentacle.segments.length - 2;
-            frac = 1f;
+    private static SphereMesh createIcosphere(int subdivisions, int variant) {
+        double golden = (1.0 + Math.sqrt(5.0)) * .5;
+        Vec3d[] points = {
+                new Vec3d(-1, golden, 0), new Vec3d(1, golden, 0),
+                new Vec3d(-1, -golden, 0), new Vec3d(1, -golden, 0),
+                new Vec3d(0, -1, golden), new Vec3d(0, 1, golden),
+                new Vec3d(0, -1, -golden), new Vec3d(0, 1, -golden),
+                new Vec3d(golden, 0, -1), new Vec3d(golden, 0, 1),
+                new Vec3d(-golden, 0, -1), new Vec3d(-golden, 0, 1)
+        };
+        for (int i = 0; i < points.length; i++) points[i] = points[i].normalize();
+        int[][] indices = {
+                {0,11,5},{0,5,1},{0,1,7},{0,7,10},{0,10,11},
+                {1,5,9},{5,11,4},{11,10,2},{10,7,6},{7,1,8},
+                {3,9,4},{3,4,2},{3,2,6},{3,6,8},{3,8,9},
+                {4,9,5},{2,4,11},{6,2,10},{8,6,7},{9,8,1}
+        };
+        ArrayList<SphereTriangle> triangles = new ArrayList<>();
+        for (int[] face : indices)
+            triangles.add(new SphereTriangle(points[face[0]], points[face[1]], points[face[2]]));
+        for (int pass = 0; pass < subdivisions; pass++) {
+            ArrayList<SphereTriangle> divided = new ArrayList<>(triangles.size() * 4);
+            for (SphereTriangle triangle : triangles) {
+                Vec3d ab = triangle.a.add(triangle.b).normalize();
+                Vec3d bc = triangle.b.add(triangle.c).normalize();
+                Vec3d ca = triangle.c.add(triangle.a).normalize();
+                divided.add(new SphereTriangle(triangle.a, ab, ca));
+                divided.add(new SphereTriangle(triangle.b, bc, ab));
+                divided.add(new SphereTriangle(triangle.c, ca, bc));
+                divided.add(new SphereTriangle(ab, bc, ca));
+            }
+            triangles = divided;
         }
-        
-        Vec3d p0 = tentacle.segments[idx];
-        Vec3d p1 = tentacle.segments[idx + 1];
-        
-        // Interpolate position
-        Vec3d pos = p0.add(p1.subtract(p0).multiply(frac));
-        
-        // Add lateral offset perpendicular to tentacle direction
-        Vec3d dir = p1.subtract(p0).normalize();
-        Vec3d perp = dir.crossProduct(new Vec3d(0, 1, 0));
-        if (perp.lengthSquared() < 0.001) {
-            perp = dir.crossProduct(new Vec3d(1, 0, 0));
+
+        Vec3d lightDirection = new Vec3d(-.35, .8, -.45).normalize();
+        SphereVertex[] vertices = new SphereVertex[triangles.size() * 3];
+        int cursor = 0;
+        for (SphereTriangle triangle : triangles) {
+            Vec3d[] corners = {triangle.a, triangle.b, triangle.c};
+            for (Vec3d normal : corners) {
+                double roughness = sphereRoughness(normal, variant);
+                float light = (float) Math.max(0, normal.dotProduct(lightDirection));
+                vertices[cursor++] = new SphereVertex(normal.multiply(roughness), light);
+            }
         }
-        perp = perp.normalize();
-        
-        float width = MathHelper.lerp(frac, tentacle.widths[idx], tentacle.widths[idx + 1]);
-        pos = pos.add(perp.multiply(lateralOffset * width * 2));
-        
-        return pos;
+        return new SphereMesh(vertices);
     }
-    
-    /**
-     * Render a single tube segment between two points.
-     */
-    private static void renderTubeSegment(Matrix4f posMatrix, VertexConsumer consumer,
-                                           Vec3d p0, Vec3d p1, float w0, float w1, int light) {
-        Vec3d dir = p1.subtract(p0).normalize();
-        
-        // Get perpendicular vectors for tube surface
-        Vec3d up = new Vec3d(0, 1, 0);
-        if (Math.abs(dir.dotProduct(up)) > 0.99) {
-            up = new Vec3d(1, 0, 0);
-        }
-        Vec3d perp1 = dir.crossProduct(up).normalize();
-        Vec3d perp2 = dir.crossProduct(perp1).normalize();
-        
-        // Render tube as quads around circumference
-        int tubeSegments = 6;
-        for (int i = 0; i < tubeSegments; i++) {
-            float angle0 = (float) (i * 2 * Math.PI / tubeSegments);
-            float angle1 = (float) ((i + 1) * 2 * Math.PI / tubeSegments);
-            
-            float cos0 = (float) Math.cos(angle0);
-            float sin0 = (float) Math.sin(angle0);
-            float cos1 = (float) Math.cos(angle1);
-            float sin1 = (float) Math.sin(angle1);
-            
-            // Four corners of this quad
-            Vec3d v00 = p0.add(perp1.multiply(cos0 * w0)).add(perp2.multiply(sin0 * w0));
-            Vec3d v01 = p0.add(perp1.multiply(cos1 * w0)).add(perp2.multiply(sin1 * w0));
-            Vec3d v10 = p1.add(perp1.multiply(cos0 * w1)).add(perp2.multiply(sin0 * w1));
-            Vec3d v11 = p1.add(perp1.multiply(cos1 * w1)).add(perp2.multiply(sin1 * w1));
-            
-            // Normals pointing outward
-            Vec3d n0 = perp1.multiply(cos0).add(perp2.multiply(sin0));
-            Vec3d n1 = perp1.multiply(cos1).add(perp2.multiply(sin1));
-            
-            // Emit quad
-            vertex(consumer, posMatrix, (float)v00.x, (float)v00.y, (float)v00.z, BULB_R, BULB_G, BULB_B, 1f, 0, 0, light, (float)n0.x, (float)n0.y, (float)n0.z);
-            vertex(consumer, posMatrix, (float)v10.x, (float)v10.y, (float)v10.z, BULB_R, BULB_G, BULB_B, 1f, 0, 1, light, (float)n0.x, (float)n0.y, (float)n0.z);
-            vertex(consumer, posMatrix, (float)v11.x, (float)v11.y, (float)v11.z, BULB_R, BULB_G, BULB_B, 1f, 1, 1, light, (float)n1.x, (float)n1.y, (float)n1.z);
-            vertex(consumer, posMatrix, (float)v01.x, (float)v01.y, (float)v01.z, BULB_R, BULB_G, BULB_B, 1f, 1, 0, light, (float)n1.x, (float)n1.y, (float)n1.z);
+
+    private static double sphereRoughness(Vec3d normal, int variant) {
+        if (variant == 0) return 1.0;
+        double hash = Math.sin(normal.x * 31.17 + normal.y * 57.91
+                + normal.z * 91.73 + variant * 17.11) * 43758.5453;
+        hash -= Math.floor(hash);
+        return lerp(.91, 1.10, hash);
+    }
+
+    private static Vec3d randomUnit(Random random) {
+        double y=lerp(-1,1,random.nextDouble()), r=Math.sqrt(Math.max(0,1-y*y)), a=random.nextDouble()*Math.PI*2;
+        return new Vec3d(Math.cos(a)*r,y,Math.sin(a)*r);
+    }
+    private static Vec3d safeNormalize(Vec3d v,Vec3d fallback) { return v.lengthSquared()<1e-8?fallback:v.normalize(); }
+    private static float moveTowards(float a,float b,float n) { return a<b?Math.min(a+n,b):Math.max(a-n,b); }
+    private static float inverseLerp(double a,double b,double v) { return a==b?0:(float)MathHelper.clamp((v-a)/(b-a),0,1); }
+    private static double lerp(double a,double b,double t) { return a+(b-a)*t; }
+    private static double square(double v) { return v*v; }
+    private static boolean isIrisShaderPackActive() {
+        try {
+            Class<?> irisApi = Class.forName("net.irisshaders.iris.api.v0.IrisApi");
+            Object api = irisApi.getMethod("getInstance").invoke(null);
+            Object active = irisApi.getMethod("isShaderPackInUse").invoke(api);
+            return active instanceof Boolean enabled && enabled;
+        } catch (Throwable ignored) {
+            return false;
         }
     }
-    
-    /**
-     * Render just the eye part (for tentacle bumps).
-     */
-    private static void renderEyeOnSphere(MatrixStack matrices, VertexConsumer consumer, 
-                                           Bulb bulb, Vec3d cam, int light) {
-        renderEye(matrices, consumer, bulb, cam, light);
-    }
-    
-    /**
-     * Clear the bulb cache (called on world unload/change).
-     */
-    public static void clearCache() {
-        BULB_CACHE.clear();
-    }
-    
-    private RotWorldRenderer() {}
+    private static void setUniform(ShaderProgram p,String n,float v) { GlUniform u=p.getUniform(n); if(u!=null)u.set(v); }
+    private static void setUniform(ShaderProgram p,String n,Matrix4f v) { GlUniform u=p.getUniform(n); if(u!=null)u.set(v); }
 }

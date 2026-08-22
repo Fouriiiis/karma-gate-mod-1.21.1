@@ -1,8 +1,11 @@
 package dev.fouriis.karmagate.block;
 
-import net.minecraft.block.Block;
+import com.mojang.serialization.MapCodec;
+import dev.fouriis.karmagate.entity.rot.RotBlockEntity;
 import net.minecraft.block.BlockRenderType;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.BlockWithEntity;
+import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.util.shape.VoxelShapes;
@@ -11,13 +14,10 @@ import net.minecraft.block.ShapeContext;
 import net.minecraft.world.World;
 import net.minecraft.entity.player.PlayerEntity;
 
-/**
- * Invisible gameplay anchor for Daddy Corruption / Rot flesh clusters.
- * The block is invisible like a barrier but the corruption visuals are rendered
- * on all adjacent solid surface blocks via a custom world renderer.
- * Renders black spherical cores ("bulbs") with blue X-pattern eye markings.
- */
-public final class RotBlock extends Block {
+/** Invisible placed-object anchor for a configurable DaddyCorruption zone. */
+public final class RotBlock extends BlockWithEntity {
+    public static final MapCodec<RotBlock> CODEC = createCodec(RotBlock::new);
+
     public RotBlock(Settings settings) {
         super(settings);
     }
@@ -25,6 +25,16 @@ public final class RotBlock extends Block {
     @Override
     public BlockRenderType getRenderType(BlockState state) {
         return BlockRenderType.INVISIBLE;
+    }
+
+    @Override
+    protected MapCodec<? extends BlockWithEntity> getCodec() {
+        return CODEC;
+    }
+
+    @Override
+    public BlockEntity createBlockEntity(BlockPos pos, BlockState state) {
+        return new RotBlockEntity(pos, state);
     }
 
     @Override

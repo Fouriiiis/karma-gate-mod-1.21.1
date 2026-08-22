@@ -363,7 +363,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 		ClientChunkEvents.CHUNK_LOAD.register((world, chunk) -> RotRenderCache.onChunkLoad(world, chunk));
 		ClientChunkEvents.CHUNK_UNLOAD.register((world, chunk) -> RotRenderCache.onChunkUnload(world, chunk));
 
-		// Render corruption spheres with eye patterns.
+		// Render model-conforming corruption, bulbs, eyes, and LittleLeg tubes.
 		WorldRenderEvents.AFTER_ENTITIES.register(RotWorldRenderer::render);
 		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
 			SteamAudioController.get().clear();
