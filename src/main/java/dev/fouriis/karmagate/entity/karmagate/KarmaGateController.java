@@ -2375,11 +2375,26 @@ public final class KarmaGateController {
                 resetComplete
                         && energyEnoughToOpen();
 
+        /*
+         * GateKarmaGlyph.side names the glyph bank across the airlock, while
+         * entrySide names the chamber containing the activating player. Those
+         * are opposite physical sides in the C# room layout. Only this
+         * MiddleClosed selection affects which bank begins fading first; once
+         * the cycle commits, closedLike becomes false and both banks continue
+         * through the normal shared fade-out.
+         */
+        Side firstGlyphFadeSide =
+                entrySide == Side.SIDE1
+                        ? Side.SIDE2
+                        : entrySide == Side.SIDE2
+                        ? Side.SIDE1
+                        : null;
+
         setHologramGateStateForSide(
                 world,
                 Side.SIDE1,
                 closedLike,
-                entrySide == Side.SIDE1,
+                firstGlyphFadeSide == Side.SIDE1,
                 activeStartCounter,
                 anyLogicalLamp,
                 hasEnergy
@@ -2389,7 +2404,7 @@ public final class KarmaGateController {
                 world,
                 Side.SIDE2,
                 closedLike,
-                entrySide == Side.SIDE2,
+                firstGlyphFadeSide == Side.SIDE2,
                 activeStartCounter,
                 anyLogicalLamp,
                 hasEnergy
