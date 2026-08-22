@@ -1,6 +1,7 @@
 package dev.fouriis.karmagate.entity.karmagate;
 
 import dev.fouriis.karmagate.entity.ModBlockEntities;
+import dev.fouriis.karmagate.particle.ModParticles;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.nbt.NbtCompound;
@@ -32,6 +33,8 @@ public class HeatCoilBlockEntity extends BlockEntity {
     private float gateLightAlpha = 0.0f;
     private float gateLightRadius = 0.0f;
     private float gateDistortionAlpha = 0.0f;
+    private long gateSteamPuffSequence = 0L;
+    private float gateSteamPuffIntensity = 0.0f;
 
     // all external/additional contributions for the *current* server tick
     private float pendingDelta = 0f;
@@ -59,6 +62,8 @@ public class HeatCoilBlockEntity extends BlockEntity {
     private float previousClientHeaterHeat;
     private float clientLightFlicker = 1.0f;
     private float clientLightColorFlicker = 1.0f;
+    private long clientConsumedSteamPuffSequence = 0L;
+    private boolean clientSteamSequenceInitialized;
 
     /**
      * Limits water-gate-style steam to one emission attempt per heater per tick,
@@ -210,6 +215,30 @@ public class HeatCoilBlockEntity extends BlockEntity {
             float lightRadius,
             float distortionAlpha
     ) {
+        setGateHeatState(
+                currentHeat,
+                targetHeat,
+                lightAlpha,
+                lightRadius,
+                distortionAlpha,
+                0,
+                0.0f
+        );
+    }
+
+    /**
+     * Gate state plus the exact SteamSmoke emission events accumulated by the
+     * controller's two Rain World updates this Minecraft tick.
+     */
+    public void setGateHeatState(
+            float currentHeat,
+            float targetHeat,
+            float lightAlpha,
+            float lightRadius,
+            float distortionAlpha,
+            int steamPuffCount,
+            float steamPuffIntensity
+    ) {
         if (world != null && world.isClient) return;
 
         float nextHeat = clamp01(currentHeat);
@@ -217,6 +246,8 @@ public class HeatCoilBlockEntity extends BlockEntity {
         float nextLightAlpha = clamp01(lightAlpha);
         float nextLightRadius = Math.max(0.0f, lightRadius);
         float nextDistortionAlpha = clamp01(distortionAlpha);
+        int safeSteamPuffCount = Math.max(0, steamPuffCount);
+        float nextSteamPuffIntensity = clamp01(steamPuffIntensity);
 
         boolean changed =
                 !gateManaged
@@ -224,7 +255,8 @@ public class HeatCoilBlockEntity extends BlockEntity {
                 || Math.abs(nextTarget - gateTargetHeat) > EPS
                 || Math.abs(nextLightAlpha - gateLightAlpha) > EPS
                 || Math.abs(nextLightRadius - gateLightRadius) > EPS
-                || Math.abs(nextDistortionAlpha - gateDistortionAlpha) > EPS;
+                || Math.abs(nextDistortionAlpha - gateDistortionAlpha) > EPS
+                || safeSteamPuffCount > 0;
 
         gateManaged = true;
         enabled = false;
@@ -235,6 +267,10 @@ public class HeatCoilBlockEntity extends BlockEntity {
         gateLightAlpha = nextLightAlpha;
         gateLightRadius = nextLightRadius;
         gateDistortionAlpha = nextDistortionAlpha;
+        if (safeSteamPuffCount > 0) {
+            gateSteamPuffSequence += safeSteamPuffCount;
+            gateSteamPuffIntensity = nextSteamPuffIntensity;
+        }
 
         if (changed) {
             markDirtySync();
@@ -309,6 +345,7 @@ public class HeatCoilBlockEntity extends BlockEntity {
              */
             clientLightFlicker = 1.0f;
             clientLightColorFlicker = 1.0f;
+            consumeGateSteamPuffs(world);
             return;
         }
 
@@ -320,6 +357,47 @@ public class HeatCoilBlockEntity extends BlockEntity {
             clientLightFlicker = 0.8f + 0.2f * world.random.nextFloat();
             clientLightColorFlicker = 0.7f + 0.3f * world.random.nextFloat();
         }
+    }
+
+    private void consumeGateSteamPuffs(World world) {
+        if (!clientSteamSequenceInitialized) {
+            clientConsumedSteamPuffSequence = gateSteamPuffSequence;
+            clientSteamSequenceInitialized = true;
+            return;
+        }
+
+        long pending = gateSteamPuffSequence - clientConsumedSteamPuffSequence;
+        if (pending < 0L) {
+            clientConsumedSteamPuffSequence = gateSteamPuffSequence;
+            return;
+        }
+
+        int emitCount = (int) Math.min(16L, pending);
+        for (int i = 0; i < emitCount; i++) {
+            emitGateSteamPuff(world, gateSteamPuffIntensity);
+        }
+        clientConsumedSteamPuffSequence = gateSteamPuffSequence;
+    }
+
+    private void emitGateSteamPuff(World world, float intensity) {
+        // RegionGateGraphics: heaterPositions[k] + random(-15..15, -10..10).
+        // With 20 px/block this is +/-0.75 horizontally and +/-0.5 vertically.
+        double centerX = pos.getX() + 0.5;
+        double centerY = pos.getY() + 0.5;
+        double centerZ = pos.getZ() + 0.5;
+        double px = centerX + (world.random.nextDouble() * 2.0 - 1.0) * 0.75;
+        double py = centerY + (world.random.nextDouble() * 2.0 - 1.0) * 0.5;
+        double pz = centerZ + (world.random.nextDouble() * 2.0 - 1.0) * 0.75;
+
+        world.addParticle(
+                ModParticles.STEAM,
+                px,
+                py,
+                pz,
+                centerX - px,
+                clamp01(intensity),
+                centerZ - pz
+        );
     }
 
     /* ================= sync & NBT ================= */
@@ -340,6 +418,8 @@ public class HeatCoilBlockEntity extends BlockEntity {
         nbt.putFloat("gateLightAlpha", gateLightAlpha);
         nbt.putFloat("gateLightRadius", gateLightRadius);
         nbt.putFloat("gateDistortionAlpha", gateDistortionAlpha);
+        nbt.putLong("gateSteamPuffSequence", gateSteamPuffSequence);
+        nbt.putFloat("gateSteamPuffIntensity", gateSteamPuffIntensity);
         // pendingDelta is transient per tick and not persisted
     }
 
@@ -368,6 +448,12 @@ public class HeatCoilBlockEntity extends BlockEntity {
                 : 0.0f;
         this.gateDistortionAlpha = nbt.contains("gateDistortionAlpha")
                 ? clamp01(nbt.getFloat("gateDistortionAlpha"))
+                : 0.0f;
+        this.gateSteamPuffSequence = nbt.contains("gateSteamPuffSequence")
+                ? Math.max(0L, nbt.getLong("gateSteamPuffSequence"))
+                : 0L;
+        this.gateSteamPuffIntensity = nbt.contains("gateSteamPuffIntensity")
+                ? clamp01(nbt.getFloat("gateSteamPuffIntensity"))
                 : 0.0f;
         this.pendingDelta = 0f;
     }

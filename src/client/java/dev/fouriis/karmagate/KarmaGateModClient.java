@@ -25,6 +25,7 @@ import dev.fouriis.karmagate.entity.centipede.RedCentipedeRenderer;
 import dev.fouriis.karmagate.entity.centipede.SmallCentipedeRenderer;
 import dev.fouriis.karmagate.entity.centipede.SmallCentiwingRenderer;
 import dev.fouriis.karmagate.entity.client.CoralNeuronEntityRenderer;
+import dev.fouriis.karmagate.entity.client.BatteryMeterRenderer;
 import dev.fouriis.karmagate.entity.client.GateLightBlockRenderer;
 import dev.fouriis.karmagate.entity.client.GateLightItemModel;
 import dev.fouriis.karmagate.entity.client.GravityDisruptorRenderer;
@@ -119,6 +120,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 		BlockEntityRendererFactories.register(ModBlockEntities.WATERFALL_BLOCK_ENTITY, WaterfallBlockRenderer::new);
 		BlockEntityRendererFactories.register(ModBlockEntities.WATER_STREAM_BLOCK_ENTITY, WaterfallBlockRenderer::new);
 		BlockEntityRendererFactories.register(ModBlockEntities.GRAVITY_DISRUPTOR_BLOCK_ENTITY, GravityDisruptorRenderer::new);
+		BlockEntityRendererFactories.register(ModBlockEntities.BATTERY_METER_BLOCK_ENTITY, BatteryMeterRenderer::new);
 
 		ParticleFactoryRegistry.getInstance().register(ModParticles.STEAM, new SteamParticle.Factory());
 

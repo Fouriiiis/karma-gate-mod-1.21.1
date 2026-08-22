@@ -147,10 +147,10 @@ public final class KarmaGateController {
      *
      * Closed preserves Rain World's post-cycle behavior for 30 seconds.
      * Recharge then stops the waterfalls and restores the resource over another
-     * 30 seconds before returning to MiddleClosed.
+     * 90 seconds before returning to MiddleClosed.
      */
     private static final int COOLDOWN_SOURCE_STEPS = 40 * 30;
-    private static final int RECHARGE_SOURCE_STEPS = 40 * 30;
+    private static final int RECHARGE_SOURCE_STEPS = 40 * 90;
 
     /*
      * Detection.
@@ -192,6 +192,7 @@ public final class KarmaGateController {
     private final List<BlockPos> steamSide2 = new ArrayList<>();
     private final List<BlockPos> hologramSide1 = new ArrayList<>();
     private final List<BlockPos> hologramSide2 = new ArrayList<>();
+    private final List<BlockPos> batteryMeters = new ArrayList<>();
 
     private final Random random = new Random(1979L);
 
@@ -353,6 +354,7 @@ public final class KarmaGateController {
         steamSide2.clear();
         hologramSide1.clear();
         hologramSide2.clear();
+        batteryMeters.clear();
 
         Direction.Axis axis = state.get(KarmaGateBlock.AXIS);
         double center = axisCoordinate(pos, axis) - 0.5;
@@ -382,6 +384,8 @@ public final class KarmaGateController {
                         (negative ? hologramSide1 : hologramSide2)
                                 .add(foundPos);
                         hologram.bindController(this);
+                    } else if (found instanceof BatteryMeterBlockEntity) {
+                        batteryMeters.add(foundPos);
                     }
                 }
             }
@@ -395,7 +399,7 @@ public final class KarmaGateController {
         KarmaGateMod.LOGGER.info(
                 "[GateCtrl @{}] type={} water(S1={},S2={}) "
                         + "heat(S1={},S2={}) steam(S1={},S2={}) "
-                        + "lights={} holograms(S1={},S2={})",
+                        + "lights={} holograms(S1={},S2={}) batteryMeters={}",
                 controllerBE.getPos(),
                 gateType,
                 waterSide1.size(),
@@ -406,7 +410,8 @@ public final class KarmaGateController {
                 steamSide2.size(),
                 lightsSide1.getRefs().size() + lightsSide2.getRefs().size(),
                 hologramSide1.size(),
-                hologramSide2.size()
+                hologramSide2.size(),
+                batteryMeters.size()
         );
 
         if (gateType == GateType.BROKEN) {
@@ -2110,6 +2115,13 @@ public final class KarmaGateController {
                 rechargeProgress()
         );
 
+        setBatteryMeterState(
+                world,
+                gateType == GateType.ELECTRIC,
+                batteryLeft,
+                batteryChanging
+        );
+
         if (gateType == GateType.WATER) {
             applyWaterOutputs(world);
             lightsSide1.allOff(world);
@@ -2688,10 +2700,12 @@ public final class KarmaGateController {
                         : 0.0f;
 
         float distortionAlpha =
-                sCurve(
-                        heaterTarget[side],
-                        1.5f
-                );
+                activeHeaterLight == side
+                        ? sCurve(
+                                heaterTarget[side],
+                                1.5f
+                        )
+                        : 0.0f;
 
         for (BlockPos pos : positions) {
             if (
@@ -2703,7 +2717,9 @@ public final class KarmaGateController {
                         heaterTarget[side],
                         lightAlpha,
                         lightRadius,
-                        distortionAlpha
+                        distortionAlpha,
+                        pendingSteamPuffs[side],
+                        pendingSteamIntensity[side]
                 );
             }
         }
@@ -2745,6 +2761,26 @@ public final class KarmaGateController {
                         continuousLevel,
                         puffCount,
                         puffIntensity
+                );
+            }
+        }
+    }
+
+    private void setBatteryMeterState(
+            World world,
+            boolean electric,
+            float charge,
+            boolean changing
+    ) {
+        for (BlockPos pos : batteryMeters) {
+            if (
+                    world.getBlockEntity(pos)
+                            instanceof BatteryMeterBlockEntity meter
+            ) {
+                meter.setGateBatteryState(
+                        electric,
+                        charge,
+                        changing
                 );
             }
         }
@@ -3406,6 +3442,12 @@ public final class KarmaGateController {
                 hologramSide2
         );
 
+        writePosList(
+                nbt,
+                "batteryMeters",
+                batteryMeters
+        );
+
         nbt.putString(
                 "karmaSide1",
                 karmaSide1.name()
@@ -3798,6 +3840,12 @@ public final class KarmaGateController {
                 nbt,
                 "holoSide2",
                 hologramSide2
+        );
+
+        readPosList(
+                nbt,
+                "batteryMeters",
+                batteryMeters
         );
 
         if (!storedGateType) {

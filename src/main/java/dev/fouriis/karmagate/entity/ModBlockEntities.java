@@ -11,6 +11,7 @@ import dev.fouriis.karmagate.entity.hologram.HologramProjectorBlockEntity;
 import dev.fouriis.karmagate.entity.karmagate.GateLightBlockEntity;
 import dev.fouriis.karmagate.entity.karmagate.HeatCoilBlockEntity;
 import dev.fouriis.karmagate.entity.karmagate.SteamEmitterBlockEntity;
+import dev.fouriis.karmagate.entity.karmagate.BatteryMeterBlockEntity;
 import dev.fouriis.karmagate.entity.gravity.GravityDisruptorBlockEntity;
 import net.fabricmc.fabric.api.object.builder.v1.block.entity.FabricBlockEntityTypeBuilder;
 import net.minecraft.block.entity.BlockEntityType;
@@ -54,6 +55,10 @@ public class ModBlockEntities {
     public static final BlockEntityType<SteamEmitterBlockEntity> STEAM_EMITTER_BLOCK_ENTITY =
         Registry.register(Registries.BLOCK_ENTITY_TYPE, Identifier.of(KarmaGateMod.MOD_ID, "steam_emitter_block_entity"),
             FabricBlockEntityTypeBuilder.create(SteamEmitterBlockEntity::new, ModBlocks.STEAM_EMITTER).build());
+
+    public static final BlockEntityType<BatteryMeterBlockEntity> BATTERY_METER_BLOCK_ENTITY =
+        Registry.register(Registries.BLOCK_ENTITY_TYPE, Identifier.of(KarmaGateMod.MOD_ID, "battery_meter_block_entity"),
+            FabricBlockEntityTypeBuilder.create(BatteryMeterBlockEntity::new, ModBlocks.BATTERY_METER).build());
 
     public static final BlockEntityType<GravityDisruptorBlockEntity> GRAVITY_DISRUPTOR_BLOCK_ENTITY =
         Registry.register(Registries.BLOCK_ENTITY_TYPE, Identifier.of(KarmaGateMod.MOD_ID, "gravity_disruptor_block_entity"),

@@ -1,0 +1,23 @@
+{
+  "parent": "karma-gate-mod:block/battery_meter",
+  "display": {
+    "gui": {
+      "rotation": [30, 225, 0],
+      "scale": [0.04, 0.04, 0.04]
+    },
+    "ground": {
+      "scale": [0.03, 0.03, 0.03]
+    },
+    "fixed": {
+      "scale": [0.04, 0.04, 0.04]
+    },
+    "thirdperson_righthand": {
+      "rotation": [75, 45, 0],
+      "scale": [0.03, 0.03, 0.03]
+    },
+    "firstperson_righthand": {
+      "rotation": [0, 45, 0],
+      "scale": [0.025, 0.025, 0.025]
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "variants": {
+    "facing=north": { "model": "karma-gate-mod:block/battery_meter" },
+    "facing=east":  { "model": "karma-gate-mod:block/battery_meter", "y": 90 },
+    "facing=south": { "model": "karma-gate-mod:block/battery_meter", "y": 180 },
+    "facing=west":  { "model": "karma-gate-mod:block/battery_meter", "y": 270 }
+  }
+}

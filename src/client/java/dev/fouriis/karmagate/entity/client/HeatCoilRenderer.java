@@ -42,11 +42,6 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
     // controls horizontal yaw; this tilt rotates only the local Y/Z plane.
     private static final float HEATER_SIDEWAYS_TILT_DEGREES = -45.0f;
 
-    // Small extra separation, in blocks, between the front-most possible point
-    // on the heater and the camera-facing post-effect plane. The main separation
-    // comes from the model's calculated bounding radius below.
-    private static final float EFFECT_SURFACE_CLEARANCE = 0.025f;
-
     private static final int GLOW_SEGMENTS = 48;
     private static final int GLOW_RINGS = 12;
 
@@ -76,7 +71,6 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
         if (model == null || model.element().textureIdentifier == null) return;
 
         ModelBounds bounds = getHeaterModelBounds(model);
-        float effectCameraBias = getEffectCameraBias(bounds);
 
         float heat = MathHelper.clamp(heater.getInterpolatedHeaterHeat(tickDelta), 0.0f, 1.0f);
         Rgb hotColor = heaterColor(heat);
@@ -89,51 +83,41 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
 
         renderHeaterModel(vertices, matrix, facing, model, bounds, hotColor, shadeColor);
 
-        queueHeatGlow(heater, heat, effectCameraBias);
-        queueHeatDistortion(heater, tickDelta, effectCameraBias);
+        queueHeatGlow(heater, heat);
+        queueHeatDistortion(heater, tickDelta);
     }
 
-    private static void queueHeatGlow(HeatCoilBlockEntity heater, float heat, float cameraBias) {
+    private static void queueHeatGlow(HeatCoilBlockEntity heater, float heat) {
         if (heat <= 0.05f) return;
 
-        float alpha = (float) Math.pow(
-                inverseLerp(0.05f, 0.5f, heat) * heater.getClientLightFlicker(), 0.75f);
+        float alpha = heater.isGateManaged()
+                ? heater.getGateLightAlpha()
+                : (float) Math.pow(
+                        inverseLerp(0.05f, 0.5f, heat) * heater.getClientLightFlicker(), 0.75f);
         if (alpha <= 0.001f) return;
         float hue = inverseLerp(0.4f, 0.7f, heat) * 0.045f;
         float lightness = 0.5f + 0.1f * inverseLerp(
                 0.8f, 1.0f, heat * heater.getClientLightColorFlicker());
         Rgb glowColor = hslToRgb(hue, 1.0f, lightness);
-        float radius = MathHelper.lerp(MathHelper.sin(MathHelper.PI * heat), 10.0f, 15.0f);
+        float radiusPixels = heater.isGateManaged()
+                ? heater.getGateLightRadius()
+                : MathHelper.lerp(MathHelper.sin(MathHelper.PI * heat), 200.0f, 300.0f);
+        float radius = radiusPixels / PIXELS_PER_BLOCK;
         double centerX = heater.getPos().getX() + 0.5;
         double centerY = heater.getPos().getY() + 0.5;
         double centerZ = heater.getPos().getZ() + 0.5;
 
         // Draw just before libMod captures GrabTexture for HeatDistortion, so
         // the screen-blended light is part of the scene that gets distorted.
-        // The billboard is pushed toward the camera by enough to clear the
-        // complete heater model, preventing the heater from cutting holes in
-        // its own glow at shallow/edge-on viewing angles.
+        // RegionGateGraphics keeps the light at heaterPositions[k]; moving it
+        // toward the camera changes both its apparent radius and screen center.
         RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall(camera ->
-                renderGlow(camera, centerX, centerY, centerZ, radius, glowColor, alpha, cameraBias), false), 990);
+                renderGlow(camera, centerX, centerY, centerZ, radius, glowColor, alpha), false), 990);
     }
 
     private static void renderGlow(Camera camera, double worldX, double worldY, double worldZ,
-                                   float radius, Rgb color, float alpha, float cameraBias) {
+                                   float radius, Rgb color, float alpha) {
         Vec3d cameraPos = camera.getPos();
-
-        // Move the entire billboard toward the camera instead of disabling the
-        // depth test. This keeps normal world occlusion (walls can still hide the
-        // glow) while ensuring the coil itself is always behind its effect plane.
-        double toCameraX = cameraPos.x - worldX;
-        double toCameraY = cameraPos.y - worldY;
-        double toCameraZ = cameraPos.z - worldZ;
-        double distanceSquared = toCameraX * toCameraX + toCameraY * toCameraY + toCameraZ * toCameraZ;
-        if (distanceSquared > 1.0e-8) {
-            double inverseDistance = 1.0 / Math.sqrt(distanceSquared);
-            worldX += toCameraX * inverseDistance * cameraBias;
-            worldY += toCameraY * inverseDistance * cameraBias;
-            worldZ += toCameraZ * inverseDistance * cameraBias;
-        }
 
         float cx = (float) (worldX - cameraPos.x);
         float cy = (float) (worldY - cameraPos.y);
@@ -263,14 +247,17 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
                 .normal(normalX, tiltedNormalY, normalZ);
     }
 
-    private static void queueHeatDistortion(HeatCoilBlockEntity heater, float tickDelta,
-                                            float cameraBias) {
-        float targetHeat = MathHelper.clamp(heater.getVisualHeat(), 0.0f, 1.0f);
-        if (targetHeat <= 0.0f || heater.getWorld() == null) return;
+    private static void queueHeatDistortion(HeatCoilBlockEntity heater, float tickDelta) {
+        float targetHeat = MathHelper.clamp(
+                heater.isGateManaged() ? heater.getGateTargetHeat() : heater.getVisualHeat(),
+                0.0f, 1.0f);
+        float alpha = heater.isGateManaged()
+                ? heater.getGateDistortionAlpha()
+                : sCurve(targetHeat, 1.5f);
+        if (targetHeat <= 0.0f || alpha <= 0.0f || heater.getWorld() == null) return;
         float factor = inverseLerp(0.15f, 0.8f, targetHeat);
         float halfWidth = 0.5f * (16.0f * MathHelper.lerp(factor, 10.0f, 15.0f)) / PIXELS_PER_BLOCK;
         float halfHeight = 0.5f * (16.0f * MathHelper.lerp(factor, 15.0f, 30.0f)) / PIXELS_PER_BLOCK;
-        float alpha = sCurve(targetHeat, 1.5f);
         float rain = (heater.getWorld().getTime() + tickDelta) / 100.0f;
         double centerX = heater.getPos().getX() + 0.5;
         double centerY = heater.getPos().getY() + 0.5 + 2.0f * factor;
@@ -285,10 +272,10 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
                 },
                 centerX, centerY, centerZ,
                 halfWidth, halfHeight,
-                // Camera-local +Z is toward the camera for the camera-facing
-                // billboard helper. Push the distortion plane far enough forward
-                // to clear the complete heater bounding sphere at every view angle.
-                cameraBias,
+                // C# centers the distortion at heaterPositions[k] + (0, 40*f).
+                // A camera-relative push introduces parallax and moves it off
+                // the heater whenever the block is away from screen center.
+                0.0f,
                 0.0f, 0.0f, 0.0f,
                 1.0f, 1.0f, 1.0f, alpha, FULL_BRIGHT,
                 true, HEAT_DISTORTION_PRIORITY);
@@ -350,14 +337,6 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
                 (maxY - minY) * 0.5f,
                 (maxZ - minZ) * 0.5f);
         return heaterModelBounds;
-    }
-
-    private static float getEffectCameraBias(ModelBounds bounds) {
-        float halfX = bounds.halfWidth() / PIXELS_PER_BLOCK;
-        float halfY = bounds.halfDepth() / PIXELS_PER_BLOCK;
-        float halfZ = bounds.halfHeight() / PIXELS_PER_BLOCK;
-        return (float) Math.sqrt(halfX * halfX + halfY * halfY + halfZ * halfZ)
-                + EFFECT_SURFACE_CLEARANCE;
     }
 
     private static Rgb heaterColor(float heat) {

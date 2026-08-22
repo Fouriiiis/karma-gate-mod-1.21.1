@@ -270,14 +270,22 @@ public class WaterfallBlockRenderer<T extends WaterfallBlockEntity> implements B
             float flow = be.getEffectiveFlow(clientTime, i - 0.5f);
             if (heat <= 0.01f || flow <= 0.05f) continue;
             SteamAudioController.get().onSteamBurst(hitPos, heat * flow);
+
+            // Gate-managed puffs are rolled by KarmaGateController at the
+            // original 40 Hz using heaterTarget, then synchronized through the
+            // coil. Rolling here as well used the water-cooled current heat,
+            // suppressed later puffs, and made output depend on render timing.
+            if (coil.isGateManaged()) continue;
+
             if (!coil.beginClientSteamEmissionTick()) continue;
             for (int step = 0; step < 2; step++) {
                 if (squared(world.random.nextFloat()) >= flow * 2.0f
                         || squared(world.random.nextFloat()) >= heat * 2.0f) continue;
                 double centerX = hitPos.getX() + 0.5;
+                double centerY = hitPos.getY() + 0.5;
                 double centerZ = hitPos.getZ() + 0.5;
                 double px = centerX + (world.random.nextDouble() * 2.0 - 1.0) * 0.75;
-                double py = hitPos.getY() + 1.5 + (world.random.nextDouble() * 2.0 - 1.0) * 0.5;
+                double py = centerY + (world.random.nextDouble() * 2.0 - 1.0) * 0.5;
                 double pz = centerZ + (world.random.nextDouble() * 2.0 - 1.0) * 0.75;
                 world.addParticle(ModParticles.STEAM, px, py, pz,
                         centerX - px, Math.pow(heat, 0.75), centerZ - pz);
