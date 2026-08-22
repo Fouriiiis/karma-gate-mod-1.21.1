@@ -40,6 +40,8 @@ public final class HologramProjectorRenderer
     private static final float ANCHOR_Y_PIXELS = 112.0f;
     private static final float GLYPH_FROM_WALL_PIXELS = 3.4f;
     private static final float HOLOGRAM_THRESHOLD = 0.5f;
+    private static final float EMPTY_THRESHOLD_MARGIN = 0.001f;
+    private static final float GLYPH_ALPHA_SCALE = 0.9f;
     private static final int FULL_BRIGHT = LightmapTextureManager.MAX_LIGHT_COORDINATE;
     // GateHologram multiplies u_RAIN by 145.14 in a float shader. Wrapping the
     // clock preserves sub-tick precision in worlds with very large game times.
@@ -48,10 +50,16 @@ public final class HologramProjectorRenderer
     // The glyph is intentionally before steam and grab-texture distortion passes,
     // allowing all of the libMod effects to compose in scene order.
     private static final int GLYPH_PRIORITY = 925;
+    // LibMod's noise2.png is a mostly two-level diagonal dither: its cutoff
+    // mask barely changes between full power and GateKarmaGlyph's 0.82
+    // low-power fade, then pops away. noise_large is LibMod's continuous,
+    // high-frequency Rain World noise and reproduces the reference's
+    // progressively shrinking random cutout without bundling a local copy.
     private static final Identifier NOISE_TEXTURE =
-            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise2.png");
+            Identifier.of("librainworldmc", "textures/rainworld/palettes/noise_large.png");
     private static final Map<String, FAtlasElement> GLYPHS = new HashMap<>();
     private static AbstractTexture filteredNoiseTexture;
+    private static AbstractTexture filteredGlyphTexture;
 
     public HologramProjectorRenderer(BlockEntityRendererFactory.Context context) {
     }
@@ -62,10 +70,10 @@ public final class HologramProjectorRenderer
         if (glyph.getWorld() == null) return;
         FAtlasElement element = getGlyph(glyph.getSymbolKey());
         if (element == null || element.textureIdentifier == null) return;
-        ensureUnityNoiseFiltering();
+        ensureUnityFiltering(element.textureIdentifier);
 
         float fade = MathHelper.clamp(glyph.getInterpolatedFade(tickDelta), 0.0f, 1.0f);
-        if (fade <= 0.001f) return;
+        if (fade <= 0.0f) return;
         int color = glyph.getInterpolatedGlyphColor(tickDelta);
         Direction facing = glyph.getCachedState().get(HologramProjectorBlock.FACING);
         double anchorX = glyph.getPos().getX() + 0.5;
@@ -110,7 +118,9 @@ public final class HologramProjectorRenderer
         int red = (color >>> 16) & 0xFF;
         int green = (color >>> 8) & 0xFF;
         int blue = color & 0xFF;
-        int alpha = Math.round(fade * 0.9f * 255.0f);
+        int alpha = Math.round(fade * GLYPH_ALPHA_SCALE * 255.0f);
+        float shaderAlpha = alpha / 255.0f;
+        float threshold = cutoffThreshold(fade, shaderAlpha);
 
         BufferBuilder buffer = Tessellator.getInstance().begin(
                 VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR_TEXTURE_LIGHT);
@@ -138,7 +148,7 @@ public final class HologramProjectorRenderer
         try {
             if (Shaders.GATE_HOLOGRAM != null && Shaders.GATE_HOLOGRAM.getProgram() != null) {
                 CoreShaderRenderer.bindShader$GateHologram(
-                        HOLOGRAM_THRESHOLD, element.textureIdentifier, NOISE_TEXTURE, false);
+                        threshold, element.textureIdentifier, NOISE_TEXTURE, false);
                 ShaderRenderer.setUniformF(Shaders.GATE_HOLOGRAM.getProgram(),
                         "_Sampler0_ST", 1.0f, 1.0f, 0.0f, 0.0f);
                 ShaderRenderer.setUniformF(Shaders.GATE_HOLOGRAM.getProgram(), "u_RAIN", rain);
@@ -187,22 +197,50 @@ public final class HologramProjectorRenderer
     }
 
     /**
-     * Unity imports _NoiseTex2 with bilinear filtering. Minecraft resource
-     * textures default to nearest filtering without an mcmeta file; noise2 is
-     * strongly quantized, so nearest filtering turns the intended progressive
-     * cutoff into a few abrupt on/off bands.
+     * Unity imports _NoiseTex2 with bilinear filtering. Preserve that sampling
+     * on LibMod's Rain World texture so the cutoff changes progressively.
      */
-    private static void ensureUnityNoiseFiltering() {
-        AbstractTexture texture = MinecraftClient.getInstance()
+    private static void ensureUnityFiltering(Identifier glyphTextureId) {
+        AbstractTexture noiseTexture = MinecraftClient.getInstance()
                 .getTextureManager()
                 .getTexture(NOISE_TEXTURE);
-        if (texture == filteredNoiseTexture) return;
-        texture.setFilter(true, false);
-        filteredNoiseTexture = texture;
+        if (noiseTexture != filteredNoiseTexture) {
+            noiseTexture.setFilter(true, false);
+            filteredNoiseTexture = noiseTexture;
+        }
+
+        // The isolated renderer bilinearly samples atlas alpha after applying
+        // horizontal shimmer; nearest filtering makes its edges jump as UVs
+        // shift from one texel to the next.
+        AbstractTexture glyphTexture = MinecraftClient.getInstance()
+                .getTextureManager()
+                .getTexture(glyphTextureId);
+        if (glyphTexture != filteredGlyphTexture) {
+            glyphTexture.setFilter(true, false);
+            filteredGlyphTexture = glyphTexture;
+        }
     }
 
     private static float positive(float preferred, float fallback) {
         return preferred > 0.0f ? preferred : Math.max(fallback, 1.0f);
+    }
+
+    /**
+     * GateHologram keeps a fragment when
+     * {@code noise * 2 - vertexAlpha^2 <= threshold}. With the original fixed
+     * 0.5 threshold, alpha zero still retains every noise value up to 0.25;
+     * the renderer then stopped drawing and made that large remnant pop away.
+     *
+     * Keep the original cutoff at full fade, but make the surviving noise
+     * interval shrink linearly to an empty interval at zero fade. The small
+     * negative margin also removes texels whose noise value is exactly zero.
+     */
+    private static float cutoffThreshold(float fade, float shaderAlpha) {
+        float fullNoiseLimit = (HOLOGRAM_THRESHOLD
+                + GLYPH_ALPHA_SCALE * GLYPH_ALPHA_SCALE) * 0.5f;
+        return 2.0f * fullNoiseLimit * fade
+                - shaderAlpha * shaderAlpha
+                - EMPTY_THRESHOLD_MARGIN * (1.0f - fade);
     }
 
     @Override

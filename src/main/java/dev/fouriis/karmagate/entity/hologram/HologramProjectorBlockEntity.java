@@ -35,9 +35,8 @@ public class HologramProjectorBlockEntity extends BlockEntity {
     // 40 Hz, so the Minecraft ticker advances it twice per game tick.
     private float fade = 1.0f;
     private float previousFade = 1.0f;
-    // C# fields default to zero; the constructor initializes fade/lastFade,
-    // but deliberately leaves goalFade at its language default.
-    private float goalFade;
+    // RegionGateGlyph3D initializes all three fade values together.
+    private float goalFade = 1.0f;
     private float flicker;
     private float sinAdder;
     private float redSine;

@@ -26,6 +26,11 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Matrix4f;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
+
+import java.util.ArrayList;
+import java.util.Comparator;
 
 /**
  * Renders the animated interior and libMod GravityDisruptor sphere for the
@@ -38,13 +43,14 @@ public final class GravityDisruptorRenderer
     private static final float PANEL_LENGTH = 50.0f / PIXELS_PER_BLOCK;
     private static final float PANEL_CENTER_RADIUS = 52.5f / PIXELS_PER_BLOCK;
     private static final float PANEL_HALF_DEPTH = 2.5f / PIXELS_PER_BLOCK;
-    private static final float EFFECT_DEPTH_OFFSET = 5.0f;
+    private static final float EFFECT_DEPTH_OFFSET = 4.5f;
     private static final float INFLUENCE_RADIUS = 300.0f / PIXELS_PER_BLOCK;
     private static final float SPHERE_BOX_HALF_EXTENT =
             INFLUENCE_RADIUS / 1.7320508f;
 
     private static final int FULL_BRIGHT = LightmapTextureManager.MAX_LIGHT_COORDINATE;
     private static final int PANEL_PRIORITY = 940;
+    private static final int PARTICLE_PRIORITY = 945;
     private static final int DISTORTION_PRIORITY = 1006;
     private static final Identifier GRAB_TEXTURE =
             Identifier.of("librainworldmc", "grabtex");
@@ -59,7 +65,8 @@ public final class GravityDisruptorRenderer
         if (disruptor.getWorld() == null) return;
 
         Direction facing = disruptor.getCachedState().get(GravityDisruptorBlock.FACING);
-        Vec3d center = Vec3d.ofCenter(disruptor.getPos()).add(
+        Vec3d blockCenter = Vec3d.ofCenter(disruptor.getPos());
+        Vec3d panelCenter = blockCenter.add(
                 facing.getOffsetX() * EFFECT_DEPTH_OFFSET,
                 0.0,
                 facing.getOffsetZ() * EFFECT_DEPTH_OFFSET);
@@ -71,9 +78,16 @@ public final class GravityDisruptorRenderer
         // The panels are late world geometry so their unlit blue is included
         // in the grab texture distorted by this and subsequent libMod effects.
         RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall(
-                camera -> renderPanels(camera, center, facing, brightness), false), PANEL_PRIORITY);
+                camera -> renderPanels(camera, panelCenter, facing, brightness), false), PANEL_PRIORITY);
 
-        queueDistortion(center, disruptor.getWorld().getTime() + tickDelta);
+        Vec3d[] particleOffsets = new Vec3d[GravityDisruptorBlockEntity.PARTICLE_COUNT];
+        for (int i = 0; i < particleOffsets.length; i++) {
+            particleOffsets[i] = disruptor.getParticleOffset(i, tickDelta);
+        }
+        RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall(
+                camera -> renderParticles(camera, blockCenter, particleOffsets), false), PARTICLE_PRIORITY);
+
+        queueDistortion(blockCenter, disruptor.getWorld().getTime() + tickDelta);
     }
 
     private static void renderPanels(Camera camera, Vec3d center, Direction facing,
@@ -152,6 +166,69 @@ public final class GravityDisruptorRenderer
         }
     }
 
+    /** Draws the reference's 20 unscaled one-pixel white orbiting specks. */
+    private static void renderParticles(Camera camera, Vec3d center, Vec3d[] offsets) {
+        Vec3d cameraPos = camera.getPos();
+        Quaternionf cameraRotation = new Quaternionf(camera.getRotation());
+        Vector3f right = new Vector3f(1.0f, 0.0f, 0.0f).rotate(cameraRotation);
+        Vector3f up = new Vector3f(0.0f, 1.0f, 0.0f).rotate(cameraRotation);
+        Vector3f forward = new Vector3f(0.0f, 0.0f, -1.0f).rotate(cameraRotation);
+        ArrayList<VisibleSpeck> visible = new ArrayList<>(offsets.length);
+
+        for (Vec3d offset : offsets) {
+            Vec3d position = center.add(offset);
+            Vec3d fromCamera = position.subtract(cameraPos);
+            float depth = (float) (fromCamera.x * forward.x
+                    + fromCamera.y * forward.y + fromCamera.z * forward.z);
+            if (depth > 0.01f) visible.add(new VisibleSpeck(position, depth));
+        }
+        if (visible.isEmpty()) return;
+        visible.sort(Comparator.comparingDouble(VisibleSpeck::depth).reversed());
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        int framebufferHeight = Math.max(1, client.getFramebuffer().textureHeight);
+        float projectionScale = Math.abs(RenderSystem.getProjectionMatrix().m11());
+        if (projectionScale < 0.0001f) projectionScale = 1.0f;
+        Matrix4f view = RenderUtils.getCameraMatrix(camera);
+        BufferBuilder buffer = Tessellator.getInstance().begin(
+                VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+
+        for (VisibleSpeck speck : visible) {
+            // A half extent of depth/(height*projectionScale) projects to half
+            // a framebuffer pixel, preserving the source's unscaled 1x1 sprite.
+            float halfSize = Math.max(0.0001f,
+                    speck.depth / (framebufferHeight * projectionScale));
+            Vec3d relative = speck.position.subtract(cameraPos);
+            appendSpeckVertex(buffer, view, relative, right, up, -halfSize, -halfSize);
+            appendSpeckVertex(buffer, view, relative, right, up, halfSize, -halfSize);
+            appendSpeckVertex(buffer, view, relative, right, up, halfSize, halfSize);
+            appendSpeckVertex(buffer, view, relative, right, up, -halfSize, halfSize);
+        }
+
+        var built = buffer.endNullable();
+        if (built == null) return;
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthMask(false);
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.disableCull();
+        RenderSystem.setShader(GameRenderer::getPositionColorProgram);
+        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
+        BufferRenderer.drawWithGlobalProgram(built);
+        RenderSystem.depthMask(true);
+        RenderSystem.enableCull();
+        RenderSystem.disableBlend();
+    }
+
+    private static void appendSpeckVertex(BufferBuilder buffer, Matrix4f view, Vec3d center,
+                                          Vector3f right, Vector3f up,
+                                          float horizontal, float vertical) {
+        float x = (float) center.x + right.x * horizontal + up.x * vertical;
+        float y = (float) center.y + right.y * horizontal + up.y * vertical;
+        float z = (float) center.z + right.z * horizontal + up.z * vertical;
+        buffer.vertex(view, x, y, z).color(1.0f, 1.0f, 1.0f, 1.0f);
+    }
+
     private static void queueDistortion(Vec3d center, float sourceTime) {
         if (Shaders.GRAVITY_DISRUPTOR == null
                 || Shaders.GRAVITY_DISRUPTOR.getProgram() == null) return;
@@ -213,5 +290,8 @@ public final class GravityDisruptorRenderer
     @Override
     public int getRenderDistance() {
         return 256;
+    }
+
+    private record VisibleSpeck(Vec3d position, float depth) {
     }
 }
