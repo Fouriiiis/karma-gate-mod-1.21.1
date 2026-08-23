@@ -1,6 +1,6 @@
 package dev.fouriis.karmagate.entity.overseer;
 
-import dev.fouriis.karmagate.entity.client.MyceliumRenderUtil;
+import dev.fouriis.karmagate.entity.coralbrain.client.MyceliumRenderUtil;
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
 import net.minecraft.client.render.LightmapTextureManager;

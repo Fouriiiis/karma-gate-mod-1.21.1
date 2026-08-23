@@ -1,9 +1,9 @@
 package dev.fouriis.karmagate.network;
 
-import dev.fouriis.karmagate.CoralNeuronEntity;
+import dev.fouriis.karmagate.entity.coralbrain.CoralNeuronEntity;
 import dev.fouriis.karmagate.KarmaGateMod;
-import dev.fouriis.karmagate.coralneuron.CoralNeuronData;
-import dev.fouriis.karmagate.coralneuron.CoralNeuronManager;
+import dev.fouriis.karmagate.entity.coralbrain.CoralNeuronData;
+import dev.fouriis.karmagate.entity.coralbrain.CoralNeuronManager;
 import dev.fouriis.karmagate.entity.GraffitiEntity;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneData;
 import dev.fouriis.karmagate.gridproject.ProjectionZoneManager;

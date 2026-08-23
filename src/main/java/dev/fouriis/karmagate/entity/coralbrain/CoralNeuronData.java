@@ -1,4 +1,4 @@
-package dev.fouriis.karmagate.coralneuron;
+package dev.fouriis.karmagate.entity.coralbrain;
 
 import net.minecraft.util.math.Vec3d;
 

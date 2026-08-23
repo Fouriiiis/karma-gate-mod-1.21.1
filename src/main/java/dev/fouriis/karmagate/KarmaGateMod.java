@@ -16,6 +16,7 @@ import dev.fouriis.karmagate.entity.centipede.SmallCentipedeEntity;
 import dev.fouriis.karmagate.entity.centipede.SmallCentiwingEntity;
 import dev.fouriis.karmagate.entity.daddy.DaddyLongLegsEntity;
 import dev.fouriis.karmagate.entity.echo.EchoEntity;
+import dev.fouriis.karmagate.entity.coralbrain.CoralNeuronEntity;
 import dev.fouriis.karmagate.entity.garbworm.GarbageWormEntity;
 import dev.fouriis.karmagate.entity.oracle.FivePebblesEntity;
 import dev.fouriis.karmagate.entity.oracle.LooksToTheMoonEntity;

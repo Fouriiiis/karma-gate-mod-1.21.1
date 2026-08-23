@@ -14,6 +14,7 @@ import dev.fouriis.karmagate.entity.karmagate.SteamEmitterBlockEntity;
 import dev.fouriis.karmagate.entity.karmagate.BatteryMeterBlockEntity;
 import dev.fouriis.karmagate.entity.gravity.GravityDisruptorBlockEntity;
 import dev.fouriis.karmagate.entity.rot.RotBlockEntity;
+import dev.fouriis.karmagate.entity.coralbrain.WallMyceliaBlockEntity;
 import net.fabricmc.fabric.api.object.builder.v1.block.entity.FabricBlockEntityTypeBuilder;
 import net.minecraft.block.entity.BlockEntityType;
 import net.minecraft.registry.Registries;
@@ -72,6 +73,10 @@ public class ModBlockEntities {
     public static final BlockEntityType<RotBlockEntity> ROT_BLOCK_ENTITY =
         Registry.register(Registries.BLOCK_ENTITY_TYPE, Identifier.of(KarmaGateMod.MOD_ID, "rot_block_entity"),
             FabricBlockEntityTypeBuilder.create(RotBlockEntity::new, ModBlocks.ROT_BLOCK).build());
+
+    public static final BlockEntityType<WallMyceliaBlockEntity> WALL_MYCELIA_BLOCK_ENTITY =
+        Registry.register(Registries.BLOCK_ENTITY_TYPE, Identifier.of(KarmaGateMod.MOD_ID, "wall_mycelia_block_entity"),
+            FabricBlockEntityTypeBuilder.create(WallMyceliaBlockEntity::new, ModBlocks.WALL_MYCELIA).build());
 
     public static void registerBlockEntities() {
         KarmaGateMod.LOGGER.info("Registering Block Entities for " + KarmaGateMod.MOD_ID);

@@ -10,6 +10,7 @@ import dev.fouriis.karmagate.block.karmagate.GateLightBlock;
 import dev.fouriis.karmagate.block.karmagate.HeatCoilBlock;
 import dev.fouriis.karmagate.block.karmagate.BatteryMeterBlock;
 import dev.fouriis.karmagate.block.gravity.GravityDisruptorBlock;
+import dev.fouriis.karmagate.block.coralbrain.WallMyceliaBlock;
 import dev.fouriis.karmagate.block.shelterdoor.ShelterDoorBlock;
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
 import dev.fouriis.karmagate.item.KarmaGateItem;
@@ -117,6 +118,17 @@ public class ModBlocks {
             .sounds(BlockSoundGroup.SLIME)
             .dropsNothing()));
 
+    // CoralBrain.WallMycelia: invisible radius anchor whose strands grow from
+    // nearby exposed terrain and join the room-wide mycelium network.
+    public static final Block WALL_MYCELIA = registerBlock("wall_mycelia",
+        new WallMyceliaBlock(Block.Settings.create()
+            .mapColor(MapColor.CLEAR)
+            .noCollision()
+            .nonOpaque()
+            .strength(0.0f)
+            .sounds(BlockSoundGroup.WART_BLOCK)
+            .dropsNothing()));
+
     public static final Block FUEL_HOSE_SEGMENT = Registry.register(
             Registries.BLOCK,
             Identifier.of(KarmaGateMod.MOD_ID, "fuel_hose_segment"),
@@ -167,6 +179,7 @@ public class ModBlocks {
             entries.add(SHELTER_DOOR);
             entries.add(WORM_GRASS);
             entries.add(ROT_BLOCK);
+            entries.add(WALL_MYCELIA);
         });
     }
 }

@@ -1,4 +1,4 @@
-package dev.fouriis.karmagate.client.swarmer;
+package dev.fouriis.karmagate.entity.coralbrain.client;
 
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;

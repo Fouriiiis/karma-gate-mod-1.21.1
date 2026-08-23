@@ -1,6 +1,6 @@
 package dev.fouriis.karmagate.client.gridproject;
 
-import dev.fouriis.karmagate.client.swarmer.NeuronSwarmer;
+import dev.fouriis.karmagate.entity.coralbrain.client.NeuronSwarmer;
 import net.minecraft.util.math.random.Random;
 
 import java.util.*;

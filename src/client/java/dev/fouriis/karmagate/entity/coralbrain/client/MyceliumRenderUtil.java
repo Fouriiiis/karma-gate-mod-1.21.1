@@ -1,4 +1,4 @@
-package dev.fouriis.karmagate.entity.client;
+package dev.fouriis.karmagate.entity.coralbrain.client;
 
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.VertexConsumer;
@@ -18,6 +18,56 @@ import java.util.Random;
 public final class MyceliumRenderUtil {
 
     private MyceliumRenderUtil() {}
+
+    /**
+     * Direct 3D equivalent of {@code CoralBrain.Mycelium.DrawSprites} and
+     * {@code UpdateColor}: a constant half-pixel ribbon, owner color grading
+     * toward the dark teal neural color, with only the final vertices blue.
+     */
+    public static void renderRainWorldMycelium(VertexConsumer vc, Matrix4f matrix,
+                                                Vec3d[] points, Vec3d camera,
+                                                int rootR, int rootG, int rootB,
+                                                int alpha, int light) {
+        if (points == null || points.length < 2) return;
+        final float halfWidth = 0.5f / 20.0f;
+        final int neuralR = 26, neuralG = 77, neuralB = 72;
+        Vec3d previousSide = new Vec3d(1, 0, 0);
+
+        for (int i = 0; i < points.length - 1; i++) {
+            Vec3d a = points[i], b = points[i + 1];
+            if (a == null || b == null) continue;
+            Vec3d tangent = b.subtract(a);
+            if (tangent.lengthSquared() < 1.0e-10) continue;
+            tangent = tangent.normalize();
+            Vec3d view = camera.subtract(a.add(b).multiply(0.5));
+            if (view.lengthSquared() < 1.0e-10) view = new Vec3d(0, 0, 1);
+            else view = view.normalize();
+            Vec3d side = tangent.crossProduct(view);
+            if (side.lengthSquared() < 1.0e-10) side = previousSide;
+            else side = side.normalize();
+            if (side.dotProduct(previousSide) < 0) side = side.negate();
+            previousSide = side;
+
+            float u0 = i / (float) (points.length - 1);
+            float u1 = (i + 1) / (float) (points.length - 1);
+            int r0 = lerpi(rootR, neuralR, u0);
+            int g0 = lerpi(rootG, neuralG, u0);
+            int b0 = lerpi(rootB, neuralB, u0);
+            int r1 = lerpi(rootR, neuralR, u1);
+            int g1 = lerpi(rootG, neuralG, u1);
+            int b1 = lerpi(rootB, neuralB, u1);
+
+            float tipStart = Math.max(0.82f, 1.0f - 1.5f / (points.length - 1));
+            float tip0 = smoothstep(tipStart, 1.0f, u0);
+            float tip1 = smoothstep(tipStart, 1.0f, u1);
+            r0 = lerpi(r0, 0, tip0); g0 = lerpi(g0, 0, tip0); b0 = lerpi(b0, 255, tip0);
+            r1 = lerpi(r1, 0, tip1); g1 = lerpi(g1, 0, tip1); b1 = lerpi(b1, 255, tip1);
+
+            emitRibbonQuadDoubleSidedGradient(vc, matrix, a, b, side,
+                    halfWidth, halfWidth,
+                    r0, g0, b0, alpha, r1, g1, b1, alpha, light);
+        }
+    }
 
     /**
      * Render one strand as a smooth hair ribbon with RW-ish coloring:

@@ -1,6 +1,5 @@
-package dev.fouriis.karmagate.coralneuron;
+package dev.fouriis.karmagate.entity.coralbrain;
 
-import dev.fouriis.karmagate.CoralNeuronEntity;
 import dev.fouriis.karmagate.KarmaGateMod;
 import net.minecraft.entity.Entity;
 import net.minecraft.nbt.NbtCompound;

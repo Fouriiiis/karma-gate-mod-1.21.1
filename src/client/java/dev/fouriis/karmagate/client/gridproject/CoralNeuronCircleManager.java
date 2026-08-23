@@ -1,6 +1,6 @@
 package dev.fouriis.karmagate.client.gridproject;
 
-import dev.fouriis.karmagate.CoralNeuronEntity;
+import dev.fouriis.karmagate.entity.coralbrain.CoralNeuronEntity;
 import dev.fouriis.karmagate.KarmaGateMod;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.world.ClientWorld;

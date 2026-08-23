@@ -1,6 +1,9 @@
-package dev.fouriis.karmagate;
+package dev.fouriis.karmagate.entity.coralbrain;
 
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.world.World;
 
 import java.util.List;
 import java.util.Objects;
@@ -14,10 +17,6 @@ import java.util.Objects;
  * - per-tick: pos += vel; vel *= 0.999 :contentReference[oaicite:2]{index=2}
  * - base is pinned to owner.ConnectionPos(index, 1f); base vel zeroed :contentReference[oaicite:3]{index=3}
  * - optional tip-to-tip connections between different owners :contentReference[oaicite:4]{index=4}
- *
- * Notes vs RW:
- * - RW does wall avoidance + terrain proximity via a job (MyceliumJob01). This class does NOT.
- *   You can add collision/wall push later if you want.
  *
  * Rendering hook:
  * - call samplePoints(timeStacker) each frame; build your ribbon/segments from returned points.
@@ -95,8 +94,10 @@ public final class Mycelium {
         this.length = length;
 
         // RW: num = Max(length, Lerp(length, 40, 0.5)) ; points = Clamp((int)(num/15), 2, 20) :contentReference[oaicite:8]{index=8}
-        double num = Math.max(length, lerp(length, 40.0, 0.5));
-        int n = clampInt((int) Math.ceil(num / 8.0), 6, 20);
+        // C#: max(length, lerp(length, 40px, .5)) / 15px, with
+        // 20px == one block in this port.
+        double num = Math.max(length, lerp(length, 2.0, 0.5));
+        int n = clampInt((int) (num / 0.75), 2, 20);
 
         this.points = new Vec3d[n][3];
         this.conRad = length / (double) n; // :contentReference[oaicite:9]{index=9}
@@ -123,7 +124,7 @@ public final class Mycelium {
         int last = points.length - 1;
         for (int i = 0; i < points.length; i++) {
             double t = (last == 0) ? 0.0 : (double) i / (double) last;
-            Vec3d p = cubicBezier(resetPos, cA, tip, cB, t).add(randomUnit(seedSalt + i * 1013L).multiply(0.15));
+            Vec3d p = cubicBezier(resetPos, cA, tip, cB, t).add(randomUnit(seedSalt + i * 1013L).multiply(0.05));
             points[i][0] = p;      // pos
             points[i][1] = p;      // prev
             points[i][2] = randomUnit(seedSalt + i * 9176L).multiply(0.05); // vel (small)
@@ -138,7 +139,8 @@ public final class Mycelium {
      * @param tickSeed   per-tick seed for probabilistic behaviors (connections).
      * @param systemPool optional list of all mycelia in a "system" to enable connecting; may be null/empty.
      */
-    public void tick(Vec3d wind, double forceScale, long tickSeed, List<Mycelium> systemPool) {
+    public void tick(World world, Vec3d wind, double forceScale, long tickSeed,
+                     List<Mycelium> systemPool) {
         // Integrate: pos += vel; vel *= 0.999 :contentReference[oaicite:11]{index=11}
         for (int i = 0; i < points.length; i++) {
             Vec3d pos = points[i][0];
@@ -151,9 +153,8 @@ public final class Mycelium {
             // damping (RW: *0.999f)
             vel = vel.multiply(0.999);
 
-            // optional wind (caller decides magnitude, RW elsewhere adds wind to other structures)
-            if (wind != null) {
-                vel = vel.add(wind.multiply(0.0025 * forceScale));
+            if (world != null) {
+                vel = vel.add(terrainAvoidance(world, pos));
             }
 
             points[i][1] = prev;
@@ -161,22 +162,19 @@ public final class Mycelium {
             points[i][2] = vel;
         }
 
-        // Pin base to owner.ConnectionPos(index, 1f) and zero base vel :contentReference[oaicite:12]{index=12}
-        Vec3d base = owner.connectionPos(index, 1.0f);
-        points[0][0] = base;
-        points[0][2] = Vec3d.ZERO;
-
-        // Soft constraint passes similar to CoralNeuron.Connect (weighted by inverse lerp) :contentReference[oaicite:13]{index=13}
-        // (MyceliumJob01 likely does something similar + wall push. We do just distance keeping.)
-        for (int i = points.length - 1; i > 0; i--) {
-            connect(i, i - 1);
-        }
-        points[0][0] = base;
-        points[0][2] = Vec3d.ZERO;
-
+        // Mycelium.Phase1 is a single forward constraint pass. Its secondary
+        // i-to-i-2 impulse supplies the characteristic loose, curling motion.
         for (int i = 1; i < points.length; i++) {
             connect(i, i - 1);
+            if (i > 1) {
+                Vec3d bend = safeNormalize(points[i][0].subtract(points[i - 2][0]), Vec3d.ZERO)
+                        .multiply(0.2 / 20.0);
+                points[i][2] = points[i][2].add(bend);
+                points[i - 2][2] = points[i - 2][2].subtract(bend);
+            }
         }
+
+        Vec3d base = owner.connectionPos(index, 1.0f);
         points[0][0] = base;
         points[0][2] = Vec3d.ZERO;
 
@@ -202,11 +200,11 @@ public final class Mycelium {
             Vec3d tipA = this.tipPos();
             Vec3d tipB = other.tipPos();
 
-            if (distLess(tipA, tipB, 10.0)) { // :contentReference[oaicite:18]{index=18}
+            if (distLess(tipA, tipB, 10.0 / 20.0)) { // ten Rain World pixels
                 Vec3d dir = safeNormalize(tipB.subtract(tipA), new Vec3d(1, 0, 0));
                 double d = tipA.distanceTo(tipB);
 
-                Vec3d move = dir.multiply((d - 1.0) * 0.5);
+                Vec3d move = dir.multiply((d - 1.0 / 20.0) * 0.5);
 
                 int lastA = points.length - 1;
                 int lastB = other.points.length - 1;
@@ -218,11 +216,13 @@ public final class Mycelium {
                 other.points[lastB][0] = other.points[lastB][0].subtract(move);
                 other.points[lastB][2] = other.points[lastB][2].subtract(move);
 
-                // RW sometimes spawns NeuronSpark here; you can do particles in caller if you want. :contentReference[oaicite:20]{index=20}
+                // NeuronSpark contact sampling is centralized in
+                // CoralBrainSystem so visually touching 3D tips cannot miss it
+                // while their client-side connection state catches up.
             } else {
                 // tip vel lerp toward clamp(otherTip - tip, 5) at 0.5 :contentReference[oaicite:21]{index=21}
                 int last = points.length - 1;
-                Vec3d target = clampMagnitude(tipB.subtract(tipA), 5.0);
+                Vec3d target = clampMagnitude(tipB.subtract(tipA), 5.0 / 20.0);
                 points[last][2] = lerp(points[last][2], target, 0.5);
             }
         } else if (systemPool != null && rest < 1 && !systemPool.isEmpty()) {
@@ -249,6 +249,60 @@ public final class Mycelium {
     public void addImpulseNearBase(Vec3d impulse) {
         if (points.length > 1) points[1][2] = points[1][2].add(impulse);
         if (points.length > 2) points[2][2] = points[2][2].add(impulse.multiply(0.5));
+    }
+
+    public void addPointImpulse(int pointIndex, Vec3d impulse) {
+        if (pointIndex <= 0 || pointIndex >= points.length || impulse == null) return;
+        points[pointIndex][2] = points[pointIndex][2].add(impulse);
+    }
+
+    /** Used by SS swarmers while physically attached to the strand tip. */
+    public void pullTip(Vec3d movement) {
+        int last = points.length - 1;
+        points[last][0] = points[last][0].add(movement);
+        points[last][2] = points[last][2].add(movement);
+    }
+
+    /** Break both halves when an owner unloads or rebuilds its strand field. */
+    public void disconnect() {
+        Connection old = connection;
+        connection = null;
+        rest = Math.max(rest, 20);
+        if (old != null) {
+            Mycelium other = old.other(this);
+            if (other != null && other.connection == old) {
+                other.connection = null;
+                other.rest = Math.max(other.rest, 20);
+            }
+        }
+    }
+
+    private Vec3d terrainAvoidance(World world, Vec3d point) {
+        BlockPos origin = BlockPos.ofFloored(point);
+        Vec3d push = Vec3d.ZERO;
+
+        if (!world.getBlockState(origin).getCollisionShape(world, origin).isEmpty()) {
+            for (Direction direction : Direction.values()) {
+                BlockPos candidate = origin.offset(direction);
+                if (world.getBlockState(candidate).getCollisionShape(world, candidate).isEmpty()) {
+                    push = push.add(Vec3d.of(direction.getVector()).multiply(0.12));
+                }
+            }
+        }
+
+        // C# uses terrain proximity < 4. Axis probes reproduce that broad,
+        // smooth repulsion in 3D without a full AI-map distance field.
+        for (Direction direction : Direction.values()) {
+            Vec3d axis = Vec3d.of(direction.getVector());
+            for (int distance = 1; distance <= 3; distance++) {
+                BlockPos sample = origin.offset(direction, distance);
+                if (!world.getBlockState(sample).getCollisionShape(world, sample).isEmpty()) {
+                    push = push.subtract(axis.multiply((4 - distance) * 0.004));
+                    break;
+                }
+            }
+        }
+        return clampMagnitude(push, 0.16);
     }
 
     /**
@@ -281,10 +335,7 @@ public final class Mycelium {
 
         Vec3d dir = delta.multiply(1.0 / dist);
 
-        // RW uses num2 = InverseLerp(0, conRad, dist) :contentReference[oaicite:27]{index=27}
-        double w = inverseLerpClamped(0.0, conRad, dist);
-
-        Vec3d move = dir.multiply((conRad - dist) * 0.5 * w);
+        Vec3d move = dir.multiply((conRad - dist) * 0.5);
 
         // RW adjusts both pos and vel for BOTH points :contentReference[oaicite:28]{index=28}
         points[a][0] = points[a][0].add(move);
@@ -321,14 +372,6 @@ public final class Mycelium {
 
     private static double lerp(double a, double b, double t) {
         return a + (b - a) * t;
-    }
-
-    private static double inverseLerpClamped(double a, double b, double v) {
-        if (a == b) return 0.0;
-        double t = (v - a) / (b - a);
-        if (t < 0.0) return 0.0;
-        if (t > 1.0) return 1.0;
-        return t;
     }
 
     private static int clampInt(int v, int lo, int hi) {

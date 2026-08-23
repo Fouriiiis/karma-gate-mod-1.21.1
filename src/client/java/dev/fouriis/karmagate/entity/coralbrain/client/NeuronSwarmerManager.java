@@ -1,4 +1,4 @@
-package dev.fouriis.karmagate.client.swarmer;
+package dev.fouriis.karmagate.entity.coralbrain.client;
 
 import dev.fouriis.karmagate.KarmaGateMod;
 import dev.fouriis.karmagate.client.gridproject.ProjectedCirclePatternManager;
@@ -98,8 +98,29 @@ public class NeuronSwarmerManager {
                 Vec3d zoneMax = new Vec3d(zone.getMaxX() + 1, zone.getMaxY() + 1, zone.getMaxZ() + 1);
                 
                 ClientWorld world = client.world;
-                for (NeuronSwarmer swarmer : swarmers) {
-                    swarmer.tick(swarmers, zoneMin, zoneMax, world);
+                Vec3d[] previousPositions = new Vec3d[swarmers.size()];
+                Vec3d[] previousDirections = new Vec3d[swarmers.size()];
+                Vec3d[] previousLazyDirections = new Vec3d[swarmers.size()];
+                float[] previousRotations = new float[swarmers.size()];
+                for (int i = 0; i < swarmers.size(); i++) {
+                    NeuronSwarmer swarmer = swarmers.get(i);
+                    previousPositions[i] = swarmer.position;
+                    previousDirections[i] = swarmer.direction;
+                    previousLazyDirections[i] = swarmer.lazyDirection;
+                    previousRotations[i] = swarmer.rotation;
+                }
+                // Rain World runs the CoralBrain room at 40 updates/s.
+                for (int substep = 0; substep < 2; substep++) {
+                    for (NeuronSwarmer swarmer : swarmers) {
+                        swarmer.tick(swarmers, zoneMin, zoneMax, world);
+                    }
+                }
+                for (int i = 0; i < swarmers.size(); i++) {
+                    NeuronSwarmer swarmer = swarmers.get(i);
+                    swarmer.lastPosition = previousPositions[i];
+                    swarmer.lastDirection = previousDirections[i];
+                    swarmer.lastLazyDirection = previousLazyDirections[i];
+                    swarmer.lastRotation = previousRotations[i];
                 }
                 
                 // Remove any marked for removal (shouldn't happen normally, but safety check)

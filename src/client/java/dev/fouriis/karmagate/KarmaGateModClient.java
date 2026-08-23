@@ -8,8 +8,9 @@ import dev.fouriis.karmagate.client.gridproject.StarMatrixPatternManager;
 import dev.fouriis.karmagate.client.network.ClientNetworking;
 import dev.fouriis.karmagate.client.rot.RotRenderCache;
 import dev.fouriis.karmagate.client.rot.RotWorldRenderer;
-import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerManager;
-import dev.fouriis.karmagate.client.swarmer.NeuronSwarmerRenderer;
+import dev.fouriis.karmagate.entity.coralbrain.client.NeuronSwarmerManager;
+import dev.fouriis.karmagate.entity.coralbrain.client.NeuronSwarmerRenderer;
+import dev.fouriis.karmagate.entity.coralbrain.client.NeuronSparkRenderer;
 import dev.fouriis.karmagate.client.wormgrass.WormGrassRenderCache;
 import dev.fouriis.karmagate.client.wormgrass.WormGrassWorldRenderer;
 import dev.fouriis.karmagate.client.cubefold.CubeFoldEffect;
@@ -24,7 +25,9 @@ import dev.fouriis.karmagate.entity.centipede.CentipedeHeadRenderer;
 import dev.fouriis.karmagate.entity.centipede.RedCentipedeRenderer;
 import dev.fouriis.karmagate.entity.centipede.SmallCentipedeRenderer;
 import dev.fouriis.karmagate.entity.centipede.SmallCentiwingRenderer;
-import dev.fouriis.karmagate.entity.client.CoralNeuronEntityRenderer;
+import dev.fouriis.karmagate.entity.coralbrain.client.CoralNeuronEntityRenderer;
+import dev.fouriis.karmagate.entity.coralbrain.client.WallMyceliaBlockEntityRenderer;
+import dev.fouriis.karmagate.entity.coralbrain.CoralBrainSystem;
 import dev.fouriis.karmagate.entity.client.BatteryMeterRenderer;
 import dev.fouriis.karmagate.entity.client.GateLightBlockRenderer;
 import dev.fouriis.karmagate.entity.client.GateLightItemModel;
@@ -121,11 +124,13 @@ public class KarmaGateModClient implements ClientModInitializer {
 		BlockEntityRendererFactories.register(ModBlockEntities.WATER_STREAM_BLOCK_ENTITY, WaterfallBlockRenderer::new);
 		BlockEntityRendererFactories.register(ModBlockEntities.GRAVITY_DISRUPTOR_BLOCK_ENTITY, GravityDisruptorRenderer::new);
 		BlockEntityRendererFactories.register(ModBlockEntities.BATTERY_METER_BLOCK_ENTITY, BatteryMeterRenderer::new);
+		BlockEntityRendererFactories.register(ModBlockEntities.WALL_MYCELIA_BLOCK_ENTITY, WallMyceliaBlockEntityRenderer::new);
 
 		ParticleFactoryRegistry.getInstance().register(ModParticles.STEAM, new SteamParticle.Factory());
 
 		// Register neuron swarmer renderer
 		NeuronSwarmerRenderer.register();
+		NeuronSparkRenderer.register();
 		EntityRendererRegistry.INSTANCE.register(KarmaGateMod.VINE_ENTITY_TYPE, CoralNeuronEntityRenderer::new);
 
 		// Register graffiti entity renderer
@@ -345,6 +350,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			screwLoops.clear();
 			RotRenderCache.clearAll();
 			RotWorldRenderer.clearCache();
+			CoralBrainSystem.clearAll();
 			CubeFoldEffect.clearForWorldTransition();
 			FuelHoseClientState.clear();
 			AtcCowboyEasterEggRenderer.stop();
@@ -376,6 +382,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 			screwLoops.clear();
 			RotRenderCache.clearAll();
 			RotWorldRenderer.clearCache();
+			CoralBrainSystem.clearAll();
 			CubeFoldEffect.clearForWorldTransition();
 			AtcCowboyEasterEggRenderer.stop();
 		});

@@ -1,4 +1,4 @@
-package dev.fouriis.karmagate;
+package dev.fouriis.karmagate.entity.coralbrain;
 
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
@@ -15,7 +15,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.WeakHashMap;
 
 /**
  * Rain World-ish "CoralNeuron" chain simulation + RW-style Mycelium strands anchored to stem joints.
@@ -78,9 +77,6 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
     private Vec3d[] posPrev;
     private Vec3d[] vel;
 
-    // Slowly wandering "system wind"
-    private Vec3d wind = Vec3d.ZERO;
-
     private boolean initialized = false;
 
     // ------------------------------------------------------------
@@ -88,13 +84,6 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
     // ------------------------------------------------------------
     private final ArrayList<Mycelium> mycelia = new ArrayList<>();
     private boolean myceliaInitialized = false;
-
-    // Optional shared pool so the RW tip-to-tip connection logic can work across owners
-    private static final WeakHashMap<World, ArrayList<Mycelium>> WORLD_POOL = new WeakHashMap<>();
-    private ArrayList<Mycelium> poolForWorld() {
-        //noinspection resource
-        return WORLD_POOL.computeIfAbsent(getWorld(), w -> new ArrayList<>());
-    }
 
     /**
      * REQUIRED by Fabric's EntityType factory registration (EntityType, World).
@@ -176,13 +165,10 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
 
         double length = worldA.distanceTo(worldB);
 
-        // Segments: roughly 1 segment per 1.5 blocks for good visual density
-        // Minimum 2 segments, maximum 200 segments
-        int segs = (int) MathHelper.clamp((float) (length / 1.5), 2.0f, 200.0f);
+        int segs = segmentsForLength(length);
         allocateArraysForSegments(segs);
 
-        // rest length per segment so the chain naturally spans between the anchors
-        this.restLen = (segs <= 0) ? 1.0 : (length / (double) segs);
+        this.restLen = length / pointCount;
 
         // Reset init flags so it rebuilds cleanly
         this.initialized = false;
@@ -199,13 +185,13 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
         this.localAnchorB = worldAnchorB.subtract(mid);
 
         double length = worldAnchorA.distanceTo(worldAnchorB);
-        int segs = (int) MathHelper.clamp((float) (length / 1.5), 2.0f, 200.0f);
+        int segs = segmentsForLength(length);
 
         if (pos == null || segmentCount != segs) {
             allocateArraysForSegments(segs);
         }
 
-        this.restLen = (segs <= 0) ? 1.0 : (length / (double) segs);
+        this.restLen = length / pointCount;
 
         // Force re-init of point state after load
         this.initialized = false;
@@ -256,13 +242,13 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
             this.localAnchorB = trackedB.subtract(mid);
 
             double length = trackedA.distanceTo(trackedB);
-            int segs = (int) MathHelper.clamp((float) (length / 1.5), 2.0f, 200.0f);
+            int segs = segmentsForLength(length);
 
             if (pos == null || segmentCount != segs) {
                 allocateArraysForSegments(segs);
             }
 
-            this.restLen = (segs <= 0) ? 1.0 : (length / (double) segs);
+            this.restLen = length / pointCount;
 
             // Force re-init
             this.initialized = false;
@@ -277,6 +263,18 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
         this.pos = new Vec3d[this.pointCount];
         this.posPrev = new Vec3d[this.pointCount];
         this.vel = new Vec3d[this.pointCount];
+
+        // Entity renderers (notably Iris's shadow renderer) may visit a newly
+        // tracked entity before its first client tick. Always leave a complete
+        // straight-line pose behind when reallocating; initPointsBetweenAnchors
+        // replaces it with the randomized C# pose on the next simulation tick.
+        for (int i = 0; i < this.pointCount; i++) {
+            double along = this.pointCount <= 1 ? 0.0 : i / (double) (this.pointCount - 1);
+            Vec3d initial = lerp(this.localAnchorA, this.localAnchorB, along);
+            this.pos[i] = initial;
+            this.posPrev[i] = initial;
+            this.vel[i] = Vec3d.ZERO;
+        }
     }
 
     @Override
@@ -317,19 +315,21 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
         final double conRad = restLen * 1.5;
         final double velDamping = 0.999; // Match C# damping
 
-        updateWind(1.0);
+        Vec3d systemWind = CoralBrainSystem.wind(getWorld());
 
-        // 1) Tension exchange: (i-2) <-> i (matches C# exactly)
+        // Rain World advances this simulation at 40 Hz. Run two physics
+        // substeps while retaining the previous Minecraft-tick pose for render interpolation.
+        for (int simulationStep = 0; simulationStep < 2; simulationStep++) {
+        // 1) Tension exchange: (i-2) <-> i (0.15 Rain World pixels)
         for (int i = 2; i < pointCount; i++) {
             Vec3d dir = dirVec(pos[i - 2], pos[i]);
-            Vec3d push = dir.multiply(0.15);
+            Vec3d push = dir.multiply(0.15 / 20.0);
             vel[i - 2] = vel[i - 2].subtract(push);
             vel[i] = vel[i].add(push);
         }
 
         // 2) Integrate positions with velocities + wind + terrain avoidance + endpoint influence
-        final double clampDist = 4.0;
-        final double denomPinned = 42.0;
+        final double clampDist = 40.0 / 20.0;
         final double denomTether = 420.0; // Match C# /420f
 
         // Get entity world position for local->world conversion
@@ -341,7 +341,7 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
 
             // If the end is wall-anchored, skip physics and hard set it (ConnectToWalls-style)
             if ((isAEnd && anchorAPinned) || (isBEnd && anchorBPinned)) {
-                posPrev[i] = pos[i];
+                if (simulationStep == 0) posPrev[i] = pos[i];
                 pos[i] = isAEnd ? localAnchorA : localAnchorB;
                 vel[i] = Vec3d.ZERO;
                 continue;
@@ -349,7 +349,7 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
 
             double t = (pointCount <= 1) ? 0.0 : (double) i / (double) (pointCount - 1);
 
-            posPrev[i] = pos[i];
+            if (simulationStep == 0) posPrev[i] = pos[i];
             pos[i] = pos[i].add(vel[i]);
 
             vel[i] = vel[i].multiply(velDamping);
@@ -363,25 +363,29 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
             vel[i] = vel[i].add(terrainPush);
 
             // Wind influence
-            vel[i] = vel[i].add(wind.multiply(0.005));
+            vel[i] = vel[i].add(systemWind.multiply(0.005));
 
             // Endpoint influence bands (matches C# behavior)
             if (t < 0.5) {
                 double w = inverseLerpClamped(0.25, 0.0, t);
-                double denom = anchorAPinned ? denomPinned : denomTether;
-
-                Vec3d pull = clampMagnitude(localAnchorA.subtract(pos[i]), clampDist)
-                        .multiply(w / denom);
-
-                vel[i] = vel[i].add(pull);
+                if (anchorAPinned) {
+                    Vec3d rootDirection = dirVec(localAnchorA, pos[Math.min(1, pointCount - 1)]);
+                    vel[i] = vel[i].add(rootDirection.multiply(w * 0.5 / 20.0));
+                } else {
+                    Vec3d pull = clampMagnitude(localAnchorA.subtract(pos[i]), clampDist)
+                            .multiply(w / denomTether);
+                    vel[i] = vel[i].add(pull);
+                }
             } else {
                 double w = inverseLerpClamped(0.75, 1.0, t);
-                double denom = anchorBPinned ? denomPinned : denomTether;
-
-                Vec3d pull = clampMagnitude(localAnchorB.subtract(pos[i]), clampDist)
-                        .multiply(w / denom);
-
-                vel[i] = vel[i].add(pull);
+                if (anchorBPinned) {
+                    Vec3d rootDirection = dirVec(localAnchorB, pos[Math.max(0, pointCount - 2)]);
+                    vel[i] = vel[i].add(rootDirection.multiply(w * 0.5 / 20.0));
+                } else {
+                    Vec3d pull = clampMagnitude(localAnchorB.subtract(pos[i]), clampDist)
+                            .multiply(w / denomTether);
+                    vel[i] = vel[i].add(pull);
+                }
             }
         }
 
@@ -393,6 +397,7 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
         for (int i = 1; i < pointCount; i++) connect(i, i - 1, conRad);
 
         pinAnchorsIfPinned();
+        }
 
         // ------------------------------------------------------------------
         // Mycelia: init + tick (anchored to joints)
@@ -404,19 +409,21 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
 
         if (!mycelia.isEmpty()) {
             long tickSeed = (((long) this.getId()) << 32) ^ this.getWorld().getTime();
-            List<Mycelium> systemPool = poolForWorld();
+            List<Mycelium> systemPool = CoralBrainSystem.mycelia(getWorld());
 
             double forceScale = 1.0;
             for (int k = 0; k < mycelia.size(); k++) {
                 Mycelium m = mycelia.get(k);
                 if (m == null) continue;
 
-                m.tick(wind, forceScale, tickSeed + k * 1013L, systemPool);
-
-                // keep them flared out for visibility while debugging
-                if ((this.age & 7) == 0) { // every 8 ticks
-                    m.addImpulseNearBase(resetDir(m.index).multiply(0.20));
-                }
+                // Rain World advances at 40 updates/s. Two half-scale substeps
+                // retain its strand response at Minecraft's 20 ticks/s.
+                m.tick(getWorld(), systemWind, forceScale,
+                        tickSeed + k * 1013L, systemPool);
+                m.addImpulseNearBase(resetDir(m.index).multiply(0.05));
+                m.tick(getWorld(), systemWind, forceScale,
+                        tickSeed + k * 1013L + 0x51L, systemPool);
+                m.addImpulseNearBase(resetDir(m.index).multiply(0.05));
             }
         }
     }
@@ -437,14 +444,20 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
                 double rx = hash01(salt ^ (i * 12345L)) * 2.0 - 1.0;
                 double ry = hash01(salt ^ (i * 67890L)) * 2.0 - 1.0;
                 double rz = hash01(salt ^ (i * 13579L)) * 2.0 - 1.0;
-                double rMag = hash01(salt ^ (i * 24680L)) * 0.5; // Small random magnitude
+                double rMag = hash01(salt ^ (i * 24680L)) / 20.0;
                 Vec3d randomOffset = new Vec3d(rx, ry, rz).normalize().multiply(rMag);
                 p0 = p0.add(randomOffset);
             }
             
             pos[i] = p0;
             posPrev[i] = p0;
-            vel[i] = Vec3d.ZERO;
+            Vec3d initialVelocity = new Vec3d(
+                    hash01(salt ^ 0x165667B19E3779F9L ^ (i * 0x9E3779B1L)) * 2.0 - 1.0,
+                    hash01(salt ^ 0x27D4EB2F165667C5L ^ (i * 0x85EBCA77L)) * 2.0 - 1.0,
+                    hash01(salt ^ 0x85EBCA77C2B2AE63L ^ (i * 0x27D4EB2FL)) * 2.0 - 1.0);
+            vel[i] = initialVelocity.lengthSquared() < 1.0e-10
+                    ? Vec3d.ZERO
+                    : initialVelocity.normalize().multiply(hash01(salt ^ (i * 0xC2B2AE3DL)) / 20.0);
         }
         pinAnchorsIfPinned();
     }
@@ -460,22 +473,6 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
             posPrev[pointCount - 1] = localAnchorB;
             vel[pointCount - 1] = Vec3d.ZERO;
         }
-    }
-
-    private void updateWind(double forceScale) {
-        // Match C#: wind += Custom.RNV() * 0.2f * Random.value;
-        long wt = this.getWorld().getTime();
-        double r1 = hash01(this.getId() * 31L + wt * 131L);
-        double r2 = hash01(this.getId() * 17L + wt * 197L);
-        double r3 = hash01(this.getId() * 73L + wt * 89L);
-
-        Vec3d rnd = new Vec3d(r1 * 2 - 1, r2 * 2 - 1, r3 * 2 - 1);
-        if (rnd.lengthSquared() > 1e-9) rnd = rnd.normalize();
-
-        double mag = 0.2 * hash01(this.getId() * 999L + wt * 37L);
-
-        wind = wind.add(rnd.multiply(mag));
-        wind = clampMagnitude(wind, 1.0);
     }
 
     /**
@@ -527,7 +524,7 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
         
         // C# uses: Custom.LerpMap(proximity, 0f, 3f, 2f, 0.2f)
         // meaning: at proximity 0 (inside solid) push = 2, at proximity 3+ push = 0.2
-        double pushStrength = lerpMap(proximity, 0.0, 3.0, 1.5, 0.1);
+        double pushStrength = lerpMap(proximity, 0.0, 3.0, 2.0 / 20.0, 0.2 / 20.0);
         
         return pushDir.multiply(pushStrength);
     }
@@ -610,6 +607,10 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
         return toA + (toB - toA) * t;
     }
 
+    private static double lerp(double a, double b, double t) {
+        return a + (b - a) * t;
+    }
+
     private void connect(int A, int B, double conRad) {
         Vec3d delta = pos[A].subtract(pos[B]);
         double dist = delta.length();
@@ -620,26 +621,10 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
 
         Vec3d move = dir.multiply((conRad - dist) * 0.5 * w);
 
-        boolean aPinned = (A == 0 && anchorAPinned) || (A == pointCount - 1 && anchorBPinned);
-        boolean bPinned = (B == 0 && anchorAPinned) || (B == pointCount - 1 && anchorBPinned);
-
-        if (aPinned && bPinned) return;
-
-        if (aPinned) {
-            Vec3d m2 = move.multiply(2.0);
-            pos[B] = pos[B].subtract(m2);
-            vel[B] = vel[B].subtract(m2);
-        } else if (bPinned) {
-            Vec3d m2 = move.multiply(2.0);
-            pos[A] = pos[A].add(m2);
-            vel[A] = vel[A].add(m2);
-        } else {
-            pos[A] = pos[A].add(move);
-            vel[A] = vel[A].add(move);
-
-            pos[B] = pos[B].subtract(move);
-            vel[B] = vel[B].subtract(move);
-        }
+        pos[A] = pos[A].add(move);
+        vel[A] = vel[A].add(move);
+        pos[B] = pos[B].subtract(move);
+        vel[B] = vel[B].subtract(move);
     }
 
     // ============================================================
@@ -647,13 +632,23 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
     // ============================================================
 
     private int segmentOfMycelium(int mycIndex) {
-        return (mycIndex / 2) + 1; // 1..pointCount-2
+        int row = mycIndex / 2;
+        int rows = Math.min(Math.max(pointCount - 2, 0), 20);
+        if (pointCount - 2 <= rows) return row + 1;
+        if (anchorAPinned && anchorBPinned) return pointCount / 2 - rows / 2 + row;
+        if (anchorAPinned) return pointCount - 1 - rows + row;
+        if (anchorBPinned) return row + 1;
+        return row < rows / 2 ? row + 1 : pointCount - 1 - rows + row;
+    }
+
+    public float myceliumRootAlong(int myceliumIndex) {
+        return (float) segmentOfMycelium(myceliumIndex) / Math.max(1, pointCount - 1);
     }
 
     @Override
     public Vec3d connectionPos(int index, float timeStacker) {
         int seg = clampInt(segmentOfMycelium(index), 1, pointCount - 2);
-        return lerp(posPrev[seg], pos[seg], timeStacker);
+        return getPos().add(lerp(posPrev[seg], pos[seg], timeStacker));
     }
 
     @Override
@@ -663,7 +658,8 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
         Vec3d f = dirVec(pos[seg], pos[seg + 1]);
         if (f.lengthSquared() < 1e-12) f = new Vec3d(0, 1, 0);
 
-        Vec3d perp = new Vec3d(-f.y, f.x, 0.0);
+        Vec3d reference = Math.abs(f.y) < 0.9 ? new Vec3d(0, 1, 0) : new Vec3d(1, 0, 0);
+        Vec3d perp = f.crossProduct(reference);
         double ls = perp.lengthSquared();
         if (ls < 1e-12) perp = new Vec3d(1, 0, 0);
         else perp = perp.multiply(1.0 / Math.sqrt(ls));
@@ -677,8 +673,8 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
     }
 
     private void initMycelia_OBVIOUS() {
+        CoralBrainSystem.unregisterOwner(getWorld(), this);
         mycelia.clear();
-        ArrayList<Mycelium> pool = poolForWorld();
 
         final int myceliaRows = Math.min(Math.max(pointCount - 2, 0), 20);
         final int myceliaCount = myceliaRows * 2;
@@ -691,26 +687,38 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
                 if (idx >= myceliaCount) break;
 
                 int seg = clampInt(segmentOfMycelium(idx), 1, pointCount - 2);
-                Vec3d init = pos[seg];
+                Vec3d init = getPos().add(pos[seg]);
 
-                double length = 10.0 + 6.0 * hash01(baseSalt ^ (idx * 9176L)); // 10..16 blocks
+                double randomLength = lerp(1.5, 15.0, hash01(baseSalt ^ (idx * 9176L)));
+                double contourLength = lerp(1.5, 15.0, myceliaLengthContour(row, myceliaRows));
+                double length = Math.min(randomLength, contourLength);
 
                 Mycelium strand = new Mycelium(this, idx, length, init, baseSalt ^ (idx * 1337L));
                 mycelia.add(strand);
-                pool.add(strand);
+                CoralBrainSystem.register(getWorld(), strand);
 
-                strand.addImpulseNearBase(resetDir(idx).multiply(1.25));
+                strand.addImpulseNearBase(resetDir(idx).multiply(0.05));
             }
         }
     }
 
     @Override
     public void remove(RemovalReason reason) {
-        if (!mycelia.isEmpty()) {
-            poolForWorld().removeAll(mycelia);
-            mycelia.clear();
-        }
+        CoralBrainSystem.unregisterOwner(getWorld(), this);
+        mycelia.clear();
         super.remove(reason);
+    }
+
+    private double myceliaLengthContour(int row, int rows) {
+        if (rows <= 1) return 1.0;
+        if (anchorAPinned && anchorBPinned) {
+            return Math.min(inverseLerpClamped(0, 4, row),
+                    inverseLerpClamped(rows - 1, rows - 5, row));
+        }
+        if (anchorAPinned) return inverseLerpClamped(0, rows / 2.0, row);
+        if (anchorBPinned) return inverseLerpClamped(rows - 1, rows / 2.0, row);
+        return Math.max(inverseLerpClamped(10, 0, row),
+                inverseLerpClamped(rows - 11, rows - 1, row));
     }
 
     // ============================================================
@@ -748,6 +756,12 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
         return Math.max(lo, Math.min(hi, v));
     }
 
+    /** C#: segments.Length = Clamp((int)(lengthPixels / 20), 1, 200). */
+    private static int segmentsForLength(double lengthBlocks) {
+        int points = clampInt((int) lengthBlocks, 2, 200);
+        return points - 1;
+    }
+
     private static double hash01(long x) {
         x ^= (x >>> 33);
         x *= 0xff51afd7ed558ccdL;
@@ -758,7 +772,32 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
     }
 
     public Vec3d[] getPointsLocalCopy() {
-        return Arrays.copyOf(pos, pos.length);
+        Vec3d[] sampled = Arrays.copyOf(pos, pos.length);
+        for (int i = 0; i < sampled.length; i++) {
+            if (sampled[i] == null) sampled[i] = fallbackPointLocal(i);
+        }
+        return sampled;
+    }
+
+    public Vec3d[] getInterpolatedPointsLocal(float tickDelta) {
+        Vec3d[] sampled = new Vec3d[pos.length];
+        double t = MathHelper.clamp(tickDelta, 0f, 1f);
+        for (int i = 0; i < pos.length; i++) {
+            Vec3d current = pos[i] != null ? pos[i] : fallbackPointLocal(i);
+            Vec3d previous = posPrev[i] != null ? posPrev[i] : current;
+            sampled[i] = lerp(previous, current, t);
+        }
+        return sampled;
+    }
+
+    private Vec3d fallbackPointLocal(int index) {
+        double along = pointCount <= 1 ? 0.0
+                : MathHelper.clamp(index / (double) (pointCount - 1), 0.0, 1.0);
+        return lerp(localAnchorA, localAnchorB, along);
+    }
+
+    public int getSegmentPointCount() {
+        return pointCount;
     }
 
     /**
@@ -817,9 +856,9 @@ public class CoralNeuronEntity extends Entity implements Mycelium.Owner {
             this.localAnchorB = worldAnchorB.subtract(mid);
 
             double length = worldAnchorA.distanceTo(worldAnchorB);
-            int segs = (int) MathHelper.clamp((float) (length / 1.5), 2.0f, 200.0f);
+            int segs = segmentsForLength(length);
             allocateArraysForSegments(segs);
-            this.restLen = (segs <= 0) ? 1.0 : (length / (double) segs);
+            this.restLen = length / pointCount;
 
             // If we're on the logical server side, write the values into the DataTracker so clients will receive them
             if (!this.getWorld().isClient) {

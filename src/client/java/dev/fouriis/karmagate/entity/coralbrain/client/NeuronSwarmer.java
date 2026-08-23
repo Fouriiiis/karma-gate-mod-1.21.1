@@ -1,6 +1,8 @@
-package dev.fouriis.karmagate.client.swarmer;
+package dev.fouriis.karmagate.entity.coralbrain.client;
 
 import dev.fouriis.karmagate.client.gridproject.IProjectedCircleOwner;
+import dev.fouriis.karmagate.entity.coralbrain.CoralBrainSystem;
+import dev.fouriis.karmagate.entity.coralbrain.Mycelium;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.util.math.BlockPos;
@@ -85,7 +87,7 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
     // ---- Mode state ----
     public MovementMode mode = MovementMode.Swarm;
 
-    private BlockPos suckleTarget;
+    private Mycelium suckleMycelium;
     private boolean attachedToSuckle;
     private int onlySwarm = 0;
 
@@ -493,29 +495,24 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
         }
     }
 
-    // ---- SuckleMycelia (proxy) ----
+    // ---- SuckleMycelia ----
 
     private void tryStartSuckle(List<NeuronSwarmer> otherSwarmers, ClientWorld world, Vec3d zoneMin, Vec3d zoneMax) {
         final int tries = 12;
-        final int radius = 12;
-
-        BlockPos base = BlockPos.ofFloored(position);
+        List<Mycelium> pool = CoralBrainSystem.mycelia(world);
+        if (pool.isEmpty()) return;
         for (int t = 0; t < tries; t++) {
-            int dx = RANDOM.nextInt(radius * 2 + 1) - radius;
-            int dy = RANDOM.nextInt(radius * 2 + 1) - radius;
-            int dz = RANDOM.nextInt(radius * 2 + 1) - radius;
-
-            BlockPos cand = base.add(dx, dy, dz);
-            if (!isWithinZone(cand, zoneMin, zoneMax)) continue;
-            if (!isBlockSolid(world, cand)) continue;
-
-            Vec3d tip = new Vec3d(cand.getX() + 0.5, cand.getY() + 0.5, cand.getZ() + 0.5);
+            Mycelium candidate = pool.get(RANDOM.nextInt(pool.size()));
+            Vec3d tip = candidate.tipPos();
+            if (tip.x < zoneMin.x || tip.y < zoneMin.y || tip.z < zoneMin.z
+                    || tip.x > zoneMax.x || tip.y > zoneMax.y || tip.z > zoneMax.z) continue;
             if (position.squaredDistanceTo(tip) > (INTERACTION_RANGE * INTERACTION_RANGE)) continue;
             if (!hasLineOfSight(world, position, tip)) continue;
 
             boolean taken = false;
             for (NeuronSwarmer other : otherSwarmers) {
-                if (other != this && other.mode == MovementMode.SuckleMycelia && cand.equals(other.suckleTarget)) {
+                if (other != this && other.mode == MovementMode.SuckleMycelia
+                        && other.suckleMycelium == candidate) {
                     taken = true;
                     break;
                 }
@@ -523,33 +520,36 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
             if (taken) continue;
 
             mode = MovementMode.SuckleMycelia;
-            suckleTarget = cand;
+            suckleMycelium = candidate;
             attachedToSuckle = false;
             return;
         }
     }
 
     private void updateSuckle(ClientWorld world) {
-        if (world == null || suckleTarget == null) {
+        if (world == null || suckleMycelium == null
+                || !CoralBrainSystem.mycelia(world).contains(suckleMycelium)) {
+            suckleMycelium = null;
             mode = MovementMode.Swarm;
             return;
         }
 
-        Vec3d tip = new Vec3d(suckleTarget.getX() + 0.5, suckleTarget.getY() + 0.5, suckleTarget.getZ() + 0.5);
+        Vec3d tip = suckleMycelium.tipPos();
 
         if (attachedToSuckle) {
             Vec3d dirTo = tip.subtract(position);
             double dist = dirTo.length();
             if (dist > 1e-12) {
                 Vec3d dirN = dirTo.multiply(1.0 / dist);
-                Vec3d v1 = dirN.multiply((2.0 - dist) * 0.15);
+                Vec3d v1 = dirN.multiply((0.1 - dist) * 0.15);
                 velocity = velocity.subtract(v1);
                 position = position.subtract(v1);
+                suckleMycelium.pullTip(dirN.multiply((0.1 - dist) * 0.35));
                 travelDirection = Vec3d.ZERO;
             }
 
             if (RANDOM.nextFloat() < 0.0125f) {
-                suckleTarget = null;
+                suckleMycelium = null;
                 mode = MovementMode.Swarm;
                 onlySwarm = 40 + RANDOM.nextInt(361);
             }
@@ -559,10 +559,10 @@ public class NeuronSwarmer implements IProjectedCircleOwner {
                 travelDirection = travelDirection.normalize();
             }
 
-            if (position.squaredDistanceTo(tip) < (0.8 * 0.8)) {
+            if (position.squaredDistanceTo(tip) < (0.25 * 0.25)) {
                 attachedToSuckle = true;
             } else if (RANDOM.nextFloat() < 0.05f && !hasLineOfSight(world, position, tip)) {
-                suckleTarget = null;
+                suckleMycelium = null;
                 mode = MovementMode.Swarm;
             }
         }
