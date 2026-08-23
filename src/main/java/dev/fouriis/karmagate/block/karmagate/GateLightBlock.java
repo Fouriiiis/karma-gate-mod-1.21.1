@@ -1,13 +1,11 @@
 package dev.fouriis.karmagate.block.karmagate;
 
 import com.mojang.serialization.MapCodec;
-import dev.fouriis.karmagate.entity.ModBlockEntities;
 import dev.fouriis.karmagate.entity.karmagate.GateLightBlockEntity;
+import net.minecraft.block.BlockRenderType;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.BlockWithEntity;
 import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.block.entity.BlockEntityTicker;
-import net.minecraft.block.entity.BlockEntityType;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemPlacementContext;
 import net.minecraft.state.StateManager;
@@ -34,9 +32,9 @@ public class GateLightBlock extends BlockWithEntity {
     public static final BooleanProperty BROKEN = BooleanProperty.of("broken");
 
     public GateLightBlock(Settings settings) {
-        // Make luminance depend on LIT property, but never when BROKEN is true
-        super(settings.luminance(state ->
-                (state.contains(LIT) && state.contains(BROKEN) && state.get(LIT) && !state.get(BROKEN)) ? 9 : 0));
+        // RWMC supplies the actual coloured lighting. Vanilla luminance would
+        // add a white light on top of it, so this block deliberately emits none.
+        super(settings);
         setDefaultState(getStateManager().getDefaultState()
             .with(FACING, Direction.NORTH)
             .with(LIT, false)
@@ -46,6 +44,12 @@ public class GateLightBlock extends BlockWithEntity {
     @Override
     public BlockEntity createBlockEntity(BlockPos pos, BlockState state) {
         return new GateLightBlockEntity(pos, state);
+    }
+
+    @Override
+    protected BlockRenderType getRenderType(BlockState state) {
+        // The lit model is a single source plane consumed by the shaderpack.
+        return BlockRenderType.MODEL;
     }
 
     @Override
@@ -69,14 +73,6 @@ public class GateLightBlock extends BlockWithEntity {
     @Override
     public BlockState mirror(BlockState state, BlockMirror mirror) {
         return state.rotate(mirror.getRotation(state.get(FACING)));
-    }
-
-    @Override
-    public <T extends BlockEntity> BlockEntityTicker<T> getTicker(
-            World world, BlockState state, BlockEntityType<T> type) {
-        return type == ModBlockEntities.GATE_LIGHT_BLOCK_ENTITY
-                ? (w, p, s, be) -> ((GateLightBlockEntity) be).tick(w, p, s, (GateLightBlockEntity) be)
-                : null;
     }
 
     @Override

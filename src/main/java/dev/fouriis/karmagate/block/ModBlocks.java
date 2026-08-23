@@ -15,7 +15,6 @@ import dev.fouriis.karmagate.block.shelterdoor.ShelterDoorBlock;
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
 import dev.fouriis.karmagate.item.KarmaGateItem;
 import dev.fouriis.karmagate.item.HeatCoilItem;
-import dev.fouriis.karmagate.item.GateLightItem;
 import net.minecraft.block.Block;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
@@ -41,6 +40,7 @@ public class ModBlocks {
         new GateLightBlock(Block.Settings.create()
             .strength(1.0f)
             .sounds(BlockSoundGroup.GLASS)
+            .noCollision()
             .nonOpaque()));
     
     public static final Block HEAT_COIL = registerBlock("heat_coil",
@@ -152,8 +152,6 @@ public class ModBlocks {
             item = new KarmaGateItem(block, new Item.Settings());
         } else if (name.equals("heat_coil")) {
             item = new HeatCoilItem(block, new Item.Settings());
-        } else if (name.equals("gate_light")) {
-            item = new GateLightItem(block, new Item.Settings());
         } else {
             item = new BlockItem(block, new Item.Settings());
         }

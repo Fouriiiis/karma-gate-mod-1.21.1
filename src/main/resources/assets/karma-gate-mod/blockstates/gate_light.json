@@ -1,8 +1,7 @@
 {
-    "variants": {
-        "facing=south": { "model": "karma-gate-mod:block/karma_gate" },
-        "facing=north": { "model": "karma-gate-mod:block/karma_gate", "y": 180 },
-        "facing=east":  { "model": "karma-gate-mod:block/karma_gate", "y": 270 },
-        "facing=west":  { "model": "karma-gate-mod:block/karma_gate", "y": 90 }
-    }
+  "variants": {
+    "lit=false": { "model": "karma-gate-mod:block/gate_light_off" },
+    "lit=true,broken=false": { "model": "karma-gate-mod:block/gate_light" },
+    "lit=true,broken=true": { "model": "karma-gate-mod:block/gate_light_off" }
+  }
 }

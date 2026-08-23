@@ -29,8 +29,6 @@ import dev.fouriis.karmagate.entity.coralbrain.client.CoralNeuronEntityRenderer;
 import dev.fouriis.karmagate.entity.coralbrain.client.WallMyceliaBlockEntityRenderer;
 import dev.fouriis.karmagate.entity.coralbrain.CoralBrainSystem;
 import dev.fouriis.karmagate.entity.client.BatteryMeterRenderer;
-import dev.fouriis.karmagate.entity.client.GateLightBlockRenderer;
-import dev.fouriis.karmagate.entity.client.GateLightItemModel;
 import dev.fouriis.karmagate.entity.client.GravityDisruptorRenderer;
 import dev.fouriis.karmagate.entity.client.HeatCoilItemModel;
 import dev.fouriis.karmagate.entity.client.HeatCoilRenderer;
@@ -117,7 +115,6 @@ public class KarmaGateModClient implements ClientModInitializer {
 		// Register block entity renderer
 		BlockEntityRendererFactories.register(ModBlockEntities.KARMA_GATE_BLOCK_ENTITY, KarmaGateBlockRenderer::new);
 		BlockEntityRendererFactories.register(ModBlockEntities.SHELTER_DOOR_BLOCK_ENTITY, ShelterDoorRenderer::new);
-		BlockEntityRendererFactories.register(ModBlockEntities.GATE_LIGHT_BLOCK_ENTITY, GateLightBlockRenderer::new);
 		BlockEntityRendererFactories.register(ModBlockEntities.HEAT_COIL_BLOCK_ENTITY, HeatCoilRenderer::new);
 		BlockEntityRendererFactories.register(ModBlockEntities.HOLOGRAM_PROJECTOR, HologramProjectorRenderer::new);
 		BlockEntityRendererFactories.register(ModBlockEntities.WATERFALL_BLOCK_ENTITY, WaterfallBlockRenderer::new);
@@ -224,22 +221,6 @@ public class KarmaGateModClient implements ClientModInitializer {
 				matrices.multiply(net.minecraft.util.math.RotationAxis.POSITIVE_Y.rotationDegrees(35f));
 				matrices.translate(-0.5f, -0.5f, -0.5f);
 				heatCoilItemRenderer.render(stack, mode, matrices, vertexConsumers, light, overlay);
-				matrices.pop();
-			}
-		);
-
-		// Gate Light item renderer
-		var gateLightItemRenderer = new GeoItemRenderer<>(new GateLightItemModel());
-		BuiltinItemRendererRegistry.INSTANCE.register(
-			dev.fouriis.karmagate.block.ModBlocks.GATE_LIGHT.asItem(),
-			(stack, mode, matrices, vertexConsumers, light, overlay) -> {
-				matrices.push();
-				// Increased size by 100% (0.22 -> 0.44). Lower slightly to keep within slot.
-				matrices.translate(0.5f, 0.43f, 0.5f);
-				matrices.scale(0.44f, 0.44f, 0.44f);
-				matrices.multiply(net.minecraft.util.math.RotationAxis.POSITIVE_Y.rotationDegrees(45f));
-				matrices.translate(-0.5f, -0.5f, -0.5f);
-				gateLightItemRenderer.render(stack, mode, matrices, vertexConsumers, light, overlay);
 				matrices.pop();
 			}
 		);

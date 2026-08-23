@@ -1,7 +1,18 @@
 {
-  "parent": "minecraft:block/cube_all",
   "textures": {
-    "all": "karma-gate-mod:block/gate_light",
-    "lit": "karma-gate-mod:block/gate_light_lit"
-  }
+    "source": "rw_block_mod:block/super_orange",
+    "particle": "rw_block_mod:block/super_orange"
+  },
+  "elements": [
+    {
+      "from": [3.2, 8, 3.2],
+      "to": [12.8, 8, 12.8],
+      "faces": {
+        "up": {
+          "uv": [0, 0, 9.6, 9.6],
+          "texture": "#source"
+        }
+      }
+    }
+  ]
 }
