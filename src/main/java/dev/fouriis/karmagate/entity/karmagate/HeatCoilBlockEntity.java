@@ -1,8 +1,10 @@
 package dev.fouriis.karmagate.entity.karmagate;
 
+import dev.fouriis.karmagate.block.karmagate.HeatCoilBlock;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
 import dev.fouriis.karmagate.particle.ModParticles;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Block;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.network.listener.ClientPlayPacketListener;
@@ -273,6 +275,7 @@ public class HeatCoilBlockEntity extends BlockEntity {
         }
 
         if (changed) {
+            updateShaderLightLevel();
             markDirtySync();
         }
     }
@@ -307,6 +310,7 @@ public class HeatCoilBlockEntity extends BlockEntity {
 
         if (gateManaged) {
             pendingDelta = 0.0f;
+            updateShaderLightLevel();
             return;
         }
 
@@ -323,7 +327,23 @@ public class HeatCoilBlockEntity extends BlockEntity {
         float newHeat = clamp01(heat + delta);
         if (Math.abs(newHeat - heat) > EPS) {
             heat = newHeat;
+            updateShaderLightLevel();
             markDirtySync();
+        }
+    }
+
+    /** Keeps the chunk-mesh material aligned with RegionGateGraphics' live light. */
+    private void updateShaderLightLevel() {
+        if (world == null || world.isClient) return;
+        BlockState state = world.getBlockState(pos);
+        if (!(state.getBlock() instanceof HeatCoilBlock)) return;
+
+        boolean emits = gateManaged
+                ? gateLightAlpha > 0.001f && gateLightRadius > 0.0f
+                : heat > 0.05f;
+        int level = emits ? Math.max(1, Math.round(clamp01(heat) * 31.0f)) : 0;
+        if (state.get(HeatCoilBlock.LIGHT_LEVEL) != level) {
+            world.setBlockState(pos, state.with(HeatCoilBlock.LIGHT_LEVEL, level), Block.NOTIFY_ALL);
         }
     }
 

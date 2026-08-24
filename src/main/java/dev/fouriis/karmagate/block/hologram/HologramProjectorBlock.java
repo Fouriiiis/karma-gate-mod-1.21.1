@@ -20,16 +20,27 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.state.StateManager;
 import net.minecraft.state.property.DirectionProperty;
+import net.minecraft.state.property.IntProperty;
 import net.minecraft.state.property.Properties;
 import net.minecraft.world.World;
 import org.jetbrains.annotations.Nullable;
 
 public class HologramProjectorBlock extends BlockWithEntity {
     public static final DirectionProperty FACING = Properties.HORIZONTAL_FACING;
+    /** Quantized GateKarmaGlyph fade used by the shaderpack source. */
+    public static final IntProperty LIGHT_LEVEL = IntProperty.of("light_level", 0, 15);
+    /** GateKarmaGlyph color family; decoded by RWMC composite.fsh. */
+    public static final IntProperty LIGHT_COLOR = IntProperty.of("light_color", 0, 6);
+    /** Current simulated color pulse, kept separate from the shader's clock. */
+    public static final IntProperty LIGHT_COLOR_LEVEL = IntProperty.of("light_color_level", 0, 31);
 
     public HologramProjectorBlock(Settings settings) {
         super(settings);
-        this.setDefaultState(this.stateManager.getDefaultState().with(FACING, Direction.SOUTH));
+        this.setDefaultState(this.stateManager.getDefaultState()
+                .with(FACING, Direction.SOUTH)
+                .with(LIGHT_LEVEL, 0)
+                .with(LIGHT_COLOR, 0)
+                .with(LIGHT_COLOR_LEVEL, 0));
     }
 
     public static final MapCodec<HologramProjectorBlock> CODEC = createCodec(HologramProjectorBlock::new);
@@ -41,8 +52,9 @@ public class HologramProjectorBlock extends BlockWithEntity {
 
     @Override
     public BlockRenderType getRenderType(BlockState state) {
-        // Render exclusively via BER
-        return BlockRenderType.INVISIBLE;
+        // The model is only a sub-pixel shaderpack source marker. The glyph
+        // itself remains exclusively rendered by HologramProjectorRenderer.
+        return BlockRenderType.MODEL;
     }
 
     // Placement & rotation -------------------------------------------------
@@ -57,12 +69,16 @@ public class HologramProjectorBlock extends BlockWithEntity {
             // Fallback to player's horizontal facing
             dir = ctx.getPlayer() != null ? ctx.getPlayer().getHorizontalFacing() : Direction.SOUTH;
         }
-        return this.getDefaultState().with(FACING, dir.getOpposite());
+        return this.getDefaultState()
+                .with(FACING, dir.getOpposite())
+                .with(LIGHT_LEVEL, 0)
+                .with(LIGHT_COLOR, 0)
+                .with(LIGHT_COLOR_LEVEL, 0);
     }
 
     @Override
     protected void appendProperties(StateManager.Builder<net.minecraft.block.Block, BlockState> builder) {
-        builder.add(FACING);
+        builder.add(FACING, LIGHT_LEVEL, LIGHT_COLOR, LIGHT_COLOR_LEVEL);
     }
 
     @Override

@@ -1,11 +1,13 @@
 // dev/fouriis/karmagate/entity/hologram/HologramProjectorBlockEntity.java
 package dev.fouriis.karmagate.entity.hologram;
 
+import dev.fouriis.karmagate.block.hologram.HologramProjectorBlock;
 import dev.fouriis.karmagate.entity.ModBlockEntities;
 import dev.fouriis.karmagate.entity.karmagate.KarmaGateBlockEntity;
 import dev.fouriis.karmagate.entity.karmagate.KarmaGateController;
 import dev.fouriis.karmagate.entity.karmagate.KarmaGateController.KarmaLevel;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.network.listener.ClientPlayPacketListener;
@@ -197,6 +199,48 @@ public class HologramProjectorBlockEntity extends BlockEntity {
         // RegionGateGlyph3D runs at 40 updates per second.
         updateClientVisualStep();
         updateClientVisualStep();
+        updateShaderLightState();
+    }
+
+    /**
+     * Exposes GateKarmaGlyph's already-simulated fade and color to
+     * Iris block materials. This is client-only because the cosmetic state
+     * machine itself intentionally lives on the client, as it does in C#.
+     */
+    private void updateShaderLightState() {
+        if (world == null || !world.isClient) return;
+        BlockState state = world.getBlockState(pos);
+        if (!(state.getBlock() instanceof HologramProjectorBlock)) return;
+
+        int level = fade <= 0.0f ? 0 : Math.max(1, Math.round(clamp01(fade) * 15.0f));
+        int colorMode;
+        if (karmaLevel == KarmaLevel.LEVEL_D) {
+            colorMode = 6;
+        } else if ((controllerDriven && !energyEnough) || (!controllerDriven && lowPower)) {
+            colorMode = electricGate ? 5 : 4;
+        } else if (controllerDriven && gateUnlocked) {
+            colorMode = electricGate ? 3 : 2;
+        } else {
+            colorMode = electricGate ? 1 : 0;
+        }
+
+        // Dynamic colors must come from this exact GateKarmaGlyph simulation.
+        // Recomputing sinAdder/redSine in GLSL gives every source a different
+        // clock from the visible hologram and causes their colors to drift.
+        float colorAmount = switch (colorMode) {
+            case 4, 6 -> (colorGreen + colorBlue) * 0.5f;
+            case 5 -> ((colorGreen / 0.75f) + (colorBlue / 0.5f)) * 0.5f;
+            default -> 0.0f;
+        };
+        int colorLevel = Math.round(clamp01(colorAmount) * 31.0f);
+
+        BlockState next = state
+                .with(HologramProjectorBlock.LIGHT_LEVEL, level)
+                .with(HologramProjectorBlock.LIGHT_COLOR, colorMode)
+                .with(HologramProjectorBlock.LIGHT_COLOR_LEVEL, colorLevel);
+        if (!next.equals(state)) {
+            world.setBlockState(pos, next, Block.NOTIFY_ALL);
+        }
     }
 
     private void updateClientVisualStep() {

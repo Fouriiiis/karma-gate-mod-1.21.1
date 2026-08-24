@@ -1,3 +1,14 @@
 {
-  "parent": "minecraft:block/air"
+  "textures": {
+    "source": "rw_block_mod:block/super_orange"
+  },
+  "elements": [
+    {
+      "from": [7.99, 7.99, 7.99],
+      "to": [8.01, 7.99, 8.01],
+      "faces": {
+        "up": { "uv": [0, 0, 0.02, 0.02], "texture": "#source" }
+      }
+    }
+  ]
 }

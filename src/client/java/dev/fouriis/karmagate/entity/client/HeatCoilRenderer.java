@@ -1,6 +1,5 @@
 package dev.fouriis.karmagate.entity.client;
 
-import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
 import dev.fouriis.karmagate.block.karmagate.HeatCoilBlock;
 import dev.fouriis.karmagate.entity.karmagate.HeatCoilBlockEntity;
@@ -10,28 +9,18 @@ import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.ShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.Shaders;
-import net.minecraft.client.render.BufferBuilder;
-import net.minecraft.client.render.BufferRenderer;
-import net.minecraft.client.render.Camera;
-import net.minecraft.client.render.GameRenderer;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
-import net.minecraft.client.render.Tessellator;
 import net.minecraft.client.render.VertexConsumer;
 import net.minecraft.client.render.VertexConsumerProvider;
-import net.minecraft.client.render.VertexFormat;
-import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.render.block.entity.BlockEntityRendererFactory;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
 import org.joml.Matrix4f;
-import org.joml.Quaternionf;
-import org.joml.Vector3f;
 
 /** 3-D atlas-model adaptation of RegionGateGraphics' RegionGate_Heater. */
 public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlockEntity> {
@@ -41,9 +30,6 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
     // Tilt the heater 45 degrees around its LOCAL X axis. FACING still
     // controls horizontal yaw; this tilt rotates only the local Y/Z plane.
     private static final float HEATER_SIDEWAYS_TILT_DEGREES = -45.0f;
-
-    private static final int GLOW_SEGMENTS = 48;
-    private static final int GLOW_RINGS = 12;
 
     // Run after libMod's conventional priority-1000 post effects. Recapturing
     // immediately before every coil prevents one grabtex shader from restoring
@@ -83,97 +69,7 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
 
         renderHeaterModel(vertices, matrix, facing, model, bounds, hotColor, shadeColor);
 
-        queueHeatGlow(heater, heat);
         queueHeatDistortion(heater, tickDelta);
-    }
-
-    private static void queueHeatGlow(HeatCoilBlockEntity heater, float heat) {
-        if (heat <= 0.05f) return;
-
-        float alpha = heater.isGateManaged()
-                ? heater.getGateLightAlpha()
-                : (float) Math.pow(
-                        inverseLerp(0.05f, 0.5f, heat) * heater.getClientLightFlicker(), 0.75f);
-        if (alpha <= 0.001f) return;
-        float hue = inverseLerp(0.4f, 0.7f, heat) * 0.045f;
-        float lightness = 0.5f + 0.1f * inverseLerp(
-                0.8f, 1.0f, heat * heater.getClientLightColorFlicker());
-        Rgb glowColor = hslToRgb(hue, 1.0f, lightness);
-        float radiusPixels = heater.isGateManaged()
-                ? heater.getGateLightRadius()
-                : MathHelper.lerp(MathHelper.sin(MathHelper.PI * heat), 200.0f, 300.0f);
-        float radius = radiusPixels / PIXELS_PER_BLOCK;
-        double centerX = heater.getPos().getX() + 0.5;
-        double centerY = heater.getPos().getY() + 0.5;
-        double centerZ = heater.getPos().getZ() + 0.5;
-
-        // Draw just before libMod captures GrabTexture for HeatDistortion, so
-        // the screen-blended light is part of the scene that gets distorted.
-        // RegionGateGraphics keeps the light at heaterPositions[k]; moving it
-        // toward the camera changes both its apparent radius and screen center.
-        RenderUtils.recordLateWorldDraw(new RenderUtils.QueuedDrawCall(camera ->
-                renderGlow(camera, centerX, centerY, centerZ, radius, glowColor, alpha), false), 990);
-    }
-
-    private static void renderGlow(Camera camera, double worldX, double worldY, double worldZ,
-                                   float radius, Rgb color, float alpha) {
-        Vec3d cameraPos = camera.getPos();
-
-        float cx = (float) (worldX - cameraPos.x);
-        float cy = (float) (worldY - cameraPos.y);
-        float cz = (float) (worldZ - cameraPos.z);
-        Quaternionf billboard = new Quaternionf(camera.getRotation());
-        Matrix4f view = new Matrix4f().rotation(camera.getRotation()).transpose();
-        BufferBuilder buffer = Tessellator.getInstance().begin(
-                VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-
-        for (int ring = 0; ring < GLOW_RINGS; ring++) {
-            float innerT = ring / (float) GLOW_RINGS;
-            float outerT = (ring + 1) / (float) GLOW_RINGS;
-            float innerAmount = square(1.0f - innerT) * alpha * 0.38f;
-            float outerAmount = square(1.0f - outerT) * alpha * 0.38f;
-            for (int segment = 0; segment < GLOW_SEGMENTS; segment++) {
-                float angle0 = MathHelper.TAU * segment / GLOW_SEGMENTS;
-                float angle1 = MathHelper.TAU * (segment + 1) / GLOW_SEGMENTS;
-                glowVertex(buffer, view, billboard, cx, cy, cz, radius * innerT, angle0,
-                        color, innerAmount);
-                glowVertex(buffer, view, billboard, cx, cy, cz, radius * innerT, angle1,
-                        color, innerAmount);
-                glowVertex(buffer, view, billboard, cx, cy, cz, radius * outerT, angle1,
-                        color, outerAmount);
-                glowVertex(buffer, view, billboard, cx, cy, cz, radius * outerT, angle0,
-                        color, outerAmount);
-            }
-        }
-
-        RenderSystem.enableDepthTest();
-        RenderSystem.depthMask(false);
-        RenderSystem.enableBlend();
-        RenderSystem.blendFunc(GlStateManager.SrcFactor.ONE_MINUS_DST_COLOR,
-                GlStateManager.DstFactor.ONE);
-        RenderSystem.disableCull();
-        RenderSystem.setShader(GameRenderer::getPositionColorProgram);
-        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
-        BufferRenderer.drawWithGlobalProgram(buffer.end());
-        RenderSystem.defaultBlendFunc();
-        RenderSystem.depthMask(true);
-        RenderSystem.enableCull();
-        RenderSystem.disableBlend();
-    }
-
-    private static void glowVertex(BufferBuilder buffer, Matrix4f view, Quaternionf billboard,
-                                   float cx, float cy, float cz, float distance, float angle,
-                                   Rgb color, float amount) {
-        Vector3f position = new Vector3f(MathHelper.cos(angle), MathHelper.sin(angle), 0.0f)
-                .mul(distance).rotate(billboard).add(cx, cy, cz);
-        // Screen blending ignores source alpha, so bake the radial amount into
-        // RGB exactly as RegionGateHeatCoil3D's ScreenBlend does.
-        buffer.vertex(view, position.x, position.y, position.z)
-                .color(color.r * amount, color.g * amount, color.b * amount, 1.0f);
-    }
-
-    private static float square(float value) {
-        return value * value;
     }
 
     private static void renderHeaterModel(VertexConsumer vertices, Matrix4f matrix, Direction facing,

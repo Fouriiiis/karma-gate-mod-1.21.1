@@ -14,6 +14,7 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemPlacementContext;
 import net.minecraft.state.StateManager;
 import net.minecraft.state.property.DirectionProperty;
+import net.minecraft.state.property.IntProperty;
 import net.minecraft.state.property.Properties;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.BlockMirror;
@@ -25,6 +26,8 @@ import net.minecraft.world.World;
 
 public class HeatCoilBlock extends BlockWithEntity {
     public static final DirectionProperty FACING = Properties.HORIZONTAL_FACING;
+    /** Quantized C# heater heat consumed by the RWMC shaderpack (0 = no light). */
+    public static final IntProperty LIGHT_LEVEL = IntProperty.of("light_level", 0, 31);
     // Expanded hitbox: extend 0.5 blocks (8 px) outward on X/Z, so cube spans -0.5 .. 1.5 in both axes.
     // createCuboidShape uses 1/16th block units. -8 -> -0.5 blocks, 24 -> 1.5 blocks.
     // Height kept full (0..16). Symmetric, so no rotation per facing needed.
@@ -32,18 +35,22 @@ public class HeatCoilBlock extends BlockWithEntity {
 
     public HeatCoilBlock(Settings settings) {
         super(settings);
-        setDefaultState(getStateManager().getDefaultState().with(FACING, Direction.NORTH));
+        setDefaultState(getStateManager().getDefaultState()
+                .with(FACING, Direction.NORTH)
+                .with(LIGHT_LEVEL, 0));
     }
 
     @Override
     protected void appendProperties(StateManager.Builder<net.minecraft.block.Block, BlockState> builder) {
-        builder.add(FACING);
+        builder.add(FACING, LIGHT_LEVEL);
     }
 
     @Override
     public BlockState getPlacementState(ItemPlacementContext ctx) {
         // Face the player
-        return getDefaultState().with(FACING, ctx.getHorizontalPlayerFacing().getOpposite());
+        return getDefaultState()
+                .with(FACING, ctx.getHorizontalPlayerFacing().getOpposite())
+                .with(LIGHT_LEVEL, 0);
     }
 
     @Override
@@ -63,9 +70,9 @@ public class HeatCoilBlock extends BlockWithEntity {
 
     @Override
     protected BlockRenderType getRenderType(BlockState state) {
-        // The placed heater is rendered from RegionGate_Heater by its block
-        // entity renderer; suppress the old cube model.
-        return BlockRenderType.INVISIBLE;
+        // The visible heater is still rendered by its BER. The block model is
+        // only a tiny shaderpack light-source plane hidden inside that mesh.
+        return BlockRenderType.MODEL;
     }
 
     @Override
