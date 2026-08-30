@@ -91,6 +91,16 @@ public class ModItems {
         )
     );
 
+    public static final SpawnEggItem MONSTER_KELP_SPAWN_EGG = (SpawnEggItem) registerItem(
+        "monster_kelp_spawn_egg",
+        new SpawnEggItem(
+            KarmaGateMod.MONSTER_KELP_ENTITY_TYPE,
+            0x080A0B,
+            0xD71932,
+            new Item.Settings().maxCount(64)
+        )
+    );
+
     private static Item registerItem(String name, Item item) {
         return Registry.register(Registries.ITEM, Identifier.of(KarmaGateMod.MOD_ID, name), item);
     }
@@ -111,6 +121,7 @@ public class ModItems {
             entries.add(FIVE_PEBBLES_SPAWN_EGG);
             entries.add(LOOKS_TO_THE_MOON_SPAWN_EGG);
             entries.add(POLE_PLANT_SPAWN_EGG);
+            entries.add(MONSTER_KELP_SPAWN_EGG);
         });
     }
 }

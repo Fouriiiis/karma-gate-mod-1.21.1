@@ -22,6 +22,8 @@ import dev.fouriis.karmagate.entity.oracle.FivePebblesEntity;
 import dev.fouriis.karmagate.entity.oracle.LooksToTheMoonEntity;
 import dev.fouriis.karmagate.entity.oracle.OracleEntity;
 import dev.fouriis.karmagate.entity.overseer.YellowOverseerEntity;
+import dev.fouriis.karmagate.entity.monsterkelp.MonsterKelpEntity;
+import dev.fouriis.karmagate.entity.monsterkelp.MonsterKelpSegmentEntity;
 import dev.fouriis.karmagate.entity.poleplant.PolePlantEntity;
 import dev.fouriis.karmagate.entity.poleplant.PolePlantSegmentEntity;
 import dev.fouriis.karmagate.entity.spider.SpiderEntity;
@@ -254,6 +256,26 @@ public class KarmaGateMod implements ModInitializer {
                     .build()
     );
 
+    public static final EntityType<MonsterKelpEntity> MONSTER_KELP_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "monster_kelp"),
+            FabricEntityTypeBuilder.<MonsterKelpEntity>create(SpawnGroup.MONSTER, MonsterKelpEntity::new)
+                    .dimensions(EntityDimensions.fixed(0.5f, 0.5f))
+                    .trackRangeBlocks(160)
+                    .trackedUpdateRate(1)
+                    .build()
+    );
+
+    public static final EntityType<MonsterKelpSegmentEntity> MONSTER_KELP_SEGMENT_ENTITY_TYPE = Registry.register(
+            Registries.ENTITY_TYPE,
+            Identifier.of(MOD_ID, "monster_kelp_segment"),
+            FabricEntityTypeBuilder.<MonsterKelpSegmentEntity>create(SpawnGroup.MISC, MonsterKelpSegmentEntity::new)
+                    .dimensions(EntityDimensions.fixed(0.5f, 0.5f))
+                    .trackRangeBlocks(160)
+                    .trackedUpdateRate(1)
+                    .build()
+    );
+
 
     @Override
     public void onInitialize() {
@@ -286,6 +308,8 @@ public class KarmaGateMod implements ModInitializer {
         FabricDefaultAttributeRegistry.register(ECHO_ENTITY_TYPE, EchoEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(POLE_PLANT_ENTITY_TYPE, PolePlantEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(POLE_PLANT_SEGMENT_ENTITY_TYPE, PolePlantSegmentEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(MONSTER_KELP_ENTITY_TYPE, MonsterKelpEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(MONSTER_KELP_SEGMENT_ENTITY_TYPE, MonsterKelpSegmentEntity.createAttributes());
 
         // Register networking
         ModNetworking.register();
