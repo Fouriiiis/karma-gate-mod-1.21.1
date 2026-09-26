@@ -3,10 +3,11 @@ package dev.fouriis.karmagate.particle;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
-import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.ShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.Shaders;
+import net.brickcraftdream.librainworldmc.client.render.shader.shaders.SteamShader;
+import net.brickcraftdream.librainworldmc.client.render.utils.RenderUtils;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.MinecraftClient;
@@ -260,32 +261,12 @@ public final class SteamSmokeSystem {
         boolean shaderApplied = false;
         try {
             if (Shaders.STEAM != null && Shaders.STEAM.getProgram() != null) {
-                // This is the same explicit program-binding path used by the
-                // Iris-compatible heat-coil distortion effect.
-                CoreShaderRenderer.bindShader$Steam(
-                        0.0f,
-                        levelDepth,
-                        NOISE_TEXTURE,
-                        GRAB_TEXTURE,
-                        null,
-                        null,
-                        false,
-                        false,
-                        false,
-                        false,
-                        false
-                );
-
-                // The demo evaluates its depth/noise inputs in full-screen
-                // coordinates. Every cap and bridge retains its own local UVs
-                // solely for the shader's radial mask.
-                ShaderRenderer.setUniformF(
-                        Shaders.STEAM.getProgram(),
-                        "u_spriteRect",
-                        0.0f, 0.0f, 1.0f, 1.0f
-                );
                 float rain = (world.getTime() + tickDelta) / (20.0f * 5.0f);
-                ShaderRenderer.setUniformF(Shaders.STEAM.getProgram(), "u_RAIN", rain);
+                SteamShader shader = Shaders.STEAM;
+                shader.setSampler1_LevelTex(levelDepth);
+                shader.setSampler2_NoiseTex(NOISE_TEXTURE);
+                shader.setSampler7_GrabTexture(GRAB_TEXTURE);
+                shader.setInternal_Rain(rain);
                 shaderApplied = true;
             }
         } catch (RuntimeException ignored) {

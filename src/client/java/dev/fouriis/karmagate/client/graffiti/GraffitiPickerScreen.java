@@ -104,8 +104,8 @@ public class GraffitiPickerScreen extends Screen {
                     }
                 ,
                     (area, widget) -> {
-                        widget.setX(area.x() + col * (THUMBNAIL_SIZE + PADDING));
-                        widget.setY(area.y() + row * (THUMBNAIL_SIZE + PADDING));
+                        widget.setX(area.getX() + col * (THUMBNAIL_SIZE + PADDING));
+                        widget.setY(area.getY() + row * (THUMBNAIL_SIZE + PADDING));
                         widget.setWidth(THUMBNAIL_SIZE);
                         widget.setHeight(THUMBNAIL_SIZE);
                     }
@@ -125,9 +125,9 @@ public class GraffitiPickerScreen extends Screen {
                 .addArea("cancel", 20)
                 .addWidget(new LabeledButtonWidget(0, 0, 0, 0, Text.empty(), Text.literal("Cancel"), button -> this.close()),
                         (area, widget) -> {
-                            widget.setX(area.x() + area.width() / 2 - area.width() / 8);
-                            widget.setY(area.y());
-                            widget.setWidth(area.width() / 4);
+                            widget.setX(area.getX() + area.getWidth() / 2 - area.getWidth() / 8);
+                            widget.setY(area.getY());
+                            widget.setWidth(area.getWidth() / 4);
                             widget.setHeight(20);
                         })
                 .autoMinSizeFromWidgets()

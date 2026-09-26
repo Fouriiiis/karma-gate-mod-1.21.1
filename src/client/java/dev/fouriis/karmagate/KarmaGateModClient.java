@@ -241,7 +241,7 @@ public class KarmaGateModClient implements ClientModInitializer {
 
 			@Override
 			public void onTimelineEvent(BlockPos pos, String token) {
-				KarmaGateMod.LOGGER.info("[AudioClient] token '{}' at {}", token, pos);
+				KarmaGateMod.LOGGER.debug("[AudioClient] token '{}' at {}", token, pos);
 				Spec spec = switch (token) {
 					case "Gate_Poles_And_Rails_In" -> GateAudioSpecs.POLES_AND_RAILS_IN;
 					case "Gate_Pillows_Move_In" -> GateAudioSpecs.PILLOWS_MOVE_IN;

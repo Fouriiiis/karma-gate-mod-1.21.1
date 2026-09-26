@@ -1,5 +1,6 @@
 package dev.fouriis.karmagate.entity.garbworm;
 
+import net.brickcraftdream.librainworldmc.client.api.sound.RwSoundRequest;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
@@ -31,20 +32,16 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
-import net.brickcraftdream.librainworldmc.client.api.RwSoundApi;
-import net.brickcraftdream.librainworldmc.client.api.RwSoundsApi;
 
 public class GarbageWormEntity extends MobEntity {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("GarbageWorm");
 
     // ── Sound ids ──────────────────────────────────────────────────────
-    private static final String SND_WITHDRAW       = "wormMoveA";
-    private static final String SND_EMERGE         = "wormMoveA";
-    private static final String SND_SNATCH_SPEAR   = "gravel1f";
-    private static final String SND_GRAB_CREATURE  = "gravel1f";
-
-    private static final RwSoundApi RW_SOUNDS = RwSoundsApi.get();
+    private static final String SND_WITHDRAW       = "Garbage_Worm_Withdraw";
+    private static final String SND_EMERGE         = "Garbage_Worm_Emerge";
+    private static final String SND_SNATCH_SPEAR   = "Garbage_Worm_Snatch_Spear";
+    private static final String SND_GRAB_CREATURE  = "Garbage_Worm_Grab_Creature";
 
     // ── Tracked data keys ──────────────────────────────────────────────
     private static final TrackedData<Float> ROOT_X = DataTracker.registerData(GarbageWormEntity.class, TrackedDataHandlerRegistry.FLOAT);
@@ -328,34 +325,12 @@ public class GarbageWormEntity extends MobEntity {
 
     // ── Sound helpers ──────────────────────────────────────────────────
 
-    private SoundEvent resolveRwSound(String id) {
-        if (id == null || id.isEmpty()) {
-            return null;
-        }
-
-        try {
-            SoundEvent event = RW_SOUNDS.getEvent(id);
-            if (event == null) {
-                LOGGER.warn("[GarbageWorm id={}] RW sound '{}' resolved to null", getId(), id);
-            }
-            return event;
-        } catch (Exception e) {
-            LOGGER.warn("[GarbageWorm id={}] Failed to resolve RW sound '{}': {}", getId(), id, e.getMessage());
-            return null;
-        }
-    }
-
     private void playOneShot(String id, float volume, float pitch) {
         if (getWorld() == null) {
             return;
         }
 
-        SoundEvent event = resolveRwSound(id);
-        if (event == null) {
-            return;
-        }
-
-        this.playSound(event, volume, pitch);
+        RwSoundRequest.ofMapped(id).volume(volume).pitch(pitch).at(getPos()).directional().play();
     }
 
     private void initialize() {

@@ -56,7 +56,7 @@ public class CoralNeuronScreen extends Screen {
     protected void init() {
         super.init();
 
-        CoralNeuronProperties props = area.ensureProperties(CoralNeuronProperties.class);
+        CoralNeuronProperties props = area.getProperties(CoralNeuronProperties.class);
 
         int formWidth = Math.min(360, this.width - 40);
         int formHeight = this.height - 60;

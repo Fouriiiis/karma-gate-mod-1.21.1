@@ -5,10 +5,11 @@ import dev.fouriis.karmagate.block.hologram.HologramProjectorBlock;
 import dev.fouriis.karmagate.entity.hologram.HologramProjectorBlockEntity;
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
-import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.ShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.Shaders;
+import net.brickcraftdream.librainworldmc.client.render.shader.shaders.GateHologramShader;
+import net.brickcraftdream.librainworldmc.client.render.utils.RenderUtils;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
@@ -147,17 +148,17 @@ public final class HologramProjectorRenderer
         boolean shaderApplied = false;
         try {
             if (Shaders.GATE_HOLOGRAM != null && Shaders.GATE_HOLOGRAM.getProgram() != null) {
-                CoreShaderRenderer.bindShader$GateHologram(
-                        threshold, element.textureIdentifier, NOISE_TEXTURE, false);
-                ShaderRenderer.setUniformF(Shaders.GATE_HOLOGRAM.getProgram(),
-                        "_Sampler0_ST", 1.0f, 1.0f, 0.0f, 0.0f);
-                ShaderRenderer.setUniformF(Shaders.GATE_HOLOGRAM.getProgram(), "u_RAIN", rain);
+                GateHologramShader shader = Shaders.GATE_HOLOGRAM;
+                shader.setHologramthreshold(threshold);
+                shader.setSampler0_MainTex(element.textureIdentifier);
+                shader.setSampler3_NoiseTex2(NOISE_TEXTURE);
+                shader.setInternal_Rain(rain);
+
                 MinecraftClient client = MinecraftClient.getInstance();
                 ShaderRenderer.setUniformF(Shaders.GATE_HOLOGRAM.getProgram(), "u_screenSize",
                         client.getFramebuffer().textureWidth * 0.5f,
                         client.getFramebuffer().textureHeight * 0.5f);
-                ShaderRenderer.setUniformF(Shaders.GATE_HOLOGRAM.getProgram(),
-                        "u_spriteRect", 0.0f, 0.0f, 1.0f, 1.0f);
+                shader.apply();
                 shaderApplied = true;
             }
         } catch (RuntimeException ignored) {

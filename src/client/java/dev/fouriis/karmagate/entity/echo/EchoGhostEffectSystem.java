@@ -3,7 +3,9 @@ package dev.fouriis.karmagate.entity.echo;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
-import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
+import net.brickcraftdream.librainworldmc.client.render.shader.shaders.GhostDistortionShader;
+import net.brickcraftdream.librainworldmc.client.render.shader.shaders.RippleMaskedBasicShader;
+import net.brickcraftdream.librainworldmc.client.render.utils.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.ShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.Shaders;
@@ -120,14 +122,14 @@ public final class EchoGhostEffectSystem {
         if (Shaders.GHOST_DISTORTION != null
                 && Shaders.GHOST_DISTORTION.getProgram() != null
                 && distortionHalfSize > 0.0f) {
-            RenderUtils.drawCameraFacingBillboardFitSphere(
-                    () -> bindDistortion(rain, state.distortionOpacity()),
-                    center.x, center.y, center.z,
-                    bounds,
-                    distortionHalfSize, distortionHalfSize,
-                    0.0f,
-                    1.0f, 1.0f, 1.0f, 1.0f, FULL_BRIGHT,
-                    true, EFFECT_PRIORITY);
+            RenderUtils.billboardOnBox(center.x, center.y, center.z, bounds)
+                    .shader(() -> bindDistortion(rain, state.distortionOpacity()))
+                    .fitSphere(distortionHalfSize, distortionHalfSize)
+                    .rotation(0.0f)
+                    .color(1.0f, 1.0f, 1.0f, 1.0f)
+                    .light(FULL_BRIGHT)
+                    .recaptureGrabtex(true)
+                    .enqueue(EFFECT_PRIORITY);
         }
 
         // Flakes nearer than the Echo stay in front of the distortion shell.
@@ -234,11 +236,14 @@ public final class EchoGhostEffectSystem {
 
         boolean shaderApplied = false;
         try {
-            if (Shaders.RIPPLE_MASKED_BASIC != null
-                    && Shaders.RIPPLE_MASKED_BASIC.getProgram() != null) {
-                CoreShaderRenderer.bindShader$RippleMaskedBasic(
-                        texture, null, null,
-                        false, true, false, false, false, false);
+            if (Shaders.RIPPLE_MASKED_BASIC.getProgram() != null) {
+
+                //TODO: not enough time to do this rn, shouldn't fuck it up too much
+                //RippleMaskedBasicShader shader = Shaders.RIPPLE_MASKED_BASIC;
+                //shader.
+                //CoreShaderRenderer.bindShader$RippleMaskedBasic(
+                //        texture, null, null,
+                //        false, true, false, false, false, false);
                 shaderApplied = true;
             }
         } catch (RuntimeException ignored) {
@@ -315,19 +320,12 @@ public final class EchoGhostEffectSystem {
     }
 
     private static void bindDistortion(float rain, float opacity) {
-        CoreShaderRenderer.bindShader$GhostDistortion(
-                NOISE_TEXTURE, GRAB_TEXTURE, null, null,
-                false, true, false, false, false, false);
-        ShaderRenderer.setUniformF(Shaders.GHOST_DISTORTION.getProgram(), "u_RAIN", rain);
-        MinecraftClient client = MinecraftClient.getInstance();
-        ShaderRenderer.setUniformF(Shaders.GHOST_DISTORTION.getProgram(), "u_screenSize",
-                client.getFramebuffer().textureWidth, client.getFramebuffer().textureHeight);
-        ShaderRenderer.setUniformF(Shaders.GHOST_DISTORTION.getProgram(),
-                "u_spriteRect", 0.0f, 0.0f, 1.0f, 1.0f);
-        RenderSystem.setShaderTexture(3, NOISE_TEXTURE);
-        RenderSystem.setShaderTexture(7, GRAB_TEXTURE);
-        // Preserve full vertex alpha for the shader's displacement strength,
-        // but soften its blue-graded result when compositing over Minecraft.
+        GhostDistortionShader shader = Shaders.GHOST_DISTORTION;
+        shader.setSampler3_NoiseTex2(NOISE_TEXTURE);
+        shader.setSampler7_GrabTexture(GRAB_TEXTURE);
+        shader.setInternal_Rain(rain);
+        shader.setRipple_Both_Sides(true);
+        shader.apply();
         RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, opacity);
     }
 

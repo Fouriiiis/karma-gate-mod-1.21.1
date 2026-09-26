@@ -1,6 +1,7 @@
 package dev.fouriis.karmagate.item.tool;
 
 import net.brickcraftdream.librainworldmc.tool.api.SelectionToolDefinition;
+import net.brickcraftdream.librainworldmc.tool.api.type.BoxToolType;
 import net.brickcraftdream.librainworldmc.tool.area.AreaProperties;
 import net.brickcraftdream.librainworldmc.tool.area.BoxPrimitive;
 import net.brickcraftdream.librainworldmc.tool.area.ToolArea;
@@ -16,7 +17,7 @@ import static dev.fouriis.karmagate.KarmaGateMod.MOD_ID;
  * The first (and typically only) box in the area defines the two anchor endpoints:
  * anchor A = min corner of the box, anchor B = max corner of the box.
  */
-public class CoralNeuronDefinition implements SelectionToolDefinition {
+public class CoralNeuronDefinition extends BoxToolType {
 
     public static final CoralNeuronDefinition INSTANCE = new CoralNeuronDefinition();
 
@@ -41,7 +42,7 @@ public class CoralNeuronDefinition implements SelectionToolDefinition {
     }
 
     @Override
-    public AreaProperties createDefaultProperties() {
+    public AreaProperties createDefaultProperties(ToolArea area) {
         return new CoralNeuronProperties();
     }
 
@@ -54,7 +55,7 @@ public class CoralNeuronDefinition implements SelectionToolDefinition {
     public void onBoxAdded(ToolArea area, BoxPrimitive box) {
         List<BoxPrimitive> boxes = area.getBoxes();
         if (boxes.isEmpty()) return;
-        CoralNeuronProperties props = area.ensureProperties(CoralNeuronProperties.class);
+        CoralNeuronProperties props = area.getProperties(CoralNeuronProperties.class);
         BoxPrimitive first = boxes.get(0);
         props.anchorAx = first.getMinX() + 0.5;
         props.anchorAy = first.getMinY() + 0.5;

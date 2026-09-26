@@ -4,10 +4,11 @@ import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
 import dev.fouriis.karmagate.block.gravity.GravityDisruptorBlock;
 import dev.fouriis.karmagate.entity.gravity.GravityDisruptorBlockEntity;
-import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.ShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.Shaders;
+import net.brickcraftdream.librainworldmc.client.render.shader.shaders.GravityDisruptorShader;
+import net.brickcraftdream.librainworldmc.client.render.utils.RenderUtils;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
@@ -244,14 +245,14 @@ public final class GravityDisruptorRenderer
                 center.z + SPHERE_BOX_HALF_EXTENT);
         float rain = sourceTime / 40.0f;
 
-        RenderUtils.drawCameraFacingBillboardFitSphere(
-                () -> bindDistortion(rain),
-                center.x, center.y, center.z,
-                sphereBounds,
-                halfSize, halfSize,
-                0.0f,
-                1.0f, 1.0f, 1.0f, 1.0f, FULL_BRIGHT,
-                true, DISTORTION_PRIORITY);
+        RenderUtils.billboardOnBox(center.x, center.y, center.z, sphereBounds)
+                .shader(() -> bindDistortion(rain))
+                .fitSphere(halfSize, halfSize)
+                .rotation(0.0f)
+                .color(1.0f, 1.0f, 1.0f, 1.0f)
+                .light(FULL_BRIGHT)
+                .recaptureGrabtex(true)
+                .enqueue(DISTORTION_PRIORITY);
     }
 
     /**
@@ -273,13 +274,10 @@ public final class GravityDisruptorRenderer
 
     @SuppressWarnings("deprecation")
     private static void bindDistortion(float rain) {
-        CoreShaderRenderer.bindShader$GravityDisruptor(GRAB_TEXTURE, false);
-        ShaderRenderer.setUniformF(Shaders.GRAVITY_DISRUPTOR.getProgram(), "u_RAIN", rain);
-        MinecraftClient client = MinecraftClient.getInstance();
-        ShaderRenderer.setUniformF(Shaders.GRAVITY_DISRUPTOR.getProgram(), "u_screenSize",
-                client.getFramebuffer().textureWidth, client.getFramebuffer().textureHeight);
-        RenderSystem.setShaderTexture(7, GRAB_TEXTURE);
-        RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
+        GravityDisruptorShader shader = Shaders.GRAVITY_DISRUPTOR;
+        shader.setInternal_Rain(rain);
+        shader.setSampler7_GrabTexture(GRAB_TEXTURE);
+        shader.apply();
     }
 
     @Override

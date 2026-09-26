@@ -9,7 +9,7 @@ import dev.fouriis.karmagate.particle.ModParticles;
 import dev.fouriis.karmagate.sound.SteamAudioController;
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasElement;
-import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
+import net.brickcraftdream.librainworldmc.client.render.utils.RenderUtils;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.client.MinecraftClient;

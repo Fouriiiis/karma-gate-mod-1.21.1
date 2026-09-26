@@ -59,9 +59,9 @@ public class GraffitiConfigScreen extends Screen {
                                 })),
                                 List.of(), null),
                         (area, widget) -> {
-                            widget.setX(area.x());
-                            widget.setY(area.y() + 12);
-                            widget.setWidth(area.width());
+                            widget.setX(area.getX());
+                            widget.setY(area.getY() + 12);
+                            widget.setWidth(area.getWidth());
                         })
                 .autoMinSizeFromWidgets()
                 .end()
@@ -73,9 +73,9 @@ public class GraffitiConfigScreen extends Screen {
                                 WidgetOrientation.HORIZONTAL, List.of(),
                                 (w, val) -> setCornerOpacity(3, val)),
                         (area, widget) -> {
-                            widget.setX(area.x());
-                            widget.setY(area.y() + 12);
-                            widget.setWidth(area.width() / 2 - 2);
+                            widget.setX(area.getX());
+                            widget.setY(area.getY() + 12);
+                            widget.setWidth(area.getWidth() / 2 - 2);
                         })
                 .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
                                 Text.literal("Opacity – " + CORNER_LABELS[2]),
@@ -83,9 +83,9 @@ public class GraffitiConfigScreen extends Screen {
                                 WidgetOrientation.HORIZONTAL, List.of(),
                                 (w, val) -> setCornerOpacity(2, val)),
                         (area, widget) -> {
-                            widget.setX(area.x() + area.width() / 2 + 2);
-                            widget.setY(area.y() + 12);
-                            widget.setWidth(area.width() / 2 - 2);
+                            widget.setX(area.getX() + area.getWidth() / 2 + 2);
+                            widget.setY(area.getY() + 12);
+                            widget.setWidth(area.getWidth() / 2 - 2);
                         })
                 .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
                                 Text.literal("Opacity – " + CORNER_LABELS[0]),
@@ -93,9 +93,9 @@ public class GraffitiConfigScreen extends Screen {
                                 WidgetOrientation.HORIZONTAL, List.of(),
                                 (w, val) -> setCornerOpacity(0, val)),
                         (area, widget) -> {
-                            widget.setX(area.x());
-                            widget.setY(area.y() + 42 + 8);
-                            widget.setWidth(area.width() / 2 - 2);
+                            widget.setX(area.getX());
+                            widget.setY(area.getY() + 42 + 8);
+                            widget.setWidth(area.getWidth() / 2 - 2);
                         })
                 .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
                                 Text.literal("Opacity – " + CORNER_LABELS[1]),
@@ -103,9 +103,9 @@ public class GraffitiConfigScreen extends Screen {
                                 WidgetOrientation.HORIZONTAL, List.of(),
                                 (w, val) -> setCornerOpacity(1, val)),
                         (area, widget) -> {
-                            widget.setX(area.x() + area.width() / 2 + 2);
-                            widget.setY(area.y() + 42 + 8);
-                            widget.setWidth(area.width() / 2 - 2);
+                            widget.setX(area.getX() + area.getWidth() / 2 + 2);
+                            widget.setY(area.getY() + 42 + 8);
+                            widget.setWidth(area.getWidth() / 2 - 2);
                         })
                 .autoMinSizeFromWidgets()
                 .end()
@@ -117,9 +117,9 @@ public class GraffitiConfigScreen extends Screen {
                                 WidgetOrientation.HORIZONTAL, List.of(),
                                 (w, val) -> setCornerMelt(3, val)),
                         (area, widget) -> {
-                            widget.setX(area.x());
-                            widget.setY(area.y() + 12);
-                            widget.setWidth(area.width() / 2 - 2);
+                            widget.setX(area.getX());
+                            widget.setY(area.getY() + 12);
+                            widget.setWidth(area.getWidth() / 2 - 2);
                         })
                 .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
                                 Text.literal("Melt – " + CORNER_LABELS[2]),
@@ -127,9 +127,9 @@ public class GraffitiConfigScreen extends Screen {
                                 WidgetOrientation.HORIZONTAL, List.of(),
                                 (w, val) -> setCornerMelt(2, val)),
                         (area, widget) -> {
-                            widget.setX(area.x() + area.width() / 2 + 2);
-                            widget.setY(area.y() + 12);
-                            widget.setWidth(area.width() / 2 - 2);
+                            widget.setX(area.getX() + area.getWidth() / 2 + 2);
+                            widget.setY(area.getY() + 12);
+                            widget.setWidth(area.getWidth() / 2 - 2);
                         })
                 .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
                                 Text.literal("Melt – " + CORNER_LABELS[0]),
@@ -137,9 +137,9 @@ public class GraffitiConfigScreen extends Screen {
                                 WidgetOrientation.HORIZONTAL, List.of(),
                                 (w, val) -> setCornerMelt(0, val)),
                         (area, widget) -> {
-                            widget.setX(area.x());
-                            widget.setY(area.y() + 42 + 8);
-                            widget.setWidth(area.width() / 2 - 2);
+                            widget.setX(area.getX());
+                            widget.setY(area.getY() + 42 + 8);
+                            widget.setWidth(area.getWidth() / 2 - 2);
                         })
                 .addWidget(new LabeledProgressSliderWidget(0, 0, formWidth, 20,
                                 Text.literal("Melt – " + CORNER_LABELS[1]),
@@ -147,9 +147,9 @@ public class GraffitiConfigScreen extends Screen {
                                 WidgetOrientation.HORIZONTAL, List.of(),
                                 (w, val) -> setCornerMelt(1, val)),
                         (area, widget) -> {
-                            widget.setX(area.x() + area.width() / 2 + 2);
-                            widget.setY(area.y() + 42 + 8);
-                            widget.setWidth(area.width() / 2 - 2);
+                            widget.setX(area.getX() + area.getWidth() / 2 + 2);
+                            widget.setY(area.getY() + 42 + 8);
+                            widget.setWidth(area.getWidth() / 2 - 2);
                         })
                 .autoMinSizeFromWidgets()
                 .end()
@@ -160,9 +160,9 @@ public class GraffitiConfigScreen extends Screen {
                                 btn -> { sendUpdate(); this.close(); },
                                 List.of(), null),
                         (area, widget) -> {
-                            widget.setX(area.x());
-                            widget.setY(area.y());
-                            widget.setWidth(area.width() / 3 - 3);
+                            widget.setX(area.getX());
+                            widget.setY(area.getY());
+                            widget.setWidth(area.getWidth() / 3 - 3);
                         })
                 .addWidget(new LabeledConfirmButtonWidget(0, 0, formWidth, 20,
                                 Text.empty(),
@@ -176,18 +176,18 @@ public class GraffitiConfigScreen extends Screen {
                                 List.of(),
                                 null),
                         (area, widget) -> {
-                            widget.setX(area.x() + area.width() / 3 + 1);
-                            widget.setY(area.y());
-                            widget.setWidth(area.width() / 3 - 3);
+                            widget.setX(area.getX() + area.getWidth() / 3 + 1);
+                            widget.setY(area.getY());
+                            widget.setWidth(area.getWidth() / 3 - 3);
                         })
                 .addWidget(new LabeledButtonWidget(0, 0, formWidth, 20,
                                 Text.empty(), Text.literal("Cancel"),
                                 btn -> { restoreInitial(); this.close(); },
                                 List.of(), null),
                         (area, widget) -> {
-                            widget.setX(area.x() + 2 * area.width() / 3 + 3);
-                            widget.setY(area.y());
-                            widget.setWidth(area.width() / 3 - 3);
+                            widget.setX(area.getX() + 2 * area.getWidth() / 3 + 3);
+                            widget.setY(area.getY());
+                            widget.setWidth(area.getWidth() / 3 - 3);
                         })
                 .autoMinSizeFromWidgets()
                 .end()

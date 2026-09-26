@@ -1,14 +1,16 @@
 package dev.fouriis.karmagate.item.tool;
 
 import net.brickcraftdream.librainworldmc.tool.api.SelectionToolDefinition;
+import net.brickcraftdream.librainworldmc.tool.api.type.BoxToolType;
 import net.brickcraftdream.librainworldmc.tool.area.AreaProperties;
+import net.brickcraftdream.librainworldmc.tool.area.ToolArea;
 import net.minecraft.text.Text;
 
 import java.util.List;
 
 import static dev.fouriis.karmagate.KarmaGateMod.MOD_ID;
 
-public class ProjectionZoneDefinition implements SelectionToolDefinition {
+public class ProjectionZoneDefinition extends BoxToolType {
 
     public static final ProjectionZoneDefinition INSTANCE = new ProjectionZoneDefinition();
 
@@ -33,7 +35,7 @@ public class ProjectionZoneDefinition implements SelectionToolDefinition {
     }
 
     @Override
-    public AreaProperties createDefaultProperties() {
+    public AreaProperties createDefaultProperties(ToolArea area) {
         return new ProjectionZoneProperties();
     }
 

@@ -4,7 +4,7 @@ import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
 import dev.fouriis.karmagate.block.karmagate.BatteryMeterBlock;
 import dev.fouriis.karmagate.entity.karmagate.BatteryMeterBlockEntity;
-import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
+import net.brickcraftdream.librainworldmc.client.render.utils.RenderUtils;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;

@@ -48,7 +48,7 @@ public class ProjectionZoneScreen extends Screen {
     protected void init() {
         super.init();
 
-        ProjectionZoneProperties props = area.ensureProperties(ProjectionZoneProperties.class);
+        ProjectionZoneProperties props = area.getProperties(ProjectionZoneProperties.class);
 
         int formWidth = Math.min(360, this.width - 40);
         int formHeight = this.height - 60;

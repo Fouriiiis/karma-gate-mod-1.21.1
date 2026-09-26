@@ -3,7 +3,7 @@ package dev.fouriis.karmagate.client;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.systems.VertexSorter;
 import dev.fouriis.karmagate.mixin.client.GameRendererAccessor;
-import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
+import net.brickcraftdream.librainworldmc.client.render.utils.RenderUtils;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.GlUniform;
 import net.minecraft.client.gl.ShaderProgram;

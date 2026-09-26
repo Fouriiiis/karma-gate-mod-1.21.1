@@ -3,7 +3,7 @@ package dev.fouriis.karmagate.client.rot;
 import com.mojang.blaze3d.systems.RenderSystem;
 import dev.fouriis.karmagate.block.ModBlocks;
 import dev.fouriis.karmagate.entity.rot.RotBlockEntity;
-import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
+import net.brickcraftdream.librainworldmc.client.render.utils.RenderUtils;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
 import net.minecraft.block.BlockRenderType;
 import net.minecraft.block.BlockState;

@@ -5,10 +5,11 @@ import dev.fouriis.karmagate.block.karmagate.HeatCoilBlock;
 import dev.fouriis.karmagate.entity.karmagate.HeatCoilBlockEntity;
 import net.brickcraftdream.librainworldmc.client.LibrainworldmcClient;
 import net.brickcraftdream.librainworldmc.client.atlas.FAtlasSpriteModel;
-import net.brickcraftdream.librainworldmc.client.render.RenderUtils;
 import net.brickcraftdream.librainworldmc.client.render.shader.CoreShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.ShaderRenderer;
 import net.brickcraftdream.librainworldmc.client.render.shader.Shaders;
+import net.brickcraftdream.librainworldmc.client.render.shader.shaders.HeatDistortionShader;
+import net.brickcraftdream.librainworldmc.client.render.utils.RenderUtils;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
@@ -159,22 +160,20 @@ public final class HeatCoilRenderer implements BlockEntityRenderer<HeatCoilBlock
         double centerY = heater.getPos().getY() + 0.5 + 2.0f * factor;
         double centerZ = heater.getPos().getZ() + 0.5;
 
-        RenderUtils.drawCameraFacingBillboardOffset(() -> {
-                    CoreShaderRenderer.bindShader$HeatDistortion(NOISE_TEXTURE, GRAB_TEXTURE, false);
-                    if (Shaders.HEAT_DISTORTION != null && Shaders.HEAT_DISTORTION.getProgram() != null) {
-                        ShaderRenderer.setUniformF(Shaders.HEAT_DISTORTION.getProgram(), "u_RAIN", rain);
-                    }
-                    RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
-                },
-                centerX, centerY, centerZ,
-                halfWidth, halfHeight,
-                // C# centers the distortion at heaterPositions[k] + (0, 40*f).
-                // A camera-relative push introduces parallax and moves it off
-                // the heater whenever the block is away from screen center.
-                0.0f,
-                0.0f, 0.0f, 0.0f,
-                1.0f, 1.0f, 1.0f, alpha, FULL_BRIGHT,
-                true, HEAT_DISTORTION_PRIORITY);
+        RenderUtils.billboard(centerX, centerY, centerZ)
+                .shader(() -> {
+                    HeatDistortionShader shader = Shaders.HEAT_DISTORTION;
+                    shader.setSampler2_NoiseTex(NOISE_TEXTURE);
+                    shader.setSampler7_GrabTexture(GRAB_TEXTURE);
+                    shader.apply();
+                })
+                .size(halfWidth, halfHeight)
+                .rotation(0.0f)
+                .offset(0.0f, 0.0f, 0.0f)
+                .color(1.0f, 1.0f, 1.0f, alpha)
+                .light(FULL_BRIGHT)
+                .recaptureGrabtex(true)
+                .enqueue(HEAT_DISTORTION_PRIORITY);
     }
 
     private static FAtlasSpriteModel getHeaterModel() {

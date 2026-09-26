@@ -1,8 +1,6 @@
 package dev.fouriis.karmagate.entity.garbworm.client;
 
 import dev.fouriis.karmagate.entity.garbworm.GarbageWormEntity;
-import net.brickcraftdream.librainworldmc.client.api.RwSoundApi;
-import net.brickcraftdream.librainworldmc.client.api.RwSoundsApi;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.sound.SoundManager;
 import net.minecraft.sound.SoundEvent;
@@ -14,33 +12,21 @@ import java.util.UUID;
 
 public final class GarbageWormSoundController {
 
-    private static final String SND_SWALLOW_LOOP = "wormRustle";
-    private static final String SND_UPSET_LOOP = "wormHum4";
-    private static final String SND_CURIOUS_LOOP = "wormHum3";
-
-    private static final RwSoundApi RW_SOUNDS = RwSoundsApi.get();
+    private static final String SND_SWALLOW_LOOP = "Garbage_Worm_Swallowing_LOOP";
+    private static final String SND_UPSET_LOOP = "Garbage_Worm_Upset_LOOP";
+    private static final String SND_CURIOUS_LOOP = "Garbage_Worm_Curious_LOOP";
 
     private static final Map<UUID, GarbageWormLoopSoundInstance> ACTIVE = new HashMap<>();
 
     private GarbageWormSoundController() {
     }
 
-    private static SoundEvent resolveRwSound(String id) {
-        if (id == null || id.isEmpty()) {
-            return null;
-        }
-        try {
-            return RW_SOUNDS.getEvent(id);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
     private static SoundEvent selectLoopEvent(GarbageWormEntity worm) {
         if (worm.getAttackCtr() > 40 && worm.getAttackCtr() < 190) {
-            return resolveRwSound(SND_SWALLOW_LOOP);
+            //return resolveRwSound(SND_SWALLOW_LOOP);
         }
-        return resolveRwSound(worm.isShowAngry() ? SND_UPSET_LOOP : SND_CURIOUS_LOOP);
+        //return resolveRwSound(worm.isShowAngry() ? SND_UPSET_LOOP : SND_CURIOUS_LOOP);
+        return null; //TODO: use RwSoundRequest
     }
 
     public static void tickFor(GarbageWormEntity worm) {
